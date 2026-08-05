@@ -109,6 +109,40 @@ def _warmup() -> None:
         raise SystemExit(1)
 
 
+def _check_ngrok_url_is_current() -> None:
+    """Abort if SERVER_PUBLIC_URL doesn't match the running ngrok tunnel.
+
+    ngrok hands out a new URL on every restart. A stale SERVER_PUBLIC_URL still
+    passes every other check — the call places fine, then Twilio fetches the
+    answer URL from a dead host and plays "we could not reach" to the callee.
+    Nothing in the local logs shows a problem, because nothing ever arrives.
+    Catch it here rather than burning a call to discover it.
+    """
+    import json as _json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=3) as r:
+            tunnels = _json.load(r).get("tunnels") or []
+    except Exception:
+        return  # ngrok not running locally, or a different tunnel tool — not our call
+
+    live = [t.get("public_url") for t in tunnels
+            if str(t.get("public_url", "")).startswith("https://")]
+    if not live:
+        return
+
+    configured = settings.server_public_url.rstrip("/")
+    if configured in [u.rstrip("/") for u in live]:
+        return
+
+    print("\n  *** SERVER_PUBLIC_URL is stale — call aborted ***")
+    print(f"  .env points at : {configured}")
+    print(f"  ngrok is now at: {live[0]}")
+    print("\n  Fix:  python update_ngrok_url.py\n")
+    raise SystemExit(1)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--doctor",   required=True,  help="Doctor name")
@@ -124,6 +158,7 @@ def main() -> None:
     print(f"  To       : {args.to}")
     print(f"  Server   : {settings.server_public_url}\n")
 
+    _check_ngrok_url_is_current()
     _warmup()
 
     print("  Starting server and placing call...\n")
