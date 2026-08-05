@@ -98,6 +98,12 @@ async def main() -> int:
     check(settings.use_realtime, "USE_REALTIME is true",
           "set USE_REALTIME=true or this runs the classic pipeline")
     check(bool(settings.openai_api_key), "OPENAI_API_KEY present")
+    # marin/cedar exist only on gpt-realtime-2 and will be rejected elsewhere.
+    if settings.realtime_voice in ("marin", "cedar"):
+        check(settings.realtime_model == "gpt-realtime-2",
+              f"voice {settings.realtime_voice!r} requires gpt-realtime-2",
+              f"REALTIME_MODEL={settings.realtime_model} — use a legacy voice "
+              f"(shimmer, alloy, sage...) or switch the model")
     from agents.voice.templates import is_usable_callback_number
     check(is_usable_callback_number(settings.callback_number),
           "CALLBACK_NUMBER is a number someone could actually call",

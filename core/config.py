@@ -127,8 +127,17 @@ class Settings(BaseSettings):
     price_telephony_per_min: float = 0.0165
 
     # Agent's spoken voice — OpenAI Realtime API (USE_REALTIME=true)
-    # Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
-    realtime_voice: str = "shimmer"
+    #
+    # marin  — brighter female, professional register   } gpt-realtime-2 ONLY.
+    # cedar  — warm mid-range male, professional        } OpenAI recommends
+    #                                                     these for best quality
+    # Legacy catalog (works on any Realtime model, consumer-casual register):
+    #   alloy, ash, ballad, coral, echo, sage, shimmer, verse
+    #
+    # marin/cedar are trained for this model and handle natural pauses and
+    # fillers far better than the legacy voices. They will FAIL on older
+    # Realtime models — check_realtime.py flags the mismatch.
+    realtime_voice: str = "marin"
 
     # Language Sarah speaks during the call
     # Options: english | hindi | telugu
