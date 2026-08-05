@@ -500,12 +500,22 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                             "language": "en",
                             "prompt":   template.transcribe_hint,
                         },
+                        # Measured on the first live call: agent response
+                        # latency was 2.45s / 3.80s / 4.05s against a human
+                        # baseline of 0.2-0.5s. silence_duration_ms is a direct
+                        # additive component — the model cannot begin until VAD
+                        # has waited this long after the caller stops.
                         "turn_detection": {
                             "type":                "server_vad",
                             "threshold":            0.55,
                             "prefix_padding_ms":    300,
-                            "silence_duration_ms":  520,
+                            "silence_duration_ms":  360,
                         },
+                        # A phone handset is a near-field mic. This lets the
+                        # model separate the caller from line noise and echo,
+                        # which is what the aggressive local echo gate below
+                        # was compensating for.
+                        "noise_reduction": {"type": "near_field"},
                     },
                     "output": {"voice": settings.realtime_voice},
                 },
@@ -931,7 +941,15 @@ async def _oai_to_twilio(
                 # (fast), but the audio is still playing on the handset.  Using a fixed 0.5s
                 # caused the agent to hear its own echo and generate a duplicate response.
                 # Formula: playback_duration + 0.65s echo margin (min 0.5s for very short clips).
-                _echo_cooldown = max(0.5, _samples_this_response / _OAI_SR + 0.65)
+                # Caller audio is DROPPED for this whole window, so every extra
+                # margin second is a second of the caller's reply thrown away.
+                # The first live call showed the cost: a reply that began soon
+                # after the agent stopped was clipped and transcribed as
+                # nonsense. Twilio only sends us the inbound track, so the
+                # agent's own audio is not looped back — the only echo is from
+                # the line, which near_field noise reduction now handles.
+                # Margin cut from 0.65s to 0.25s accordingly.
+                _echo_cooldown = max(0.3, _samples_this_response / _OAI_SR + 0.25)
                 _samples_this_response = 0
                 async def _end_speaking_gate(s=sess, delay=_echo_cooldown):
                     await asyncio.sleep(delay)
