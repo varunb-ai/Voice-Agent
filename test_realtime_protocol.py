@@ -246,6 +246,20 @@ async def main():
     check("this call is recorded" in ctx, "greeting discloses recording")
     check(any(i["item"].get("type") == "function_call_output" for i in items),
           "tool result returned to the model")
+
+    # A truthful script must never recite an unreachable callback number.
+    from agents.voice.templates import is_usable_callback_number
+    if not is_usable_callback_number(settings.callback_number):
+        check(settings.callback_number not in ctx,
+              "unusable CALLBACK_NUMBER withheld from the call context")
+        check("NONE AVAILABLE" in ctx,
+              "agent told explicitly that no callback number exists")
+    check("NEVER invent, guess, or approximate a phone number" in tpl.instructions,
+          "instructions forbid inventing a phone number")
+    check("repeat it plainly and in full" in tpl.instructions,
+          "mid-call identity re-ask is handled")
+    check("identity and contact facts are exempt" in tpl.instructions,
+          "identity facts exempt from the no-repetition rule")
     check(sess.memory.get("branch") == "Northgate Campus", "branch saved to memory")
     check(bool(sess.memory.get("resolved")), "call marked resolved")
 

@@ -98,9 +98,11 @@ async def main() -> int:
     check(settings.use_realtime, "USE_REALTIME is true",
           "set USE_REALTIME=true or this runs the classic pipeline")
     check(bool(settings.openai_api_key), "OPENAI_API_KEY present")
-    check("555-01" not in settings.callback_number,
-          "CALLBACK_NUMBER is a real number",
-          f"{settings.callback_number} is in the reserved fictional range and is read aloud on voicemail")
+    from agents.voice.templates import is_usable_callback_number
+    check(is_usable_callback_number(settings.callback_number),
+          "CALLBACK_NUMBER is a number someone could actually call",
+          f"{settings.callback_number!r} is unusable — the agent will tell callers "
+          f"it has no phone line and give the email instead")
     check(not settings.server_public_url.startswith("https://your-"),
           "SERVER_PUBLIC_URL is set to a real tunnel")
 

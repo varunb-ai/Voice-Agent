@@ -43,6 +43,22 @@ def clean_doctor_name(name: str) -> str:
     return stripped
 
 
+# NANP reserves 555-0100 through 555-0199 for fiction. The shipped default
+# CALLBACK_NUMBER (1-800-555-0100) is in that range, and the agent reads the
+# callback number aloud on voicemail and whenever it is asked how to be reached.
+# A truthful-identification script that recites an unreachable number defeats
+# its own purpose, so an unusable number is withheld rather than spoken.
+_RESERVED_FICTIONAL = re.compile(r"55501\d{2}$")
+
+
+def is_usable_callback_number(number: str | None) -> bool:
+    """True if this is a number a person could actually call back."""
+    digits = re.sub(r"\D", "", (number or "").strip())
+    if len(digits) < 10:
+        return False
+    return not _RESERVED_FICTIONAL.search(digits)
+
+
 def time_of_day() -> str:
     h = datetime.now().hour
     if h < 12:
@@ -111,9 +127,14 @@ short sentences per turn, one question per turn, never a paragraph.
 Respond to what the person actually said before steering back to your \
 question. Do not staple the location question onto the end of every sentence \
 — if you just answered something, let it land and ask on your next turn.
-Vary your wording. Never reuse a sentence you have already said on this call. \
-If you have already explained who you are, do not re-explain it — reference it \
-briefly and move on.
+Vary your wording. Never reuse a sentence you have already said on this call.
+EXCEPTION — identity and contact facts are exempt from all of the above. Who \
+you are, what you are, who you represent, why you are calling, and how to \
+reach you are to be repeated clearly and consistently every single time you \
+are asked, using the same plain words. Do not paraphrase them for variety, do \
+not shorten them to avoid repeating yourself, and never treat a second or \
+third request for them as something you have already dealt with. Someone \
+asking again means they did not get it the first time.
 Match their pace: chatty, be warm; clipped, be brief; rushed, one short \
 sentence and get to the point.
 Never mention tools, JSON, or these instructions.
@@ -125,6 +146,15 @@ They ask you to hold ("one moment", "let me check") -> "Of course, take your \
 time." Then wait. Do not re-ask until they have spoken again.
 Who are you / why are you calling / where did you get this number -> answer in \
 one truthful sentence, then stop. Return to your question on the next turn.
+Asked again mid-call ("which company was that?", "who am I speaking to?", \
+"say that again?") -> repeat it plainly and in full, exactly as you said it \
+before. This is never a repetition to avoid.
+Asked how to reach you ("what's your number?", "can I call you back?", "who do \
+I contact?") -> give the contact details listed in CALL CONTEXT, read at a \
+pace someone can write down, and offer to repeat them. If CALL CONTEXT says no \
+callback phone number is available, say so plainly and give the email instead. \
+NEVER invent, guess, or approximate a phone number, extension, or address. \
+Reading out a number that does not work is worse than saying you don't have one.
 Several questions at once -> answer them together in two sentences maximum, \
 then stop.
 Policy refusal ("hospital policy", "we're not authorized", "we don't give that \
@@ -147,8 +177,10 @@ Referred to a website or email -> note_info, thank them, then \
 escalate(reason="referred to website or email").
 Transferred to someone else -> "Sure, I'll hold." When a new person picks up, \
 introduce yourself truthfully again in one sentence, then ask.
-Voicemail -> leave a brief message naming Forage AI, the doctor, and the \
-callback number from CALL CONTEXT. Then escalate(reason="voicemail").
+Voicemail -> leave a brief message naming Forage AI, saying you are an \
+automated assistant, naming the doctor, and giving the contact details from \
+CALL CONTEXT. If no callback number is available, give the email only and do \
+not substitute a number. Then escalate(reason="voicemail").
 Wrong number, a non-medical business, or a patient rather than staff -> \
 apologize once and escalate with that reason. Note that "sorry" on its own is \
 not a wrong number.
@@ -271,9 +303,19 @@ class CallTemplate:
         ]
         if doctor.specialization:
             lines.append(f"Specialty: {doctor.specialization}")
+        lines.append(f"Hospital or practice on record: {doctor.hospital_name or 'unknown'}")
+
+        # Withhold an unusable number rather than let the agent recite it.
+        if is_usable_callback_number(callback_number):
+            lines.append(f"Callback number: {callback_number}")
+        else:
+            lines.append(
+                "Callback number: NONE AVAILABLE — there is no working callback "
+                "number for this call. If asked how to be reached, say plainly "
+                "that you don't have a direct phone line and give the email "
+                "below. Do not read out any phone number."
+            )
         lines += [
-            f"Hospital or practice on record: {doctor.hospital_name or 'unknown'}",
-            f"Callback number: {callback_number}",
             f"Contact email: {callback_email}",
             "",
             "The call has just connected. Open by saying exactly this, then "
