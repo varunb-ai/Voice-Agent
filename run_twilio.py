@@ -23,23 +23,35 @@ import agents.voice.twilio_worker as worker
 
 def _place_call(to_number: str, doctor: Doctor) -> None:
     from twilio.rest import Client
+    from twilio.base.exceptions import TwilioRestException
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
     worker.pending_doctor = doctor
 
-    webhook_url = settings.server_public_url + "/webhook"
     answer_url = settings.server_public_url + "/answer"
     status_url = settings.server_public_url + "/status"
-    call = client.calls.create(
-        to=to_number,
-        from_=settings.twilio_from_number,
-        url=answer_url,
+
+    # Trial accounts reject status_callback* with "trial accounts have limited
+    # parameter access". Dropping them is safe on the realtime path: the call is
+    # saved in handle_realtime's finally block, not from the /status webhook.
+    # Only the classic pipeline relies on /status, and that isn't in use here.
+    minimal = dict(to=to_number, from_=settings.twilio_from_number, url=answer_url)
+    full = dict(
+        minimal,
         method="POST",
         status_callback=status_url,
         status_callback_method="POST",
         status_callback_event=["completed"],
-        # Recording is started in /answer (when hospital picks up) — not here,
-        # so we don't capture the ringing gap before the call connects.
+        # Recording is started when the stream opens — not here — so we don't
+        # capture the ringing gap before the call connects.
     )
+
+    try:
+        call = client.calls.create(**full)
+    except TwilioRestException as e:
+        if "disallowed parameter" not in (e.msg or "").lower():
+            raise
+        print("  Note     : trial account — retrying without status callbacks")
+        call = client.calls.create(**minimal)
     print(f"\n  Call SID : {call.sid}")
     print(f"  Calling  : {to_number}")
     print(f"  From     : {settings.twilio_from_number}")

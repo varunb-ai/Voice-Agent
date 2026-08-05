@@ -535,9 +535,13 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                 # Start Twilio recording NOW — audio stream just opened, agent is about to speak.
                 # Starting here (not in /answer) skips the ringing/setup gap entirely.
                 async def _start_twilio_recording(csid=call_sid):
+                    from twilio.rest import Client as TwilioClient
+                    tw = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
+
+                    # Trial accounts reject the richer recording parameters.
+                    # Fall back to a bare recording rather than losing it: the
+                    # audio is the point, dual-channel and the callback are not.
                     try:
-                        from twilio.rest import Client as TwilioClient
-                        tw = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
                         rec = await asyncio.to_thread(
                             lambda: tw.calls(csid).recordings.create(
                                 recording_channels="dual",
@@ -546,9 +550,21 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                                 recording_status_callback_method="POST",
                             )
                         )
-                        print(f"[Recording] Started: {rec.sid}", flush=True)
+                        print(f"[Recording] Started (dual channel): {rec.sid}", flush=True)
+                        return
                     except Exception as e:
-                        print(f"[Recording] Could not start: {e}", flush=True)
+                        print(f"[Recording] Full options rejected ({e}) — "
+                              f"retrying bare", flush=True)
+                    try:
+                        rec = await asyncio.to_thread(
+                            lambda: tw.calls(csid).recordings.create()
+                        )
+                        print(f"[Recording] Started (mono, no callback): {rec.sid}. "
+                              f"Fetch it from the Twilio console, or rely on the "
+                              f"local mix written at the end of the call.", flush=True)
+                    except Exception as e:
+                        print(f"[Recording] Could not start: {e}. The local WAV "
+                              f"mix will still be written.", flush=True)
                 asyncio.create_task(_start_twilio_recording())
                 break
 
