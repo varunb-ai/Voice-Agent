@@ -320,6 +320,13 @@ async def main():
           "brevity rules explicitly subordinated to conversation")
     check("Wrong: \"Which office is she at?\"" in tpl.instructions,
           "bare-question turn shown as a counter-example")
+
+    # A caller who said only "Bye." was told "Thanks for checking" — thanked
+    # for help never given, as the last thing they heard.
+    check("THANK THEM FOR WHAT THEY ACTUALLY DID" in tpl.instructions,
+          "closing is tied to the actual outcome")
+    check("Never claim to have noted, saved, or recorded a location you were" in flat,
+          "cannot claim to have saved a location it never got")
     check(sess.memory.get("branch") == "Northgate Campus", "branch saved to memory")
     check(bool(sess.memory.get("resolved")), "call marked resolved")
 
