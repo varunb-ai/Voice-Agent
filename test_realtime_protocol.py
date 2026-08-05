@@ -304,6 +304,19 @@ async def main():
           "mid-call identity re-ask is handled")
     check("identity and contact facts are exempt" in tpl.instructions,
           "identity facts exempt from the no-repetition rule")
+
+    # The brevity rules once combined to make 5 of 6 agent turns bare
+    # questions, including answering a caller's direct question with another
+    # question. Guard the counterweight so tightening brevity again cannot
+    # silently reintroduce it.
+    check("answer it before you ask anything of your own" in tpl.instructions,
+          "caller questions get answered before the agent asks its own")
+    check("NEVER reply to a question with only a question" in tpl.instructions,
+          "never answers a question with only a question")
+    check("NOT a licence to strip a turn down to a bare question" in tpl.instructions,
+          "brevity rules explicitly subordinated to conversation")
+    check("Wrong: \"Which office is she at?\"" in tpl.instructions,
+          "bare-question turn shown as a counter-example")
     check(sess.memory.get("branch") == "Northgate Campus", "branch saved to memory")
     check(bool(sess.memory.get("resolved")), "call marked resolved")
 
