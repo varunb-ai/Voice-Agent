@@ -313,7 +313,10 @@ async def main():
           "caller questions get answered before the agent asks its own")
     check("NEVER reply to a question with only a question" in tpl.instructions,
           "never answers a question with only a question")
-    check("NOT a licence to strip a turn down to a bare question" in tpl.instructions,
+    # Normalise whitespace — the instructions are hard-wrapped, so asserting on
+    # a phrase that spans a line break must not depend on where it wraps.
+    flat = " ".join(tpl.instructions.split())
+    check("NOT a licence to strip a turn down to a bare question" in flat,
           "brevity rules explicitly subordinated to conversation")
     check("Wrong: \"Which office is she at?\"" in tpl.instructions,
           "bare-question turn shown as a counter-example")
