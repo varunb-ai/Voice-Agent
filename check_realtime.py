@@ -199,13 +199,23 @@ async def main() -> int:
             check(True, "credentials valid", f"{acct.friendly_name}")
 
             is_trial = (acct.type or "").lower() == "trial"
-            if is_trial:
-                print(f"{_WARN} TRIAL account — Twilio plays a "
-                      f"'you have a trial account' message to the callee before "
-                      f"your greeting, and calls are limited to your sign-up "
-                      f"country. Upgrading removes both.")
+            if is_trial and settings.use_realtime:
+                # Hard blocker, not a nuisance. The realtime bridge is built on
+                # <Connect><Stream> (Media Streams), which trial accounts do not
+                # support — Twilio error 10002. The call places, /answer returns
+                # 200, and then Twilio ends the call after ~3s without ever
+                # opening the WebSocket, which looks like a bug in our code.
+                check(False, "account supports Media Streams (<Connect><Stream>)",
+                      "TRIAL account — Media Streams is a paid feature. The call "
+                      "will connect, play the trial message, then end after ~3s "
+                      "with no audio stream. Upgrade the account: "
+                      "console.twilio.com -> Billing -> Upgrade")
+            elif is_trial:
+                print(f"{_WARN} TRIAL account — trial message plays to the callee, "
+                      f"calls limited to your sign-up country.")
             else:
-                print(f"{_PASS} full account (no trial message on calls)")
+                print(f"{_PASS} full account — Media Streams available, "
+                      f"no trial message")
 
             # Does the configured from-number belong to this account?
             #
