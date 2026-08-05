@@ -159,8 +159,61 @@ async def main() -> int:
     except ImportError:
         print("      (pip install tiktoken for a token count)")
 
-    # ── 3. Live connection ───────────────────────────────────────────────
-    print("\n3. Realtime connection (no response.create — nothing generated)")
+    # ── 3. Twilio account ────────────────────────────────────────────────
+    # All read-only REST calls. Catches the setup mistakes that otherwise show
+    # up as a call that silently fails to connect.
+    print("\n3. Twilio account (read-only, no call placed)")
+    if not (settings.twilio_account_sid and settings.twilio_auth_token):
+        check(False, "Twilio credentials present")
+    else:
+        try:
+            from twilio.rest import Client
+            from twilio.base.exceptions import TwilioRestException
+
+            client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+            acct = await asyncio.to_thread(
+                lambda: client.api.accounts(settings.twilio_account_sid).fetch()
+            )
+            check(True, "credentials valid", f"{acct.friendly_name}")
+
+            is_trial = (acct.type or "").lower() == "trial"
+            if is_trial:
+                print(f"{_WARN} TRIAL account — Twilio plays a "
+                      f"'you have a trial account' message to the callee before "
+                      f"your greeting, and calls are limited to your sign-up "
+                      f"country. Upgrading removes both.")
+            else:
+                print(f"{_PASS} full account (no trial message on calls)")
+
+            # Does the configured from-number actually belong to this account?
+            numbers = await asyncio.to_thread(
+                lambda: client.incoming_phone_numbers.list(limit=20)
+            )
+            owned = [n.phone_number for n in numbers]
+            check(settings.twilio_from_number in owned,
+                  f"TWILIO_FROM_NUMBER {settings.twilio_from_number} is on this account",
+                  f"account owns: {owned or 'no numbers — buy one first'}")
+
+            # Trial accounts can only call verified numbers.
+            verified = await asyncio.to_thread(
+                lambda: client.outgoing_caller_ids.list(limit=50)
+            )
+            v_numbers = [v.phone_number for v in verified]
+            if is_trial:
+                check(bool(v_numbers),
+                      "verified caller IDs exist (required on trial)",
+                      "add the numbers you intend to call")
+            print(f"      verified to call: {v_numbers or '(none)'}")
+
+        except TwilioRestException as e:
+            check(False, "Twilio credentials valid", f"HTTP {e.status}: {e.msg}")
+        except ImportError:
+            check(False, "twilio package installed")
+        except Exception as e:
+            check(False, "Twilio check", f"{type(e).__name__}: {e}")
+
+    # ── 4. Live connection ───────────────────────────────────────────────
+    print("\n4. Realtime connection (no response.create — nothing generated)")
     if not settings.openai_api_key:
         check(False, "cannot test connection", "no API key")
         return 1
