@@ -1,0 +1,51 @@
+{
+  "call_id": "call-20260805-1739-f0a1",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": "London Branch",
+  "resolved": true,
+  "duration_seconds": 46,
+  "cost_usd": 0.093576,
+  "template": "forage_data_collection",
+  "model": "gpt-realtime-2",
+  "usage": {
+    "responses": 4,
+    "input_audio": 803,
+    "input_audio_cached": 320,
+    "output_audio": 442,
+    "input_text": 12812,
+    "input_text_cached": 6336,
+    "output_text": 359,
+    "cache_hit_rate": 0.4889
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, good evening! I'm an automated assistant from Forage AI \u2014 we keep doctor listings up to date, and this call's recorded. Have I reached Northside Medical Group?",
+      "timestamp": "17:39:19"
+    },
+    {
+      "role": "caller",
+      "text": "Thank you. Go for it.",
+      "timestamp": "17:39:29"
+    },
+    {
+      "role": "agent",
+      "text": "Okay, let me think this through for a second. Got it, where does Dr. Okafor see patients right now, meaning which office or site?",
+      "timestamp": "17:39:34"
+    },
+    {
+      "role": "caller",
+      "text": "Actually, he's working in the London branch.",
+      "timestamp": "17:39:47"
+    },
+    {
+      "role": "agent",
+      "text": "Thanks, I'll note the London Branch, appreciate your help and have a good evening.",
+      "timestamp": "17:39:49"
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: London Branch.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1739-f0a1.wav",
+  "recorded_at": "2026-08-05T17:39:10.276896"
+}

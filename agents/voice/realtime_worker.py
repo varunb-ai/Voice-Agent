@@ -731,6 +731,9 @@ async def _oai_to_twilio(
     _samples_this_response = 0       # PCM16 samples sent this response — used for dynamic echo cooldown
     _current_response_pcm: list[bytes] = []    # accumulate all deltas for one response
     _current_response_start: Optional[float] = None  # stream-relative time of first delta
+    # monotonic clock when this response's first audio chunk went to Twilio;
+    # playback ends at this + audio duration, which is what the echo gate needs
+    _first_delta_sent_at: Optional[float] = None
 
     try:
         async for raw in oai_ws:
@@ -786,6 +789,8 @@ async def _oai_to_twilio(
                     try:
                         raw_pcm = base64.b64decode(delta)
                         _samples_this_response += len(raw_pcm) // 2  # int16 = 2 bytes/sample
+                        if _first_delta_sent_at is None:
+                            _first_delta_sent_at = time.monotonic()
                         # Buffer for recording: stamp only the first delta of this response.
                         # All deltas arrive fast (~0.2s for a 2s response) so we must NOT
                         # timestamp each chunk individually — they'd all pile up at the same
@@ -941,15 +946,27 @@ async def _oai_to_twilio(
                 # (fast), but the audio is still playing on the handset.  Using a fixed 0.5s
                 # caused the agent to hear its own echo and generate a duplicate response.
                 # Formula: playback_duration + 0.65s echo margin (min 0.5s for very short clips).
-                # Caller audio is DROPPED for this whole window, so every extra
-                # margin second is a second of the caller's reply thrown away.
-                # The first live call showed the cost: a reply that began soon
-                # after the agent stopped was clipped and transcribed as
-                # nonsense. Twilio only sends us the inbound track, so the
-                # agent's own audio is not looped back — the only echo is from
-                # the line, which near_field noise reduction now handles.
-                # Margin cut from 0.65s to 0.25s accordingly.
-                _echo_cooldown = max(0.3, _samples_this_response / _OAI_SR + 0.25)
+                # Wait until the audio has finished PLAYING on the handset,
+                # then a small margin — and no longer, because caller audio is
+                # dropped for this whole window.
+                #
+                # The old formula measured the wait from response.done, which
+                # fires when the SERVER finishes generating. Generation runs
+                # faster than realtime, so response.done lands well before
+                # playback ends, and adding the full clip duration on top of it
+                # over-waited by roughly the generation time — about 2s of
+                # deafness added to every single turn, directly inflating the
+                # measured 2.5-4s response latency.
+                #
+                # Playback ends at (first chunk sent) + (audio duration), since
+                # Twilio plays what we send at realtime speed.
+                _audio_seconds = _samples_this_response / _OAI_SR
+                if _first_delta_sent_at is not None:
+                    _playback_ends_at = _first_delta_sent_at + _audio_seconds
+                    _echo_cooldown = max(0.3, _playback_ends_at + 0.25 - time.monotonic())
+                else:
+                    _echo_cooldown = max(0.3, _audio_seconds + 0.25)
+                _first_delta_sent_at = None
                 _samples_this_response = 0
                 async def _end_speaking_gate(s=sess, delay=_echo_cooldown):
                     await asyncio.sleep(delay)
