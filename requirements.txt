@@ -1,0 +1,43 @@
+# ── Core ──────────────────────────────────────────────
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+httpx>=0.27
+rich>=13.7            # pretty console output
+
+# ── Agent 1: Doctor Discovery (crawling) ─────────────
+crawl4ai>=0.4.0
+playwright>=1.44
+beautifulsoup4>=4.12
+lxml>=5.2
+
+# ── LLM: Qwen3-32B (open source) run locally via Ollama ─
+#   Ollama exposes an OpenAI-compatible API; we use the openai client as a thin HTTP client.
+openai>=1.30
+
+# ── Database: PostgreSQL (Agent 8 + long-term memory) ─
+psycopg[binary]>=3.1
+
+# ── Memory: Redis (Agent 4 current-call memory) ──────
+redis>=5.0
+
+# ── Workflow: LangGraph (Agent 3 state machine + orchestrator) ─
+langgraph>=0.2
+
+# ── Queue: Celery (background fan-out, Redis broker) ─
+celery>=5.3
+
+# ── Monitoring: Prometheus client (Grafana scrapes it) ─
+prometheus-client>=0.20
+
+# ── Voice Agent (Agent 4) — local CPU demo (talk via mic/speakers) ─
+faster-whisper>=1.0      # Whisper STT, runs on CPU
+pyttsx3>=2.90            # local TTS via the built-in OS voice (CosyVoice stand-in)
+sounddevice>=0.4         # microphone capture
+soundfile>=0.12          # write wav for Whisper
+
+# ── Voice Agent — telephony/production (install when going live) ─
+# livekit-agents
+# livekit-plugins-openai           # qwen LLM via openai-compatible endpoint
+# livekit-plugins-silero           # VAD
+#   For the natural production voice, also install CosyVoice 2 (see tts_cosyvoice.py).

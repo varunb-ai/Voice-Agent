@@ -1,0 +1,34 @@
+{
+  "call_id": "call-20260721-2109-2ade",
+  "doctor_name": "Dr. John",
+  "hospital_name": "Apollo",
+  "branch": "Madhapur",
+  "resolved": true,
+  "duration_seconds": 44,
+  "cost_usd": 0.238835,
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "\u0c28\u0c2e\u0c38\u0c4d\u0c15\u0c3e\u0c30\u0c02! Forage AI Healthcare \u0c28\u0c41\u0c02\u0c21\u0c3f Sarah \u0c2e\u0c3e\u0c1f\u0c4d\u0c32\u0c3e\u0c21\u0c41\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c3e\u0c28\u0c41 \u2014 \u0c28\u0c47\u0c28\u0c41 Apollo \u0c24\u0c4b \u0c2e\u0c3e\u0c1f\u0c4d\u0c32\u0c3e\u0c21\u0c41\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c3e\u0c28\u0c3e?",
+      "timestamp": "21:09:37"
+    },
+    {
+      "role": "agent",
+      "text": "\u0c2c\u0c3e\u0c17\u0c41\u0c02\u0c26\u0c3f, \u0c27\u0c28\u0c4d\u0c2f\u0c35\u0c3e\u0c26\u0c3e\u0c32\u0c41! Dr. John \u0c2a\u0c4d\u0c30\u0c38\u0c4d\u0c24\u0c41\u0c24\u0c02 \u0c0f \u0c2c\u0c4d\u0c30\u0c3e\u0c02\u0c1a\u0c4d \u0c32\u0c47\u0c26\u0c3e \u0c28\u0c17\u0c30\u0c02\u0c32\u0c4b \u0c2a\u0c28\u0c3f \u0c1a\u0c47\u0c38\u0c4d\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c3e\u0c30\u0c41?",
+      "timestamp": "21:09:50"
+    },
+    {
+      "role": "caller",
+      "text": "Thank you for your attention. Thank you. Present, working in Madhapur.",
+      "timestamp": "21:10:00"
+    },
+    {
+      "role": "agent",
+      "text": "\u0c38\u0c30\u0c47, \u0c06 \u0c35\u0c3f\u0c35\u0c30\u0c3e\u0c28\u0c4d\u0c28\u0c3f \u0c2e\u0c3e \u0c30\u0c3f\u0c15\u0c3e\u0c30\u0c4d\u0c21\u0c4d\u0c38\u0c4d\u200c\u0c32\u0c4b \u0c28\u0c2e\u0c4b\u0c26\u0c41 \u0c1a\u0c47\u0c38\u0c47\u0c38\u0c4d\u0c24\u0c3e\u0c28\u0c41.",
+      "timestamp": "21:10:05"
+    }
+  ],
+  "summary": "Called Apollo to verify Dr. John's branch. Branch confirmed: Madhapur.",
+  "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260721-2109-2ade.wav",
+  "recorded_at": "2026-07-21T21:09:29.648424"
+}

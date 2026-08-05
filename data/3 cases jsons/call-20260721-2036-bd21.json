@@ -1,0 +1,34 @@
+{
+  "call_id": "call-20260721-2036-bd21",
+  "doctor_name": "Dr. John",
+  "hospital_name": "Apollo",
+  "branch": "Jubilee Hills Branch",
+  "resolved": true,
+  "duration_seconds": 53,
+  "cost_usd": 0.38583,
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, good evening! This is Sarah from Forage AI Healthcare. Is this Apollo?",
+      "timestamp": "20:36:47"
+    },
+    {
+      "role": "agent",
+      "text": "\u0c05\u0c30\u0c4d\u0c27\u0c2e\u0c48\u0c02\u0c26\u0c3f \u2014 Dr. John \u0c2a\u0c4d\u0c30\u0c38\u0c4d\u0c24\u0c41\u0c24\u0c02 \u0c0f \u0c2c\u0c4d\u0c30\u0c3e\u0c02\u0c1a\u0c4d \u0c32\u0c47\u0c26\u0c3e \u0c0f \u0c32\u0c4a\u0c15\u0c47\u0c37\u0c28\u0c4d\u200c\u0c32\u0c4b \u0c2a\u0c28\u0c3f \u0c1a\u0c47\u0c38\u0c4d\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c3e\u0c30\u0c41?",
+      "timestamp": "20:36:56"
+    },
+    {
+      "role": "agent",
+      "text": "\u0c05\u0c35\u0c41\u0c28\u0c41, \u0c27\u0c28\u0c4d\u0c2f\u0c35\u0c3e\u0c26\u0c3e\u0c32\u0c41. Dr. John \u0c2a\u0c4d\u0c30\u0c38\u0c4d\u0c24\u0c41\u0c24\u0c02 \u0c0f \u0c2c\u0c4d\u0c30\u0c3e\u0c02\u0c1a\u0c4d \u0c32\u0c47\u0c26\u0c3e \u0c0f \u0c2a\u0c4d\u0c30\u0c3e\u0c02\u0c24\u0c02\u0c32\u0c4b \u0c2a\u0c28\u0c3f\u0c1a\u0c47\u0c38\u0c4d\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c3e\u0c30\u0c41?",
+      "timestamp": "20:37:08"
+    },
+    {
+      "role": "agent",
+      "text": "That's exactly what I needed \u2014 thanks so much! Have a wonderful day!",
+      "timestamp": "20:37:22"
+    }
+  ],
+  "summary": "Called Apollo to verify Dr. John's branch. Branch confirmed: Jubilee Hills Branch.",
+  "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260721-2036-bd21.wav",
+  "recorded_at": "2026-07-21T20:36:39.329595"
+}

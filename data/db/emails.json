@@ -1,0 +1,10 @@
+{
+  "jane-doe-apollo::hospital-example-com::sent": {
+    "email_id": "jane-doe-apollo::hospital-example-com::sent",
+    "doctor_id": "jane-doe::apollo",
+    "to_addr": "hospital@example.com",
+    "status": "sent",
+    "sent_time": null,
+    "reply_time": null
+  }
+}

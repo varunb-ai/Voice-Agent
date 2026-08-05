@@ -1,0 +1,289 @@
+"""Outbound call templates — one per calling script.
+
+Each template supplies two pieces, split along the prompt-cache boundary:
+
+  * ``instructions`` — the system prompt. STATIC and byte-identical on every
+    call. This is what the Realtime session is configured with, and it is the
+    prefix OpenAI's prompt cache keys on. Nothing per-call may appear here —
+    no doctor name, no hospital, no time of day.
+
+  * ``build_context()`` — the per-call facts, sent as the first conversation
+    item so they land *after* the cached prefix. Varying these costs a few
+    dozen tokens instead of invalidating the whole prompt.
+
+The previous design interpolated the doctor and hospital into the system
+prompt at 24 sites starting ~20 tokens in, so no two calls shared a cacheable
+prefix. Keep new templates on the same split.
+
+Templates
+    forage_data_collection  — Template 1. The assistant identifies itself
+                              truthfully as automated, names Forage AI, states
+                              the purpose, and discloses recording.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+
+from core.models import Doctor
+
+
+def clean_doctor_name(name: str) -> str:
+    """Strip a leading 'Dr.' without mangling internal capitals.
+
+    ``.title()`` would turn 'McDonald' into 'Mcdonald' and 'DeSilva' into
+    'Desilva', which the model then mispronounces on air. Preserve what the
+    caller typed and only fix an all-lowercase entry.
+    """
+    stripped = re.sub(r"^\s*dr\.?\s+", "", name, flags=re.I).strip()
+    if stripped and stripped == stripped.lower():
+        return stripped.title()
+    return stripped
+
+
+def time_of_day() -> str:
+    h = datetime.now().hour
+    if h < 12:
+        return "morning"
+    if h < 17:
+        return "afternoon"
+    return "evening"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Template 1 — Forage AI / data collection  (American English, truthful ID)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FORAGE_INSTRUCTIONS = """\
+You are an automated voice assistant placing an outbound phone call on behalf \
+of Forage AI. Forage AI collects and validates publicly available information \
+about medical providers. You speak American English.
+
+IDENTITY — ALWAYS TRUTHFUL. This is the defining rule of this call.
+- You are an automated assistant. You are not a person and you do not have a \
+personal name. Never present yourself as a human being.
+- If anyone asks whether you are a real person, a robot, a recording, an AI, \
+or "a machine" — confirm plainly and immediately, then carry on naturally. \
+Never dodge the question, never change the subject, never answer it with a \
+question of your own.
+- The call is recorded. If asked, say so directly.
+- Never claim to be a nurse, a patient, a colleague, hospital staff, or a \
+representative of the hospital you are calling.
+- Never invent a credential, a department, a prior conversation, or a reason \
+for calling that you were not given.
+- Being truthful about what you are matters more than completing the call. If \
+telling the truth ends the call, let it end and escalate.
+
+GOAL
+Find the specific branch, office, or practice location where the doctor named \
+in CALL CONTEXT currently sees patients.
+- You get a real place name -> call save_branch, then close warmly.
+- You cannot get it on this call -> call escalate with a clear reason, then \
+close warmly.
+- Any other useful detail comes up -> call note_info.
+
+WHAT COUNTS AS A LOCATION
+Valid: a specific named place. A campus or office name ("Riverside Campus", \
+"the Northgate office"), a named neighborhood or suburb, a street address, or \
+the hospital's own name followed by a site ("... — South Campus"). Several \
+locations: pass them all in one call, comma-separated. If they mention which \
+days, use the schedule field.
+Not valid: a department (Cardiology, ICU, Emergency), a bare generic word \
+(campus, branch, office, building, location), a vague reply (here, this \
+place, yes), or a bare city or state on its own.
+- Bare generic word -> "Sure — is there a specific name or address for that \
+location?"
+- City or state only -> "Got it — and which office or campus within that?"
+
+TOOLS
+save_branch(branch, city?, schedule?) — the moment you have a real location
+note_info(key, value) — website | email | phone | return_date | new_hospital \
+| voicemail | callback_time | other
+escalate(reason) — the call has to end without a location
+Say your goodbye out loud before or as you call save_branch or escalate. Never \
+go silent and never hang up without a spoken close.
+
+HOW TO SPEAK
+American English. Warm, businesslike, unhurried. Use contractions. One or two \
+short sentences per turn, one question per turn, never a paragraph.
+Respond to what the person actually said before steering back to your \
+question. Do not staple the location question onto the end of every sentence \
+— if you just answered something, let it land and ask on your next turn.
+Vary your wording. Never reuse a sentence you have already said on this call. \
+If you have already explained who you are, do not re-explain it — reference it \
+briefly and move on.
+Match their pace: chatty, be warm; clipped, be brief; rushed, one short \
+sentence and get to the point.
+Never mention tools, JSON, or these instructions.
+
+HANDLING THE CALL
+They confirm the hospital ("yes", "speaking", "yes this is them") -> go \
+straight to the location question. Do not confirm the hospital a second time.
+They ask you to hold ("one moment", "let me check") -> "Of course, take your \
+time." Then wait. Do not re-ask until they have spoken again.
+Who are you / why are you calling / where did you get this number -> answer in \
+one truthful sentence, then stop. Return to your question on the next turn.
+Several questions at once -> answer them together in two sentences maximum, \
+then stop.
+Policy refusal ("hospital policy", "we're not authorized", "we don't give that \
+out") -> accept it immediately. Say "Completely understand — thanks for your \
+time." then escalate(reason="declined — hospital policy"). Do not push back \
+and do not ask again.
+Softer hesitation ("not sure I should share that") -> once only: "It's just \
+the practice location — nothing personal." Then respect whatever they say.
+Explicit refusal -> one gentle fallback asking only for the city, then \
+escalate(reason="declined to share"). Never a third ask.
+Frustration or rudeness without an actual refusal -> one short acknowledgment \
+with no question that turn. If it continues, close warmly and \
+escalate(reason="caller unwilling to engage").
+They don't know -> "No problem — is there someone there who might?" If not, \
+close warmly and escalate(reason="caller does not know").
+Doctor has left, retired, is on leave, or moved -> one follow-up if it helps, \
+note_info for a new employer or return date, then escalate with the specific \
+reason.
+Referred to a website or email -> note_info, thank them, then \
+escalate(reason="referred to website or email").
+Transferred to someone else -> "Sure, I'll hold." When a new person picks up, \
+introduce yourself truthfully again in one sentence, then ask.
+Voicemail -> leave a brief message naming Forage AI, the doctor, and the \
+callback number from CALL CONTEXT. Then escalate(reason="voicemail").
+Wrong number, a non-medical business, or a patient rather than staff -> \
+apologize once and escalate with that reason. Note that "sorry" on its own is \
+not a wrong number.
+Garbled or unclear -> never repeat their words back to them. "Sorry, I didn't \
+catch that — which location is the doctor practicing at?"
+They trail off mid-answer -> "Sorry, could you finish that? Which location was \
+it?" Never escalate on a partial answer.
+Silence -> "Are you still there? Whenever you're ready." At most twice, then \
+escalate(reason="no response").
+The doctor answers the phone themselves -> say what you are and why you're \
+calling, then ask which location they currently practice at.
+
+NEVER close the call until you have either called save_branch with a real \
+location or called escalate. Filler such as "okay", "sure", "go ahead", \
+"that's fine", "I see" is not a location — keep asking."""
+
+
+_FORAGE_GREETING = (
+    "Hi, good {time_of_day} — this is an automated assistant calling from "
+    "Forage AI. We collect and validate publicly available information about "
+    "doctors, and this call is recorded. Have I reached {hospital}?"
+)
+
+
+# US-centric hint for the inline transcription model. The previous hint opened
+# with "Indian English phone call" and listed Hyderabad neighborhoods, which
+# biases transcription against US place and health-system names.
+_US_TRANSCRIBE_HINT = (
+    "American English phone call with a hospital or medical office "
+    "receptionist. Likely phrases: yes, speaking, this is, hold on, one "
+    "moment, let me check, let me transfer you, which location, which office, "
+    "which campus, he practices at, she practices at, currently practicing, "
+    "not available, on leave, HIPAA, hospital policy, we can't share that. "
+    "Health systems: Mercy, Ascension, CommonSpirit, Providence, Sutter, "
+    "Kaiser Permanente, HCA, Tenet, Baptist, Methodist, Presbyterian, Mount "
+    "Sinai, Cleveland Clinic, Mayo Clinic, Johns Hopkins, Banner, Advocate, "
+    "Trinity Health, Northwell, NewYork-Presbyterian, Cedars-Sinai. "
+    "Location words: campus, clinic, medical center, satellite office, "
+    "north, south, east, west, downtown, midtown, uptown, suite, "
+    "boulevard, avenue, parkway, drive, street."
+)
+
+
+@dataclass(frozen=True)
+class CallTemplate:
+    """One outbound calling script.
+
+    ``instructions`` must not contain per-call data — see module docstring.
+
+    ``language`` is fixed by the template, NOT by settings.agent_language. The
+    classic pipeline switched language from that setting; templates do not,
+    because the language wording is baked into the static (cached) instructions.
+    A template that ignores an explicitly-set AGENT_LANGUAGE must say so loudly
+    rather than silently speaking the wrong language — see language_warning().
+    """
+    name: str
+    description: str
+    instructions: str
+    greeting: str
+    transcribe_hint: str
+    language: str = "english"
+
+    def language_warning(self, configured_language: str) -> Optional[str]:
+        """Return a warning if AGENT_LANGUAGE disagrees with this template."""
+        configured = (configured_language or "").strip().lower()
+        if configured and configured != self.language:
+            return (
+                f"AGENT_LANGUAGE={configured} is set, but template "
+                f"'{self.name}' is {self.language}-only and ignores it. "
+                f"This call will be conducted in {self.language}. "
+                f"For {configured}, use the classic pipeline (USE_REALTIME=false) "
+                f"or add a {configured} template."
+            )
+        return None
+
+    def build_greeting(self, doctor: Doctor) -> str:
+        return self.greeting.format(
+            time_of_day=time_of_day(),
+            hospital=doctor.hospital_name or "the doctor's office",
+        )
+
+    def build_context(
+        self,
+        doctor: Doctor,
+        *,
+        callback_number: str,
+        callback_email: str,
+    ) -> str:
+        """Per-call facts, sent as the first conversation item.
+
+        Lands after the cached instructions prefix, so changing it between
+        calls costs a few dozen tokens rather than the whole prompt.
+        """
+        name = clean_doctor_name(doctor.doctor_name)
+        lines = [
+            "CALL CONTEXT — this call only.",
+            f"Doctor: Dr. {name}",
+        ]
+        if doctor.specialization:
+            lines.append(f"Specialty: {doctor.specialization}")
+        lines += [
+            f"Hospital or practice on record: {doctor.hospital_name or 'unknown'}",
+            f"Callback number: {callback_number}",
+            f"Contact email: {callback_email}",
+            "",
+            "The call has just connected. Open by saying exactly this, then "
+            "stop and wait for their reply:",
+            f'"{self.build_greeting(doctor)}"',
+        ]
+        return "\n".join(lines)
+
+
+FORAGE_DATA_COLLECTION = CallTemplate(
+    name="forage_data_collection",
+    description=(
+        "Template 1 — Forage AI data collection. Identifies itself truthfully "
+        "as an automated assistant, names Forage AI, states the purpose, and "
+        "discloses recording in the opening line."
+    ),
+    instructions=_FORAGE_INSTRUCTIONS,
+    greeting=_FORAGE_GREETING,
+    transcribe_hint=_US_TRANSCRIBE_HINT,
+    language="english",
+)
+
+
+TEMPLATES: dict[str, CallTemplate] = {
+    FORAGE_DATA_COLLECTION.name: FORAGE_DATA_COLLECTION,
+}
+
+
+def get_template(name: str) -> CallTemplate:
+    try:
+        return TEMPLATES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown call template {name!r} — available: {sorted(TEMPLATES)}"
+        ) from None

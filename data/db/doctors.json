@@ -1,0 +1,20 @@
+{
+  "john-smith::apollo::dallas": {
+    "doctor_id": "john-smith::apollo::dallas",
+    "branch_id": "apollo::dallas",
+    "doctor_name": "John Smith",
+    "specialization": "Cardiology",
+    "confidence_score": 50,
+    "status": "discovered",
+    "source": "website"
+  },
+  "jane-doe::apollo": {
+    "doctor_id": "jane-doe::apollo",
+    "branch_id": null,
+    "doctor_name": "Jane Doe",
+    "specialization": "Pediatrics",
+    "confidence_score": 0,
+    "status": "missing_branch",
+    "source": "website"
+  }
+}

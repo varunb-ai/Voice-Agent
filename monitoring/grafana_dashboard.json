@@ -1,0 +1,80 @@
+{
+  "__comment": "Import into Grafana: Dashboards -> New -> Import -> paste this JSON. Requires a Prometheus datasource named 'Prometheus'.",
+  "title": "Doctor Pipeline",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Doctors Processed",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(doctors_processed_total)", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Verified %",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "targets": [{
+        "expr": "100 * sum(doctors_processed_total{final_status=\"verified\"}) / clamp_min(sum(doctors_processed_total), 1)",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Calls Made",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "sum(calls_made_total)", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Emails Sent",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "sum(emails_sent_total)", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Doctors Processed by Status (rate)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [{
+        "expr": "sum by (final_status) (rate(doctors_processed_total[5m]))",
+        "legendFormat": "{{final_status}}", "refId": "A"
+      }]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Pipeline Duration (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(pipeline_duration_seconds_bucket[5m])) by (le))",
+        "legendFormat": "p95 seconds", "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Call Resolution",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [{
+        "expr": "sum by (resolved) (rate(calls_made_total[5m]))",
+        "legendFormat": "resolved={{resolved}}", "refId": "A"
+      }]
+    },
+    {
+      "id": 8,
+      "type": "gauge",
+      "title": "Queue Depth",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [{ "expr": "queue_depth", "refId": "A" }]
+    }
+  ]
+}

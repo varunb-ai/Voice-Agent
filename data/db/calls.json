@@ -1,0 +1,20 @@
+{
+  "call-jane-doe": {
+    "call_id": "call-jane-doe",
+    "doctor_id": "jane-doe::apollo",
+    "doctor_name": "Jane Doe",
+    "hospital_name": "Apollo",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": null,
+    "transcript": [
+      {
+        "role": "agent",
+        "text": "Hello! I'm calling to update our medical directory. Could you tell me which branch Dr. Jane Doe works at?"
+      }
+    ],
+    "summary": "Called about Dr. Jane Doe; branch not obtained, escalation needed.",
+    "audio_path": null,
+    "recorded_at": "2026-06-12 12:56:04.355643"
+  }
+}

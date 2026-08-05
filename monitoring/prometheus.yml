@@ -1,0 +1,14 @@
+# Prometheus scrape config for the doctor pipeline.
+# Run:  prometheus --config.file=monitoring/prometheus.yml
+# The pipeline exposes /metrics on :8000 via core.metrics.start_metrics_server().
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: doctor_pipeline
+    static_configs:
+      - targets: ["localhost:8000"]
+        labels:
+          service: doctor-pipeline

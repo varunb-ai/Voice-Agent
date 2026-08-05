@@ -1,0 +1,48 @@
+{
+  "call_id": "call-20260707-0125-a117",
+  "doctor_name": "Dr. John",
+  "hospital_name": "Apollo",
+  "branch": null,
+  "resolved": false,
+  "duration_seconds": 52,
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hey, good morning! This is Sarah calling from Forage AI Healthcare \u2014 is this Apollo?",
+      "timestamp": "01:25:18"
+    },
+    {
+      "role": "caller",
+      "text": "Good morning, Yes, Apollo,",
+      "timestamp": "01:25:25"
+    },
+    {
+      "role": "agent",
+      "text": "Oh great, thanks! Could you tell me which branch Dr. John is currently working at?",
+      "timestamp": "01:25:29"
+    },
+    {
+      "role": "caller",
+      "text": "Why should I tell you those details to you?",
+      "timestamp": "01:25:39"
+    },
+    {
+      "role": "agent",
+      "text": "Oh sure \u2014 I just maintain a medical directory, nothing more than that.",
+      "timestamp": "01:25:41"
+    },
+    {
+      "role": "caller",
+      "text": "We are not sharing any information to anyone.",
+      "timestamp": "01:25:51"
+    },
+    {
+      "role": "agent",
+      "text": "Oh of course, I completely understand \u2014 thanks so much for your time! Have a great day!",
+      "timestamp": "01:25:53"
+    }
+  ],
+  "summary": "Called Apollo to verify Dr. John's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260707-0125-a117.wav",
+  "recorded_at": "2026-07-07T01:25:11.052450"
+}

@@ -1,0 +1,27 @@
+# ── Secrets — never commit ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+private.key
+credentials.json
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# ── Generated data ───────────────────────────────────────────────────────────
+data/*.db
+data/crawled/
+.crawl4ai/
+*.log
+
+# Call artefacts: audio is large and contains recorded third-party voices.
+# Transcripts/JSON are kept so results are reviewable in-repo.
+data/3 cases voice/*.wav
+data/3 cases voice/*.mp3

@@ -1,0 +1,54 @@
+{
+  "call_id": "call-20260721-0002-04b4",
+  "doctor_name": "Dr. John",
+  "hospital_name": "Apollo",
+  "branch": null,
+  "resolved": false,
+  "duration_seconds": 64,
+  "cost_usd": 0.419825,
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, good morning! This is Sarah from Forage AI Healthcare. Is this Apollo?",
+      "timestamp": "00:02:44"
+    },
+    {
+      "role": "caller",
+      "text": "Thank you for coming to the hospital.",
+      "timestamp": "00:02:53"
+    },
+    {
+      "role": "agent",
+      "text": "Oh, lovely, thanks! Could you tell me which location Dr. John works from?",
+      "timestamp": "00:02:54"
+    },
+    {
+      "role": "caller",
+      "text": "Thank you. He died, no, he is not working.",
+      "timestamp": "00:03:02"
+    },
+    {
+      "role": "agent",
+      "text": "Oh okay, thanks for letting me know\u2014let me think about the next best step here. Got it. Do you know if he\u2019s just on leave, or has he moved to another hospital?",
+      "timestamp": "00:03:09"
+    },
+    {
+      "role": "agent",
+      "text": "Oh sorry, I didn\u2019t quite catch that. Which branch is Dr. John currently at?",
+      "timestamp": "00:03:22"
+    },
+    {
+      "role": "caller",
+      "text": "He said he is not working.",
+      "timestamp": "00:03:30"
+    },
+    {
+      "role": "agent",
+      "text": "Oh, I\u2019m so sorry to hear that. Thank you for telling me, and I really appreciate your time. Take care.",
+      "timestamp": "00:03:32"
+    }
+  ],
+  "summary": "Called Apollo to verify Dr. John's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260721-0002-04b4.wav",
+  "recorded_at": "2026-07-21T00:02:37.520836"
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "call_id": "call-20260707-0117-ffd2",
+    "time": "2026-07-07T01:17:40.045189",
+    "doctor": "Dr. John",
+    "hospital": "Apollo",
+    "branch": "Banjara Hills Branch",
+    "resolved": true,
+    "duration_seconds": 82,
+    "summary": "Called Apollo to verify Dr. John's branch. Branch confirmed: Banjara Hills Branch.",
+    "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260707-0117-ffd2.wav",
+    "json_path": "data/3 cases jsons/call-20260707-0117-ffd2.json"
+  },
+  {
+    "call_id": "call-20260707-0122-97c8",
+    "time": "2026-07-07T01:22:03.047478",
+    "doctor": "Dr. John",
+    "hospital": "Apollo",
+    "branch": "Jubilee Hills Branch",
+    "resolved": true,
+    "duration_seconds": 51,
+    "summary": "Called Apollo to verify Dr. John's branch. Branch confirmed: Jubilee Hills Branch.",
+    "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260707-0122-97c8.wav",
+    "json_path": "data/3 cases jsons/call-20260707-0122-97c8.json"
+  },
+  {
+    "call_id": "call-20260707-0125-a117",
+    "time": "2026-07-07T01:25:11.052450",
+    "doctor": "Dr. John",
+    "hospital": "Apollo",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": 52,
+    "summary": "Called Apollo to verify Dr. John's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260707-0125-a117.wav",
+    "json_path": "data/3 cases jsons/call-20260707-0125-a117.json"
+  },
+  {
+    "call_id": "call-20260707-0127-6eb2",
+    "time": "2026-07-07T01:27:55.445040",
+    "doctor": "Dr. John",
+    "hospital": "Apollo",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": 46,
+    "summary": "Called Apollo to verify Dr. John's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260707-0127-6eb2.wav",
+    "json_path": "data/3 cases jsons/call-20260707-0127-6eb2.json"
+  },
+  {
+    "call_id": "call-20260707-0129-6c1b",
+    "time": "2026-07-07T01:29:12.851779",
+    "doctor": "Dr. John",
+    "hospital": "Apollo",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": 85,
+    "summary": "Called Apollo to verify Dr. John's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\salom\\OneDrive\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260707-0129-6c1b.wav",
+    "json_path": "data/3 cases jsons/call-20260707-0129-6c1b.json"
+  }
+]

@@ -1,0 +1,8 @@
+{
+  "apollo::dallas": {
+    "branch_id": "apollo::dallas",
+    "hospital_id": "apollo",
+    "branch_name": "Dallas",
+    "city": null
+  }
+}
