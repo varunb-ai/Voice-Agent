@@ -1410,5 +1410,70 @@
     "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
     "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1748-tsid.wav",
     "json_path": "data/3 cases jsons/call-20260805-1748-tsid.json"
+  },
+  {
+    "call_id": "call-20260805-1753-edf2",
+    "time": "2026-08-05T17:53:38.537544",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": 8,
+    "cost_usd": 0.0022,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1753-edf2.wav",
+    "json_path": "data/3 cases jsons/call-20260805-1753-edf2.json"
+  },
+  {
+    "call_id": "call-20260805-1755-tsid",
+    "time": "2026-08-05T17:55:48.591516",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": "Northgate Campus",
+    "resolved": true,
+    "duration_seconds": 4,
+    "cost_usd": 0.204554,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Northgate Campus.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1755-tsid.wav",
+    "json_path": "data/3 cases jsons/call-20260805-1755-tsid.json"
+  },
+  {
+    "call_id": "call-20260805-1755-tsid",
+    "time": "2026-08-05T17:55:52.887787",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": 4,
+    "cost_usd": 0.138867,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1755-tsid.wav",
+    "json_path": "data/3 cases jsons/call-20260805-1755-tsid.json"
+  },
+  {
+    "call_id": "call-20260805-1755-tsid",
+    "time": "2026-08-05T17:55:56.982016",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": 4,
+    "cost_usd": 0.27024,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1755-tsid.wav",
+    "json_path": "data/3 cases jsons/call-20260805-1755-tsid.json"
+  },
+  {
+    "call_id": "call-20260805-1756-tsid",
+    "time": "2026-08-05T17:56:01.062916",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": null,
+    "resolved": false,
+    "duration_seconds": 4,
+    "cost_usd": 0.138867,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1756-tsid.wav",
+    "json_path": "data/3 cases jsons/call-20260805-1756-tsid.json"
   }
 ]

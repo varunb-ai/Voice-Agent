@@ -5,7 +5,14 @@ so there is a single place that documents what the system needs.
 """
 from __future__ import annotations
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Accepted by the Realtime API. marin/cedar are gpt-realtime-2 only.
+REALTIME_VOICES = {
+    "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse",
+    "marin", "cedar",
+}
 
 
 class Settings(BaseSettings):
@@ -154,6 +161,26 @@ class Settings(BaseSettings):
     voice_age: str = "adult"
     voice_rate: int = 0
     voice_volume: float = 1.0
+
+
+    @field_validator("realtime_voice")
+    @classmethod
+    def _check_voice(cls, v: str) -> str:
+        """Reject an unusable voice at import, not mid-call.
+
+        An empty or misspelled REALTIME_VOICE is accepted everywhere locally and
+        then rejected by session.update AFTER the callee has already picked up —
+        they get a connected call with silence, and it costs a real call to find
+        out. Fail before anything dials.
+        """
+        v = (v or "").strip()
+        if v not in REALTIME_VOICES:
+            raise ValueError(
+                f"REALTIME_VOICE={v!r} is not a valid Realtime voice. "
+                f"Choose one of: {', '.join(sorted(REALTIME_VOICES))}. "
+                f"marin and cedar require REALTIME_MODEL=gpt-realtime-2."
+            )
+        return v
 
 
 settings = Settings()
