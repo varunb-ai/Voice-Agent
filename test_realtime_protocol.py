@@ -180,6 +180,48 @@ def script_refusal():
     ]
 
 
+def script_identity_reask():
+    """Receptionist asks who's calling MID-call, after the greeting already said it.
+
+    This path was broken by a rule added for a good reason: "never reuse a
+    sentence you have already said" plus "if you have already explained who you
+    are, do not re-explain it" told the agent to brush off a second request for
+    its identity — in the one template whose purpose is honest identification.
+
+    The call must continue normally: no escalate, no save_branch, no hangup.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Hi, good afternoon - this is an automated assistant calling from Forage AI..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Yes, this is Northside."},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Great - which location is Dr. Okafor practicing at?"},
+        {"type": "response.done", "response": usage()},
+        # mid-call re-ask — the case that regressed
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Sorry, which company was that again?"},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Of course - this is Forage AI, and I'm an automated assistant. "
+                       "We collect and validate publicly available information about doctors."},
+        {"type": "response.done", "response": usage()},
+        # and again, plus how to reach us
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "And what's your callback number?"},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "I don't have a direct phone line, but you can reach us at "
+                       "directory@forageai.com."},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
 def script_invalid_branch():
     """A bare city must be rejected by save_branch and the call must continue."""
     return HANDSHAKE + [
@@ -277,7 +319,31 @@ async def main():
           f"{len(creates2)} response.create sent")
 
     print("\n" + "=" * 66)
-    print("  SCENARIO 3 — invalid branch ('the branch') must be rejected")
+    print("  SCENARIO 3 — identity re-asked mid-call")
+    print("=" * 66)
+    sent_id, sess_id = await run_call(script_identity_reask())
+    check(not sess_id.memory.get("escalated"),
+          "identity re-ask did not end the call")
+    check(not sess_id.memory.get("resolved"),
+          "identity re-ask did not falsely resolve the call")
+    check(not [m for m in sent_id if m.get("type") == "conversation.item.create"
+               and m["item"].get("type") == "function_call_output"],
+          "no tool fired on an identity question")
+    agent_turns = [t.text for t in sess_id.turns if t.role == "agent"]
+    check(len(agent_turns) >= 3, "agent kept answering across re-asks",
+          f"{len(agent_turns)} agent turns")
+    check(sum("Forage AI" in t for t in agent_turns) >= 2,
+          "org named more than once — no-repetition rule did not suppress it")
+
+    # These guard the prompt wording itself. They catch deletion, not
+    # misbehaviour — only a live call tests whether the model obeys.
+    check("PRECEDENCE" in tpl.instructions,
+          "identity rules declare precedence over brevity/pacing/closing rules")
+    check("never deferred to a later turn" in tpl.instructions,
+          "disclosures cannot be postponed to a later turn")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 4 — invalid branch ('the branch') must be rejected")
     print("=" * 66)
     sent3, sess3 = await run_call(script_invalid_branch())
     check(not sess3.memory.get("resolved"),
