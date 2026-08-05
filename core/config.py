@@ -116,8 +116,11 @@ class Settings(BaseSettings):
     price_text_in: float = 4.00
     price_text_in_cached: float = 0.40
     price_text_out: float = 16.0
-    # Telephony, USD per minute — differs by destination country.
-    price_telephony_per_min: float = 0.0140
+    # Telephony, USD per minute — DESTINATION-DEPENDENT, not a global rate.
+    # Currently set for US -> India mobile, which is the quality-test target.
+    # US -> US is roughly a third of this. Change it when the target changes,
+    # or the per-minute figure in the cost breakdown will be wrong.
+    price_telephony_per_min: float = 0.0165
 
     # Agent's spoken voice — OpenAI Realtime API (USE_REALTIME=true)
     # Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
