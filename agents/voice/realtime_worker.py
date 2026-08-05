@@ -29,6 +29,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -116,6 +117,9 @@ class RealtimeSession:
         self._caller_pcm: list[bytes] = []
         # When the Twilio stream started (set on "start" event)
         self._stream_start_time: Optional[datetime] = None
+        # Set when response.create for the greeting is sent; cleared once the
+        # first audio delta arrives, so we measure the callee's dead air.
+        self._greeting_requested_at: Optional[float] = None
 
         # Token usage tracking (from response.done events).
         # Cached tokens are counted SEPARATELY and billed at the cached rate —
@@ -595,6 +599,10 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
             },
         }))
         await oai_ws.send(json.dumps({"type": "response.create"}))
+        # First-audio latency is the dead air the callee hears after picking up.
+        # Measured separately from mid-call latency because the first response
+        # pays for an uncached prompt and any connection warm-up.
+        sess._greeting_requested_at = time.monotonic()
         print("[Realtime] Context sent, greeting requested — starting audio loops", flush=True)
 
         # ── 5. Run both directions concurrently ───────────────────────
@@ -776,6 +784,16 @@ async def _oai_to_twilio(
                         _current_response_pcm.append(raw_pcm)
                         if _current_response_start is None and sess._stream_start_time:
                             _current_response_start = (datetime.now() - sess._stream_start_time).total_seconds()
+                        # Dead air the callee hears before the agent speaks.
+                        if sess._greeting_requested_at is not None:
+                            gap = time.monotonic() - sess._greeting_requested_at
+                            sess._greeting_requested_at = None
+                            print(f"[Realtime] First audio {gap:.2f}s after "
+                                  f"response.create", flush=True)
+                            if gap > 2.0:
+                                print(f"[Realtime]   ^ that is dead air on the "
+                                      f"callee's end before the greeting starts",
+                                      flush=True)
                         twilio_payload = _convert_oai_to_twilio(delta)
                         await twilio_ws.send_text(json.dumps({
                             "event":    "media",
