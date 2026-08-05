@@ -58,26 +58,68 @@ app = FastAPI()
 # to any URL an attacker supplies.
 
 async def _verify_twilio_signature(request: Request, form) -> bool:
-    """Validate X-Twilio-Signature. Returns True if the request is authentic."""
-    if not settings.twilio_validate_webhooks:
-        return True
+    """Validate X-Twilio-Signature. Returns True if the request is authentic.
+
+    Twilio signs the exact URL it was configured with. Behind a tunnel, the URL
+    the app sees is not that URL, so it has to be rebuilt from
+    SERVER_PUBLIC_URL. Several near-miss variants are plausible (trailing
+    slash, query string, forwarded scheme), so each is tried and the failure
+    path logs enough to tell which assumption was wrong.
+    """
+    enforcing = settings.twilio_validate_webhooks
+
     if not settings.twilio_auth_token:
-        log.error("Webhook validation is on but TWILIO_AUTH_TOKEN is unset — rejecting")
-        return False
+        log.error("TWILIO_AUTH_TOKEN is unset — cannot validate")
+        return not enforcing
     try:
         from twilio.request_validator import RequestValidator
     except ImportError:
         log.error("twilio package missing — cannot validate webhook signature")
-        return False
+        return not enforcing
 
     signature = request.headers.get("X-Twilio-Signature", "")
     if not signature:
-        return False
-    # Twilio signs the PUBLIC url it was configured with, not the URL as seen
-    # behind the tunnel, so rebuild it from SERVER_PUBLIC_URL.
-    url = settings.server_public_url.rstrip("/") + request.url.path
+        log.warning("No X-Twilio-Signature header on %s", request.url.path)
+        return not enforcing
+
+    base = settings.server_public_url.strip().rstrip("/")
+    path = request.url.path
+    query = request.url.query
+    candidates = [
+        base + path,
+        base + path + ("?" + query if query else ""),
+        str(request.url),
+        str(request.url).replace("http://", "https://", 1),
+    ]
+
+    params = {k: v for k, v in form.multi_items()} if hasattr(form, "multi_items") else dict(form)
     validator = RequestValidator(settings.twilio_auth_token)
-    return validator.validate(url, dict(form), signature)
+
+    for candidate in candidates:
+        if validator.validate(candidate, params, signature):
+            return True
+
+    # Diagnose regardless of whether we're enforcing, so a single call in
+    # non-enforcing mode still yields the information needed to fix this.
+    print("\n" + "!" * 64, flush=True)
+    print("  TWILIO SIGNATURE MISMATCH", flush=True)
+    print(f"  path           : {path}", flush=True)
+    print(f"  sig received   : {signature}", flush=True)
+    for c in candidates:
+        print(f"  tried          : {c}", flush=True)
+        print(f"    -> computed  : {validator.compute_signature(c, params)}", flush=True)
+    print(f"  params         : {sorted(params)}", flush=True)
+    print(f"  auth token     : ...{settings.twilio_auth_token[-4:]} "
+          f"(len {len(settings.twilio_auth_token)})", flush=True)
+    print(f"  enforcing      : {enforcing}", flush=True)
+    if enforcing:
+        print("  -> REJECTED. Set TWILIO_VALIDATE_WEBHOOKS=false in .env to test,", flush=True)
+        print("     then re-enable before deploying — it is what stops", flush=True)
+        print("     /recording_ready leaking your Twilio credentials.", flush=True)
+    else:
+        print("  -> ALLOWED (validation disabled). Re-enable before deploying.", flush=True)
+    print("!" * 64 + "\n", flush=True)
+    return not enforcing
 
 
 def _forbidden() -> Response:
