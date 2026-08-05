@@ -284,10 +284,11 @@ async def main():
     ctx = items[0]["item"]["content"][0]["text"]
     check("CALL CONTEXT" in ctx, "per-call facts sent as a conversation item")
     check("Dr. Jane Okafor" in ctx, "context names the doctor")
-    check("automated assistant" in ctx, "greeting discloses automation")
-    # Match on the concept, not one wording — the greeting says "this call's
-    # recorded" now, and a contraction change must not fail a disclosure test.
-    check("record" in ctx.lower(), "greeting discloses recording")
+    # Template 1 is truthful about WHO and WHY — it names the organisation and
+    # uses no pretext. It does NOT announce itself as automated; that is the
+    # forage_ai_disclosed variant, asserted separately below.
+    check(tpl.org_name in ctx, "greeting names the organisation")
+    check("directory of doctors" in ctx, "greeting states the purpose")
     check(any(i["item"].get("type") == "function_call_output" for i in items),
           "tool result returned to the model")
 
@@ -364,8 +365,40 @@ async def main():
     # misbehaviour — only a live call tests whether the model obeys.
     check("PRECEDENCE" in tpl.instructions,
           "identity rules declare precedence over brevity/pacing/closing rules")
-    check("never deferred to a later turn" in tpl.instructions,
+    # Both identity blocks forbid deferring a disclosure, in their own wording
+    # ("never deferred to a later turn" / "Never defer either to a later
+    # turn"). Assert the rule, not one phrasing.
+    check("defer" in flat and "later turn" in flat,
           "disclosures cannot be postponed to a later turn")
+
+    print("\n" + "=" * 66)
+    print("  TEMPLATE INVARIANTS")
+    print("=" * 66)
+    from agents.voice.templates import TEMPLATES
+    for name, t in TEMPLATES.items():
+        flat_t = " ".join(t.instructions.split())
+        # Whatever the persona, two things must survive in every template:
+        # the call is genuinely recorded, and a point-blank question about
+        # what it is gets a straight answer. Presenting as a person is a style
+        # choice; denying it when asked outright is regulated in several US
+        # states, and these calls go to US numbers.
+        check("If anyone asks whether you are a real person" in flat_t
+              or "IF ASKED DIRECTLY whether you are a real person" in flat_t,
+              f"{name}: answers a point-blank are-you-real question")
+        check("recorded" in flat_t,
+              f"{name}: acknowledges the call is recorded")
+        check("Never claim to be a nurse" in flat_t,
+              f"{name}: never impersonates hospital staff or a patient")
+        check("{{" not in t.instructions,
+              f"{name}: no unsubstituted template placeholders")
+
+    probe = Doctor(doctor_name="Dr. Jane Okafor",
+                   hospital_name="Northside Medical Group")
+    disclosed = TEMPLATES["forage_ai_disclosed"]
+    check("automated assistant" in disclosed.build_greeting(probe),
+          "forage_ai_disclosed announces automation upfront")
+    check("automated" not in tpl.build_greeting(probe).lower(),
+          "Template 1 does not announce automation upfront")
 
     print("\n" + "=" * 66)
     print("  BRANCH VALIDATOR — a city is not a branch")

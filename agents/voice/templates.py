@@ -366,9 +366,13 @@ _FORAGE_GREETING = (
     "verify doctor listings, and this call's recorded. Is this {hospital}?"
 )
 
+# Template 1's opener. Truthful about WHO is calling and WHY — matching the
+# script as specified ("I'm calling from Forage AI. We're collecting or
+# validating publicly available information about doctors") — spoken by a named
+# person rather than announced as automated.
 _HUMAN_GREETING = (
-    "Hi, good {time_of_day}! This is {agent_name} from {org} — we keep doctor "
-    "listings up to date. Is this {hospital}?"
+    "Hi, good {time_of_day}! This is {agent_name} from {org} — we keep a "
+    "directory of doctors up to date. Is this {hospital}?"
 )
 
 
@@ -521,25 +525,10 @@ def _build(identity: str, *, org: str = ORG_SPOKEN,
 FORAGE_DATA_COLLECTION = CallTemplate(
     name="forage_data_collection",
     description=(
-        "Template 1 — data collection with truthful self-identification. Says "
-        "it is an automated assistant, names the organisation, states the "
-        "purpose, and discloses recording in the opening line."
-    ),
-    instructions=_build(_IDENTITY_TRUTHFUL),
-    greeting=_FORAGE_GREETING.replace("{org}", ORG_SPOKEN),
-    transcribe_hint=_US_TRANSCRIBE_HINT,
-    language="english",
-    org_name=ORG_SPOKEN,
-)
-
-
-FORAGE_HUMAN = CallTemplate(
-    name="forage_human",
-    description=(
-        "Template 2 — same data-collection script, but the agent presents as a "
-        "named person from the organisation rather than announcing itself as "
-        "automated. It still confirms it is automated if asked point-blank, and "
-        "still confirms the call is recorded if asked."
+        "Template 1 — the straightforward data-collection script. Truthful "
+        "about who is calling and why: names the organisation and the purpose, "
+        "uses no pretext or cover story. Spoken by a named person rather than "
+        "announced as automated."
     ),
     instructions=_build(_IDENTITY_HUMAN),
     greeting=(_HUMAN_GREETING
@@ -551,9 +540,28 @@ FORAGE_HUMAN = CallTemplate(
 )
 
 
+# Same script, but announcing itself as automated in the opening line. Not
+# Template 1 — kept because US state disclosure rules (California's B.O.T. Act,
+# Utah's AI Policy Act) or a client requirement may make upfront disclosure
+# mandatory, and switching is then one env var rather than a prompt rewrite.
+FORAGE_AI_DISCLOSED = CallTemplate(
+    name="forage_ai_disclosed",
+    description=(
+        "Variant of Template 1 that announces it is an automated assistant in "
+        "the opening line, and discloses recording upfront. For use where "
+        "upfront AI disclosure is required."
+    ),
+    instructions=_build(_IDENTITY_TRUTHFUL),
+    greeting=_FORAGE_GREETING.replace("{org}", ORG_SPOKEN),
+    transcribe_hint=_US_TRANSCRIBE_HINT,
+    language="english",
+    org_name=ORG_SPOKEN,
+)
+
+
 TEMPLATES: dict[str, CallTemplate] = {
     FORAGE_DATA_COLLECTION.name: FORAGE_DATA_COLLECTION,
-    FORAGE_HUMAN.name: FORAGE_HUMAN,
+    FORAGE_AI_DISCLOSED.name: FORAGE_AI_DISCLOSED,
 }
 
 
