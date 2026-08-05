@@ -1,0 +1,81 @@
+{
+  "call_id": "call-20260805-1756-2f38",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": null,
+  "resolved": false,
+  "duration_seconds": 66,
+  "cost_usd": 0.121612,
+  "template": "forage_data_collection",
+  "model": "gpt-realtime-2",
+  "usage": {
+    "responses": 8,
+    "input_audio": 2816,
+    "input_audio_cached": 1984,
+    "output_audio": 471,
+    "input_text": 28719,
+    "input_text_cached": 21120,
+    "output_text": 294,
+    "cache_hit_rate": 0.7326
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, good evening! I'm an automated assistant from Forage AI \u2014 we verify doctor listings, and this call's recorded. Is this Northside Medical Group?",
+      "timestamp": "17:57:01"
+    },
+    {
+      "role": "caller",
+      "text": "Good evening, again. What do you want?",
+      "timestamp": "17:57:13"
+    },
+    {
+      "role": "agent",
+      "text": "Which office is Dr. Okafor working out of?",
+      "timestamp": "17:57:16"
+    },
+    {
+      "role": "caller",
+      "text": "So, you want the branch that Dr. Wahid practiced at, right?",
+      "timestamp": "17:57:27"
+    },
+    {
+      "role": "agent",
+      "text": "Yes, which office is that?",
+      "timestamp": "17:57:28"
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, well, he works at...",
+      "timestamp": "17:57:37"
+    },
+    {
+      "role": "agent",
+      "text": "Got it, which location is that? What's the street address there?",
+      "timestamp": "17:57:38"
+    },
+    {
+      "role": "caller",
+      "text": "He works at New York City.",
+      "timestamp": "17:57:45"
+    },
+    {
+      "role": "agent",
+      "text": "Which office in New York City is that?",
+      "timestamp": "17:57:46"
+    },
+    {
+      "role": "caller",
+      "text": "Bye.",
+      "timestamp": "17:57:52"
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for checking \u2014 have a good one.",
+      "timestamp": "17:57:54"
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260805-1756-2f38.wav",
+  "recorded_at": "2026-08-05T17:56:52.139549"
+}

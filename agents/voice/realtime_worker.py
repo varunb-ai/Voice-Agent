@@ -505,11 +505,17 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                         # baseline of 0.2-0.5s. silence_duration_ms is a direct
                         # additive component — the model cannot begin until VAD
                         # has waited this long after the caller stops.
+                        # 360ms cut people off. On call 3 the caller said
+                        # "yeah, well, he works at..." and the agent started
+                        # talking 0.20s later, over the top of them. Being
+                        # interrupted mid-sentence reads as far more robotic
+                        # than a slightly longer pause, and most of the latency
+                        # win came from fixing the echo gate, not from this.
                         "turn_detection": {
                             "type":                "server_vad",
                             "threshold":            0.55,
                             "prefix_padding_ms":    300,
-                            "silence_duration_ms":  360,
+                            "silence_duration_ms":  550,
                         },
                         # A phone handset is a near-field mic. This lets the
                         # model separate the caller from line noise and echo,
