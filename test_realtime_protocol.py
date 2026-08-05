@@ -368,6 +368,36 @@ async def main():
           "disclosures cannot be postponed to a later turn")
 
     print("\n" + "=" * 66)
+    print("  BRANCH VALIDATOR — a city is not a branch")
+    print("=" * 66)
+    # A live call saved branch="New York branch", city="New York" as RESOLVED.
+    # Every word passed individually, so the all-filler check never fired, and
+    # a useless record entered the dataset looking clean.
+    from agents.voice.tools import save_branch
+    from agents.voice.memory import CallMemory
+    validator_cases = [
+        ("New York branch",           "New York",     False),
+        ("London Branch",             "London",       False),
+        ("New York City",             None,           False),
+        ("Boston",                    None,           False),
+        ("the Boston office",         None,           False),
+        ("Texas",                     None,           False),
+        ("Riverside Campus",          "Riverside",    False),
+        ("Northgate Campus",          None,           True),
+        ("Riverside Campus",          "Los Angeles",  True),
+        ("Jubilee Hills",             None,           True),
+        ("1420 Beacon Street",        "Boston",       True),
+        ("Mercy General South Campus", "Sacramento",  True),
+    ]
+    for branch, city_arg, expect_ok in validator_cases:
+        mem = CallMemory(call_id="validator-test")
+        mem.clear()
+        got_ok = bool(save_branch(mem, branch, city=city_arg).get("ok"))
+        check(got_ok == expect_ok,
+              f"{'accepts' if expect_ok else 'rejects'} {branch!r}"
+              + (f" with city={city_arg!r}" if city_arg else ""))
+
+    print("\n" + "=" * 66)
     print("  SCENARIO 4 — invalid branch ('the branch') must be rejected")
     print("=" * 66)
     sent3, sess3 = await run_call(script_invalid_branch())

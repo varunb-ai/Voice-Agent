@@ -27,9 +27,23 @@ class CallMemory:
 
     @staticmethod
     def _connect():
+        """Connect to Redis, or fall back to the in-process dict.
+
+        The timeouts matter more than they look. Without them, a machine with
+        no Redis running spends ~4 SECONDS here waiting for the OS connect
+        timeout — and this runs in RealtimeSession.__init__, i.e. on the call
+        path, before the OpenAI socket is even opened. That was four seconds of
+        silence on the callee's line, on every call, for a dependency the
+        realtime path does not require.
+        """
         try:
             import redis  # imported lazily; optional dependency at runtime
-            client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+            client = redis.Redis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                socket_connect_timeout=0.25,
+                socket_timeout=0.25,
+            )
             client.ping()
             return client
         except Exception:

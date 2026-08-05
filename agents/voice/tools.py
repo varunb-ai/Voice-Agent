@@ -174,6 +174,104 @@ _CONJUNCTION_STARTS = {
     "where", "when", "what", "why", "how", "who", "whom", "whose",
 }
 
+
+# ── Bare-city rejection ───────────────────────────────────────────────────────
+# A city is not a branch. A hospital group with five offices in one city is
+# precisely the case this project exists to resolve, so "New York" tells the
+# directory nothing it did not already have.
+#
+# This slipped through before: a live call saved branch="New York branch",
+# city="New York" as a RESOLVED result. Every individual word passed, because
+# "new" and "york" are not filler, so the all-filler check never fired.
+#
+# The distinction being drawn below is between a word that names a site
+# ("Northgate Campus" — a proper name that happens to contain a generic noun)
+# and a word that just means "our presence in <city>" ("New York branch").
+# The former is a usable answer; the latter is the question restated.
+
+_US_STATES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+    "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+    "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
+    "new mexico", "new york", "north carolina", "north dakota", "ohio",
+    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
+    "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
+    "washington", "west virginia", "wisconsin", "wyoming",
+    "district of columbia", "washington dc", "dc",
+}
+
+_MAJOR_CITIES = {
+    # US — the metros a provider directory actually hits
+    "new york", "new york city", "los angeles", "chicago", "houston",
+    "phoenix", "philadelphia", "san antonio", "san diego", "dallas",
+    "austin", "jacksonville", "fort worth", "columbus", "charlotte",
+    "san francisco", "indianapolis", "seattle", "denver", "boston",
+    "nashville", "detroit", "portland", "memphis", "louisville",
+    "milwaukee", "baltimore", "albuquerque", "tucson", "fresno",
+    "sacramento", "kansas city", "atlanta", "miami", "raleigh", "omaha",
+    "minneapolis", "tulsa", "cleveland", "wichita", "arlington",
+    "new orleans", "tampa", "honolulu", "pittsburgh", "cincinnati",
+    "st louis", "saint louis", "orlando", "san jose", "el paso",
+    "oklahoma city", "las vegas", "long beach", "virginia beach",
+    "colorado springs", "st petersburg", "salt lake city", "buffalo",
+    "richmond", "birmingham", "rochester", "des moines", "spokane",
+    "madison", "boise", "hartford", "charleston", "savannah",
+    # India — used during quality testing
+    "hyderabad", "mumbai", "delhi", "new delhi", "chennai", "bengaluru",
+    "bangalore", "pune", "kolkata", "ahmedabad", "ongole", "vijayawada",
+    "visakhapatnam", "london",
+}
+
+# Words meaning "our presence in <somewhere>" rather than naming a place.
+# "the New York branch" restates the city; "Northgate Campus" is a name.
+_PRESENCE_WORDS = {
+    "branch", "branches", "office", "offices", "location", "locations",
+    "city", "site", "sites", "area", "region", "unit", "units",
+}
+
+# Words that can legitimately form part of a site's proper name.
+_SITE_NAME_WORDS = {
+    "campus", "campuses", "clinic", "clinics", "center", "centre",
+    "centers", "centres", "hospital", "pavilion", "tower", "building",
+    "wing", "annex", "institute", "practice", "medical",
+}
+
+_ALL_PLACE_NOUNS = _PRESENCE_WORDS | _SITE_NAME_WORDS
+
+
+def _strip_place_nouns(text: str) -> str:
+    """Remove generic place nouns, leaving whatever actually names somewhere."""
+    words = [w for w in text.split() if w not in _ALL_PLACE_NOUNS
+             and w not in {"the", "our", "a", "an", "in", "at", "of"}]
+    return " ".join(words).strip()
+
+
+def _is_bare_city(cleaned: str, city: str | None) -> str | None:
+    """Return a rejection reason if `cleaned` names no more than a city."""
+    core = _strip_place_nouns(cleaned)
+    if not core:
+        return None          # handled by the all-filler check
+
+    # The branch adds nothing the city field did not already say.
+    if city and core == _strip_place_nouns(city.lower().strip().rstrip(".,!?")):
+        return (f"'{city}' is already the city — the branch field needs the "
+                f"specific office or site within it, not the city again")
+
+    if core in _MAJOR_CITIES or core in _US_STATES:
+        words = cleaned.split()
+        # "New York" / "Boston" on its own.
+        if core == cleaned:
+            return (f"'{cleaned}' is a city or state, not a specific office. "
+                    f"Ask which office or site within it.")
+        # "the New York branch" — a presence word plus the city restates it.
+        # "Northgate Campus" is left alone: 'campus' can name a real site.
+        if any(w in _PRESENCE_WORDS for w in words):
+            return (f"'{cleaned}' only says there is a presence in {core} — "
+                    f"ask for the name or address of the specific office.")
+    return None
+
 def save_branch(
     memory: CallMemory,
     branch: str,
@@ -196,6 +294,9 @@ def save_branch(
         return {"ok": False, "error": f"'{branch}' starts with a single letter — not a real location name"}
     if words and all(w in _INVALID_BRANCH_WORDS for w in words):
         return {"ok": False, "error": f"'{branch}' contains only filler words"}
+    bare_city = _is_bare_city(cleaned, city)
+    if bare_city:
+        return {"ok": False, "error": bare_city}
     memory.update(branch=branch, city=city, schedule=schedule, resolved=True)
     return {"ok": True, "branch": branch, "city": city, "schedule": schedule}
 
