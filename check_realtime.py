@@ -104,13 +104,35 @@ async def main() -> int:
               f"voice {settings.realtime_voice!r} requires gpt-realtime-2",
               f"REALTIME_MODEL={settings.realtime_model} — use a legacy voice "
               f"(shimmer, alloy, sage...) or switch the model")
+    # Not a blocker: the template degrades gracefully, telling callers there is
+    # no phone line and giving the email. Fine for testing, weak for production.
     from agents.voice.templates import is_usable_callback_number
-    check(is_usable_callback_number(settings.callback_number),
-          "CALLBACK_NUMBER is a number someone could actually call",
-          f"{settings.callback_number!r} is unusable — the agent will tell callers "
-          f"it has no phone line and give the email instead")
+    if is_usable_callback_number(settings.callback_number):
+        print(f"{_PASS} CALLBACK_NUMBER is a number someone could actually call")
+    else:
+        print(f"{_WARN} CALLBACK_NUMBER {settings.callback_number!r} is unusable. "
+              f"The agent will say it has no phone line and give the email "
+              f"instead. Does not block testing; get a real number before "
+              f"calling hospitals.")
+
     check(not settings.server_public_url.startswith("https://your-"),
-          "SERVER_PUBLIC_URL is set to a real tunnel")
+          "SERVER_PUBLIC_URL is not the placeholder default")
+
+    # Checking the string isn't the default is nearly worthless — a stale ngrok
+    # URL from a previous session passes that and then silently swallows every
+    # webhook, so the call connects to dead air. Actually probe it.
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=False) as c:
+            r = await c.get(settings.server_public_url.rstrip("/") + "/")
+        # FastAPI answers 404 for GET / — that still proves the tunnel reaches us.
+        print(f"{_PASS} SERVER_PUBLIC_URL is live (HTTP {r.status_code})")
+    except Exception as e:
+        print(f"{_WARN} SERVER_PUBLIC_URL is not reachable ({type(e).__name__}). "
+              f"Expected if ngrok isn't running yet — but if it IS running, this "
+              f"URL is stale. Restart ngrok, copy the new URL into .env, and "
+              f"re-run. A stale URL means Twilio's webhooks go nowhere and the "
+              f"callee hears silence.")
 
     # ── 2. Template ──────────────────────────────────────────────────────
     print("\n2. Template")
