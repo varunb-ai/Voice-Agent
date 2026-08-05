@@ -105,17 +105,21 @@ class Settings(BaseSettings):
     realtime_max_response_tokens: int = 400
 
     # ── Realtime pricing, USD per 1M tokens ──────────────────────────────────
-    # THESE ARE UNVERIFIED PLACEHOLDERS and they differ per model. The old code
-    # hardcoded preview-era rates ($100/$200 audio) regardless of which model
-    # actually served the call. Set these from the OpenAI pricing page for
-    # whatever REALTIME_MODEL resolves to, then reconcile the printed total
-    # against the billing dashboard before quoting a per-minute figure.
+    # Set for gpt-realtime-2, from developers.openai.com/api/docs/pricing,
+    # checked 2026-08-05. The old code hardcoded preview-era rates
+    # ($100/$200 audio, $5/$20 text) regardless of which model actually served
+    # the call — that is roughly 3x the real audio rate.
+    #
+    # gpt-realtime-2 and gpt-realtime differ in ONE value:
+    #     text output   gpt-realtime-2 $24.00   gpt-realtime $16.00
+    # Everything else is identical across the two. If REALTIME_MODEL changes,
+    # change price_text_out to match.
     price_audio_in: float = 32.0
     price_audio_in_cached: float = 0.40
     price_audio_out: float = 64.0
     price_text_in: float = 4.00
     price_text_in_cached: float = 0.40
-    price_text_out: float = 16.0
+    price_text_out: float = 24.0   # gpt-realtime-2; use 16.0 for gpt-realtime
     # Telephony, USD per minute — DESTINATION-DEPENDENT, not a global rate.
     # Currently set for US -> India mobile, which is the quality-test target.
     # US -> US is roughly a third of this. Change it when the target changes,
