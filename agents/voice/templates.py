@@ -198,11 +198,16 @@ class CallTemplate:
 
     ``instructions`` must not contain per-call data — see module docstring.
 
-    ``language`` is fixed by the template, NOT by settings.agent_language. The
-    classic pipeline switched language from that setting; templates do not,
-    because the language wording is baked into the static (cached) instructions.
-    A template that ignores an explicitly-set AGENT_LANGUAGE must say so loudly
-    rather than silently speaking the wrong language — see language_warning().
+    ``language`` and ``org_name`` are fixed by the template, NOT by
+    settings.agent_language / settings.org_name. The classic pipeline
+    interpolated both from config; templates cannot, because that text is baked
+    into the static instructions that form the prompt-cache prefix — anything
+    per-deployment in there breaks caching for everyone.
+
+    The consequence is that two real config values are inert on this path. That
+    must never be silent: someone set them deliberately, and a call that goes
+    out under the wrong org name or in the wrong language cannot be taken back.
+    See config_warnings().
     """
     name: str
     description: str
@@ -210,19 +215,36 @@ class CallTemplate:
     greeting: str
     transcribe_hint: str
     language: str = "english"
+    org_name: str = ""
 
-    def language_warning(self, configured_language: str) -> Optional[str]:
-        """Return a warning if AGENT_LANGUAGE disagrees with this template."""
-        configured = (configured_language or "").strip().lower()
-        if configured and configured != self.language:
-            return (
-                f"AGENT_LANGUAGE={configured} is set, but template "
+    def config_warnings(self, *, agent_language: str, org_name: str) -> list[str]:
+        """Report settings this template declares but does not read.
+
+        Returns human-readable warnings, empty if config and template agree.
+        """
+        warnings: list[str] = []
+
+        configured_lang = (agent_language or "").strip().lower()
+        if configured_lang and configured_lang != self.language:
+            warnings.append(
+                f"AGENT_LANGUAGE={configured_lang} is set, but template "
                 f"'{self.name}' is {self.language}-only and ignores it. "
                 f"This call will be conducted in {self.language}. "
-                f"For {configured}, use the classic pipeline (USE_REALTIME=false) "
-                f"or add a {configured} template."
+                f"For {configured_lang}, use the classic pipeline "
+                f"(USE_REALTIME=false) or add a {configured_lang} template."
             )
-        return None
+
+        configured_org = (org_name or "").strip()
+        if self.org_name and configured_org and configured_org != self.org_name:
+            warnings.append(
+                f"ORG_NAME={configured_org!r} is set, but template "
+                f"'{self.name}' says {self.org_name!r} in its script and "
+                f"ignores the setting. The callee will hear "
+                f"{self.org_name!r}. Decide which is correct and change the "
+                f"template text, not just the env var."
+            )
+
+        return warnings
 
     def build_greeting(self, doctor: Doctor) -> str:
         return self.greeting.format(
@@ -272,6 +294,10 @@ FORAGE_DATA_COLLECTION = CallTemplate(
     greeting=_FORAGE_GREETING,
     transcribe_hint=_US_TRANSCRIBE_HINT,
     language="english",
+    # The org name spoken on the call. Comes from Prabhash's Template 1 script
+    # ("I'm calling from Forage AI") and is written into the instructions and
+    # greeting above — changing it means editing those strings, not ORG_NAME.
+    org_name="Forage AI",
 )
 
 

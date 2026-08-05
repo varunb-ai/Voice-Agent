@@ -435,12 +435,13 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
     sess     = RealtimeSession(call_sid, doctor)
     template = get_template(settings.call_template)
 
-    # Never let a configured language be silently ignored — someone set it for
-    # a reason, and a call going out in the wrong language is not recoverable.
-    lang_warning = template.language_warning(settings.agent_language)
-    if lang_warning:
-        log.warning("[Realtime] %s", lang_warning)
-        print(f"\n  ⚠  {lang_warning}\n", flush=True)
+    # Never let configured settings be silently ignored — someone set them for a
+    # reason, and a call going out under the wrong org name or in the wrong
+    # language is not recoverable once the callee has heard it.
+    for warning in template.config_warnings(agent_language=settings.agent_language,
+                                            org_name=settings.org_name):
+        log.warning("[Realtime] %s", warning)
+        print(f"\n  ⚠  {warning}\n", flush=True)
 
     greeting = template.build_greeting(doctor)
     context  = template.build_context(

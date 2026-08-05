@@ -117,14 +117,15 @@ async def main() -> int:
         return 1
     print(f"      {tpl.name} — {tpl.description}")
 
-    # AGENT_LANGUAGE vs template language. Not a failure — the template wins by
-    # design — but it must never pass silently, because someone set that value
-    # deliberately and a call in the wrong language cannot be taken back.
-    warning = tpl.language_warning(settings.agent_language)
-    if warning:
-        print(f"{_WARN} {warning}")
-    else:
-        print(f"{_PASS} AGENT_LANGUAGE agrees with the template ({tpl.language})")
+    # Settings the template declares but does not read. Not failures — the
+    # template wins by design — but they must never pass silently, because
+    # someone set them deliberately and a call cannot be taken back.
+    warnings = tpl.config_warnings(agent_language=settings.agent_language,
+                                   org_name=settings.org_name)
+    for w in warnings:
+        print(f"{_WARN} {w}")
+    if not warnings:
+        print(f"{_PASS} AGENT_LANGUAGE and ORG_NAME agree with the template")
 
     doctor = Doctor(doctor_name="Dr. Jane Okafor", hospital_name="Northside Medical Group",
                     specialization="Cardiology")
