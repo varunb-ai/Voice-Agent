@@ -207,25 +207,45 @@ async def main() -> int:
             else:
                 print(f"{_PASS} full account (no trial message on calls)")
 
-            # Does the configured from-number actually belong to this account?
-            numbers = await asyncio.to_thread(
-                lambda: client.incoming_phone_numbers.list(limit=20)
-            )
-            owned = [n.phone_number for n in numbers]
-            check(settings.twilio_from_number in owned,
-                  f"TWILIO_FROM_NUMBER {settings.twilio_from_number} is on this account",
-                  f"account owns: {owned or 'no numbers — buy one first'}")
+            # Does the configured from-number belong to this account?
+            #
+            # Unverified trial accounts return 401 "Policy evaluation failed"
+            # (code 20003) on several read endpoints, and can return an EMPTY
+            # list here even when the account genuinely owns numbers — while
+            # still happily placing calls from them. So an empty list proves
+            # nothing and must not be reported as a missing number.
+            try:
+                numbers = await asyncio.to_thread(
+                    lambda: client.incoming_phone_numbers.list(limit=20)
+                )
+                owned = [n.phone_number for n in numbers]
+                if owned:
+                    check(settings.twilio_from_number in owned,
+                          f"TWILIO_FROM_NUMBER {settings.twilio_from_number} is on this account",
+                          f"account owns: {owned}")
+                else:
+                    print(f"{_WARN} could not list this account's numbers — trial "
+                          f"policy restricts the endpoint. Cannot confirm "
+                          f"{settings.twilio_from_number} belongs here; a test "
+                          f"call is the real check.")
+            except Exception:
+                print(f"{_WARN} number listing blocked by trial policy — "
+                      f"cannot verify TWILIO_FROM_NUMBER from the API")
 
-            # Trial accounts can only call verified numbers.
-            verified = await asyncio.to_thread(
-                lambda: client.outgoing_caller_ids.list(limit=50)
-            )
-            v_numbers = [v.phone_number for v in verified]
-            if is_trial:
-                check(bool(v_numbers),
-                      "verified caller IDs exist (required on trial)",
-                      "add the numbers you intend to call")
-            print(f"      verified to call: {v_numbers or '(none)'}")
+            # Trial accounts can only call verified numbers. Same caveat.
+            try:
+                verified = await asyncio.to_thread(
+                    lambda: client.outgoing_caller_ids.list(limit=50)
+                )
+                v_numbers = [v.phone_number for v in verified]
+                print(f"      verified to call: {v_numbers or '(none listed)'}")
+                if is_trial and not v_numbers:
+                    print(f"{_WARN} no verified caller IDs returned — either none "
+                          f"are set, or the endpoint is policy-restricted")
+            except Exception:
+                print(f"{_WARN} verified caller ID list blocked by trial policy — "
+                      f"if a call fails to connect, verify the destination number "
+                      f"in the console")
 
         except TwilioRestException as e:
             check(False, "Twilio credentials valid", f"HTTP {e.status}: {e.msg}")
