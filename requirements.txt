@@ -3,7 +3,21 @@ pydantic>=2.7
 pydantic-settings>=2.3
 python-dotenv>=1.0
 httpx>=0.27
+requests>=2.31        # Twilio recording download
 rich>=13.7            # pretty console output
+numpy>=1.26
+scipy>=1.11           # resampling in audio_utils
+
+# ── Voice Agent (Agent 4) — Twilio + OpenAI Realtime (USE_REALTIME=true) ─
+#   This is the set the realtime speech-to-speech path actually needs.
+fastapi>=0.110
+uvicorn>=0.29
+websockets>=12.0      # Realtime API transport
+python-multipart>=0.0.9  # REQUIRED: FastAPI form parsing for Twilio webhooks.
+                         # Starlette imports it lazily, so a missing install
+                         # only surfaces as a 500 on the first webhook.
+twilio>=9.0
+tiktoken>=0.7         # token counts in check_realtime.py
 
 # ── Agent 1: Doctor Discovery (crawling) ─────────────
 crawl4ai>=0.4.0
@@ -30,11 +44,16 @@ celery>=5.3
 # ── Monitoring: Prometheus client (Grafana scrapes it) ─
 prometheus-client>=0.20
 
-# ── Voice Agent (Agent 4) — local CPU demo (talk via mic/speakers) ─
+# ── Voice Agent — classic pipeline only (USE_REALTIME=false) ─────────
+#   NOT needed for the realtime speech-to-speech path. twilio_worker imports
+#   these lazily so a realtime-only deployment can skip them entirely.
 faster-whisper>=1.0      # Whisper STT, runs on CPU
 pyttsx3>=2.90            # local TTS via the built-in OS voice (CosyVoice stand-in)
 sounddevice>=0.4         # microphone capture
-soundfile>=0.12          # write wav for Whisper
+webrtcvad>=2.0.10        # end-of-speech detection
+
+# ── Shared ────────────────────────────────────────────
+soundfile>=0.12          # writes the call recording WAV (both paths)
 
 # ── Voice Agent — telephony/production (install when going live) ─
 # livekit-agents
