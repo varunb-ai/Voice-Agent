@@ -198,10 +198,21 @@ def conversation_metrics(turns: list) -> dict:
                 seen[key] = seen.get(key, 0) + 1
     repeated = sum(n - 1 for n in seen.values() if n > 1)
 
+    # Denominators, so counts can be compared across calls of different
+    # difficulty. A hostile caller who answers nothing gives the agent six
+    # chances to staple; a cooperative one gives it one. Raw counts make the
+    # easy call look better when it may simply have had fewer opportunities.
+    caller = [t for t in turns if t.role == "caller"]
+    caller_questions = sum(1 for t in caller if "?" in t.text)
     return {
         "agent_turns": len(agent),
+        "caller_turns": len(caller),
+        "caller_questions": caller_questions,
         "question_turns": sum(1 for t in agent if "?" in t.text),
         "stapled_questions": stapled,
+        # The rate is the comparable figure: of the times they asked something,
+        # how often did the agent answer and ask back in the same breath?
+        "staple_rate": round(stapled / caller_questions, 2) if caller_questions else None,
         "back_to_back_asks": back_to_back,
         "repeated_sentences": repeated,
     }
@@ -698,11 +709,15 @@ class RealtimeSession:
         print(f"  CONVERSATION SHAPE", flush=True)
         print(f"    agent turns          {m['agent_turns']}", flush=True)
         print(f"    of which questions   {m['question_turns']}", flush=True)
-        print(f"    stapled onto answers {m['stapled_questions']}"
-              f"{'   <- asked while answering them' if m['stapled_questions'] else ''}",
-              flush=True)
+        rate = f"{m['staple_rate']:.0%}" if m['staple_rate'] is not None else "n/a"
+        print(f"    caller turns         {m['caller_turns']} "
+              f"({m['caller_questions']} of them questions)", flush=True)
+        print(f"    stapled onto answers {m['stapled_questions']} of "
+              f"{m['caller_questions']}  ({rate})", flush=True)
         print(f"    asked twice running  {m['back_to_back_asks']}", flush=True)
-        print(f"    repeated sentences   {m['repeated_sentences']}", flush=True)
+        print(f"    repeated sentences   {m['repeated_sentences']}"
+              f"{'   <- this is the one that correlates with a bad call' if m['repeated_sentences'] else ''}",
+              flush=True)
 
         self._print_cost(duration)
 
