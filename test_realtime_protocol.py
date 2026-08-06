@@ -426,6 +426,14 @@ async def main():
           "answering and asking in one turn is permitted")
     check("It is asking THE SAME THING over and over" in flat,
           "repetition named as the actual failure")
+    # A live call answered "what's the reason for calling?" by repeating its
+    # name, org and job — all three already said in the greeting 15 seconds
+    # earlier — and never mentioned what it wanted. The caller replied "What
+    # should I do?". WHO and WHY are different questions.
+    check("A job description is not a reason for calling" in flat,
+          "why-are-you-calling is answered with the actual ask")
+    check("This exemption covers WHO you are. It does NOT cover why you are" in flat,
+          "identity-repetition exemption does not extend to purpose")
     check("NEVER ask for the branch twice in the same wording" in flat,
           "cannot repeat the branch question verbatim")
     check('say ONLY "Of course, take your time." and then STOP' in flat,
