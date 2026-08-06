@@ -445,6 +445,20 @@ async def main():
           "closing is tied to the actual outcome")
     check("Never claim to have noted, saved, or recorded a location you were" in flat,
           "cannot claim to have saved a location it never got")
+    # Directives are injected as role:"user" input_text items — the standard
+    # workaround, but it means a fake caller utterance is one bug away from
+    # landing in the saved transcript and quietly polluting the dataset.
+    # They cannot reach add_turn (which only fires on audio-derived events),
+    # and this asserts it rather than trusting it.
+    for t in sess.turns:
+        check("(system:" not in t.text,
+              f"no injected directive leaked into the transcript as a turn")
+        break
+    check(not any("(system:" in t.text for t in sess.turns),
+          "transcript contains no injected system directives")
+    check(not any(t.role == "caller" and "goodbye now" in t.text for t in sess.turns),
+          "transcript contains no injected closing prompt")
+
     check(sess.memory.get("branch") == "Northgate Campus", "branch saved to memory")
     check(bool(sess.memory.get("resolved")), "call marked resolved")
 
@@ -548,6 +562,29 @@ async def main():
         ms = t.get("audio_end_ms")
         check(isinstance(ms, int) and ms >= 0,
               f"audio_end_ms is a sane offset ({ms}ms)")
+
+    print("\n" + "=" * 66)
+    print("  DETECTORS — guard against silently matching nothing")
+    print("=" * 66)
+    # A patch script once wrote literal backspace bytes (0x08) into this regex,
+    # turning it into '\x08(which|...' so it matched nothing at all. The code
+    # ran, raised nothing, and the feature simply did not exist. Caught only
+    # because a manual check returned False on an obvious positive. Code that
+    # silently does nothing looks exactly like code that works.
+    for text, expected in [
+        ("Which branch is Dr. Okafor working out of?", True),
+        ("Yes, it is recorded. Which branch is she working out of?", True),
+        ("And where does she practise?", True),
+        ("What location is that?", True),
+        ("Of course, take your time.", False),
+        ("Got it, thanks — have a good day.", False),
+        ("Perfect, I have that — thanks a lot.", False),
+        ("Which branch is she at.", False),          # no question mark
+    ]:
+        check(rw._is_location_ask(text) == expected,
+              f"location-ask detector: {expected!s:5} for {text[:44]!r}")
+    check("\x08" not in rw._LOCATION_ASK.pattern,
+          "no control characters corrupting the pattern")
 
     print("\n" + "=" * 66)
     print("  GROUNDING — never save a location the caller did not say")

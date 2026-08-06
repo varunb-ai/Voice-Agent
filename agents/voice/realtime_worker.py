@@ -389,6 +389,11 @@ class RealtimeSession:
         # model to stop. See realtime_max_location_asks.
         self._location_asks: int = 0
         self._give_up_sent: bool = False
+        # Turn index when the give-up directive was injected, so we can tell
+        # afterwards whether the agent actually acted on it. The directive is
+        # appended to the conversation and there is no second lever, so its
+        # effectiveness has to be measured rather than assumed.
+        self._give_up_at_turn: Optional[int] = None
 
         # Token usage tracking (from response.done events).
         # Cached tokens are counted SEPARATELY and billed at the cached rate —
@@ -642,6 +647,19 @@ class RealtimeSession:
             # been ignored across three prompt versions; measuring them makes
             # the next edit evaluable instead of impressionistic.
             "conversation":   conversation_metrics(merged),
+            # Did the ask-budget directive actually work? It is injected as a
+            # conversation item with no follow-up lever, so if the agent
+            # acknowledges it and asks again there is nothing else to pull.
+            # Recorded so the budget is evaluated, not trusted.
+            "ask_budget": {
+                "limit":            settings.realtime_max_location_asks,
+                "directive_sent":   self._give_up_sent,
+                "agent_turns_after": (
+                    sum(1 for t in self.turns[self._give_up_at_turn:]
+                        if t.role == "agent")
+                    if self._give_up_at_turn is not None else None),
+                "escalated":        bool(self.memory.get("escalated")),
+            },
             "branch_needed_clarification":
                 bool(self.memory.get("branch_needed_clarification")),
             "model":          settings.realtime_model,
@@ -1218,6 +1236,7 @@ async def _oai_to_twilio(
                         if (sess._location_asks >= settings.realtime_max_location_asks
                                 and not sess._give_up_sent):
                             sess._give_up_sent = True
+                            sess._give_up_at_turn = len(sess.turns)
                             print(f"[Realtime] {sess._location_asks} asks with no "
                                   f"location — telling the agent to stop and "
                                   f"escalate", flush=True)
