@@ -108,6 +108,22 @@ def _wire_samples(raw: bytes) -> int:
     return len(raw) if _passthrough_enabled() else len(raw) // 2
 
 
+def _echo_gate_allows(raw: bytes) -> bool:
+    """Should this caller frame reach OpenAI while the agent is speaking?
+
+    Governs whether the caller can interrupt at all. See REALTIME_ECHO_GATE.
+    """
+    mode = settings.realtime_echo_gate
+    if mode == "pass":
+        return True
+    if mode == "energy":
+        arr = _wire_to_pcm16(raw)
+        if arr.size == 0:
+            return False
+        return float(np.sqrt(np.mean(arr ** 2))) >= settings.realtime_echo_rms
+    return False   # "drop"
+
+
 # ── Tool schema conversion ────────────────────────────────────────────────────
 
 def _realtime_tools() -> list[dict]:
@@ -801,13 +817,23 @@ async def _twilio_to_oai(
                         oai_payload = base64.b64encode(pcm_24k.tobytes()).decode()
                     if not sess.listen_enabled.is_set():
                         continue
-                    if sess.agent_speaking:
-                        # Echo window: the handset is still playing the agent's
-                        # own audio back down the line. DROP these frames.
-                        # They used to be buffered and replayed once the gate
-                        # opened, which billed the agent's own echo as caller
-                        # audio input on every single turn and could re-trigger
-                        # server VAD as a phantom barge-in.
+                    if sess.agent_speaking and not _echo_gate_allows(raw_bytes):
+                        # Only reached under REALTIME_ECHO_GATE=drop|energy.
+                        #
+                        # Dropping every frame here made the agent
+                        # uninterruptible. OpenAI's VAD can only fire on audio
+                        # it receives, so with the gate shut
+                        # input_audio_buffer.speech_started never arrives and
+                        # the barge-in handler below is unreachable: a
+                        # receptionist who starts talking gets talked over
+                        # until the agent finishes its turn. That is the most
+                        # robotic thing a voice agent can do, and no prompt
+                        # wording fixes it.
+                        #
+                        # Default is now "pass". near_field noise reduction and
+                        # semantic_vad both post-date this gate and may handle
+                        # line echo on their own — an empirical question one
+                        # call answers.
                         continue
                     await oai_ws.send(json.dumps({
                         "type":  "input_audio_buffer.append",
@@ -851,6 +877,9 @@ async def _oai_to_twilio(
     # monotonic clock when this response's first audio chunk went to Twilio;
     # playback ends at this + audio duration, which is what the echo gate needs
     _first_delta_sent_at: Optional[float] = None
+    # id of the assistant item currently being spoken — needed to truncate it
+    # to what the caller actually heard when they interrupt
+    _current_item_id: Optional[str] = None
 
     try:
         async for raw in oai_ws:
@@ -879,6 +908,30 @@ async def _oai_to_twilio(
                         await twilio_ws.send_text(json.dumps({
                             "event": "clear", "streamSid": sess.stream_sid,
                         }))
+                        # Cancelling stops generation but leaves the FULL
+                        # response in OpenAI's conversation history, while the
+                        # caller only heard the part that had played. The model
+                        # then reasons as though it said things nobody heard —
+                        # it won't repeat them, and may refer back to them
+                        # ("as I mentioned") about words never spoken.
+                        #
+                        # Truncate the item to what actually reached the ear.
+                        # Twilio plays what we send at realtime speed, so
+                        # elapsed-since-first-chunk is the audio they heard,
+                        # capped at what was generated.
+                        if _current_item_id and _first_delta_sent_at is not None:
+                            heard_ms = int((time.monotonic() - _first_delta_sent_at) * 1000)
+                            generated_ms = int(_samples_this_response / _wire_sample_rate() * 1000)
+                            audio_end_ms = max(0, min(heard_ms, generated_ms))
+                            await oai_ws.send(json.dumps({
+                                "type": "conversation.item.truncate",
+                                "item_id": _current_item_id,
+                                "content_index": 0,
+                                "audio_end_ms": audio_end_ms,
+                            }))
+                            print(f"[Realtime] Truncated to {audio_end_ms}ms — "
+                                  f"the model's context now matches what was heard",
+                                  flush=True)
                     except Exception:
                         pass
 
@@ -938,6 +991,7 @@ async def _oai_to_twilio(
                         _samples_this_response += _wire_samples(raw_pcm)
                         if _first_delta_sent_at is None:
                             _first_delta_sent_at = time.monotonic()
+                        _current_item_id = msg.get("item_id") or _current_item_id
                         # Buffer for recording: stamp only the first delta of this response.
                         # All deltas arrive fast (~0.2s for a 2s response) so we must NOT
                         # timestamp each chunk individually — they'd all pile up at the same
@@ -1154,6 +1208,7 @@ async def _oai_to_twilio(
                 else:
                     _echo_cooldown = max(0.3, _audio_seconds + 0.25)
                 _first_delta_sent_at = None
+                _current_item_id = None
                 _samples_this_response = 0
                 async def _end_speaking_gate(s=sess, delay=_echo_cooldown):
                     await asyncio.sleep(delay)

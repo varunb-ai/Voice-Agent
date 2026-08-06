@@ -248,6 +248,37 @@ def script_tool_fires_mid_question():
     ]
 
 
+def script_barge_in():
+    """Caller interrupts while the agent is mid-sentence.
+
+    This path was unreachable for the whole project: caller audio was dropped
+    while agent_speaking was true, OpenAI's VAD only fires on audio it
+    receives, so input_audio_buffer.speech_started never arrived and the
+    barge-in handler was dead code. The agent talked over anyone who tried.
+
+    With the gate open it fires, and cancelling must be followed by
+    conversation.item.truncate — otherwise OpenAI's context keeps the whole
+    generated response while the caller heard only the opening words, and the
+    model later refers back to things nobody heard.
+    """
+    import base64
+    chunk = base64.b64encode(b"\xff" * 800).decode()
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, good afternoon..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        # agent starts a long turn
+        {"type": "response.output_audio.delta", "delta": chunk, "item_id": "item_abc"},
+        {"type": "response.output_audio.delta", "delta": chunk, "item_id": "item_abc"},
+        {"type": "response.output_audio.delta", "delta": chunk, "item_id": "item_abc"},
+        # caller cuts in partway through
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Sorry, she's at the Northgate campus."},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
 def script_invalid_branch():
     """A bare city must be rejected by save_branch and the call must continue."""
     return HANDSHAKE + [
@@ -457,6 +488,26 @@ async def main():
           "asks for a closing instead of hanging up on a question")
     check(sess5.memory.get("branch") == "Northgate Campus",
           "the grounded branch is still saved")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 6 — caller interrupts mid-sentence")
+    print("=" * 66)
+    check(settings.realtime_echo_gate != "drop",
+          "echo gate lets caller audio through while the agent speaks",
+          "REALTIME_ECHO_GATE=drop makes the agent uninterruptible — OpenAI's "
+          "VAD never sees the audio, so barge-in cannot fire")
+    sent6, _ = await run_call(script_barge_in())
+    cancels = [m for m in sent6 if m.get("type") == "response.cancel"]
+    truncs = [m for m in sent6 if m.get("type") == "conversation.item.truncate"]
+    check(bool(cancels), "barge-in cancels the in-flight response")
+    check(bool(truncs), "barge-in also TRUNCATES the item to what was heard")
+    if truncs:
+        t = truncs[0]
+        check(t.get("item_id") == "item_abc",
+              "truncate targets the item that was being spoken")
+        ms = t.get("audio_end_ms")
+        check(isinstance(ms, int) and ms >= 0,
+              f"audio_end_ms is a sane offset ({ms}ms)")
 
     print("\n" + "=" * 66)
     print("  GROUNDING — never save a location the caller did not say")

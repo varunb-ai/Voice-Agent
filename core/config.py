@@ -97,7 +97,23 @@ class Settings(BaseSettings):
 
     # Use OpenAI Realtime API instead of the classic STT→LLM→TTS pipeline.
     # Latency: ~300-500ms vs ~2s. Cost: ~$0.06/min vs ~$0.01/min.
-    use_realtime: bool = False
+    # Defaults describe the path this project actually runs. They previously
+    # described the retired classic pipeline, so a fresh clone booted into a
+    # different system than the one being tested.
+    use_realtime: bool = True
+
+    # What to do with caller audio while the agent is speaking.
+    #   "pass"   — forward it. The caller can interrupt, because OpenAI's VAD
+    #              only fires on audio it receives. Relies on near_field noise
+    #              reduction and semantic_vad to separate speech from line echo,
+    #              neither of which existed when this gate was written.
+    #   "energy" — forward only frames above realtime_echo_rms; real speech
+    #              passes, quiet line echo does not.
+    #   "drop"   — discard them. No echo, but the agent CANNOT be interrupted:
+    #              no audio reaches OpenAI, so speech_started never fires and
+    #              the barge-in handler is unreachable.
+    realtime_echo_gate: str = "pass"
+    realtime_echo_rms: float = 0.020
 
     # Which calling script to run — see agents/voice/templates.py
     call_template: str = "forage_data_collection"
@@ -127,7 +143,7 @@ class Settings(BaseSettings):
     #           resample out. Two fewer resamples per 20ms frame.
     # "pcm"   — PCM16 24kHz. Requires converting every frame in both directions.
     # Confirm the account/API accepts pcmu with: python check_realtime.py --audio-probe
-    realtime_audio_format: str = "pcm"
+    realtime_audio_format: str = "pcmu"
 
     # "near_field" | "far_field" | "off".
     # Untested. The earlier justification ("a handset is a near-field mic") was
