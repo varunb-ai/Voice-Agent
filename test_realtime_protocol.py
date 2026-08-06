@@ -418,8 +418,14 @@ async def main():
     # A live call welded the same branch question onto four consecutive
     # answers. The prose rule against it was already there and was ignored
     # every time, so it is now a hard constraint on the shape of the output.
-    check("YOUR TURN CONTAINS NO QUESTION MARK" in flat,
-          "answering a question forbids asking one in the same turn")
+    # NOT "never ask while answering" — that rule shipped, worked (staple_rate
+    # 100% -> 50%), and produced 13 seconds of dead air while a confused caller
+    # asked "hello, are you there?". Ending a turn with nothing to respond to
+    # is worse than asking. The failure was always repetition, not the question.
+    check("Answering and then asking in the same breath is FINE" in flat,
+          "answering and asking in one turn is permitted")
+    check("It is asking THE SAME THING over and over" in flat,
+          "repetition named as the actual failure")
     check("NEVER ask for the branch twice in the same wording" in flat,
           "cannot repeat the branch question verbatim")
     check('say ONLY "Of course, take your time." and then STOP' in flat,

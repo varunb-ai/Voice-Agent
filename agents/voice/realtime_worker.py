@@ -1094,6 +1094,9 @@ async def _oai_to_twilio(
     # id of the assistant item currently being spoken — needed to truncate it
     # to what the caller actually heard when they interrupt
     _current_item_id: Optional[str] = None
+    # response ids already accounted for, so a repeated response.done cannot
+    # double-count its tokens into the cost figure
+    _counted_responses: set[str] = set()
 
     try:
         async for raw in oai_ws:
@@ -1510,7 +1513,21 @@ async def _oai_to_twilio(
                         print(f"[Realtime] Echo cooldown done ({delay:.2f}s) — "
                               f"listening for caller", flush=True)
                 asyncio.create_task(_end_speaking_gate())
-                usage = msg.get("response", {}).get("usage", {})
+                # Account each response's tokens ONCE. A live call logged the
+                # same usage line twice, identical to the token
+                # (in_text=4572 cached=4416 in_audio=372 out_audio=108), and
+                # counted 6 responses against 4 audio blocks. Every duplicate
+                # inflates the cost figure — the one number this project has
+                # been trying to get honest.
+                _resp_id = msg.get("response", {}).get("id")
+                if _resp_id and _resp_id in _counted_responses:
+                    log.debug("[Realtime] duplicate response.done for %s — "
+                              "usage already counted", _resp_id)
+                    usage = {}
+                else:
+                    if _resp_id:
+                        _counted_responses.add(_resp_id)
+                    usage = msg.get("response", {}).get("usage", {})
                 if usage:
                     details_in  = usage.get("input_token_details",  {})
                     details_out = usage.get("output_token_details", {})
