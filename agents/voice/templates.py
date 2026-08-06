@@ -445,20 +445,21 @@ _FORAGE_GREETING = (
 # script as specified ("I'm calling from Forage AI. We're collecting or
 # validating publicly available information about doctors") — spoken by a named
 # person rather than announced as automated.
-# Written to sound like a person picking up the phone, not like copy being
-# read. Differences that matter, all small:
-#   "Oh hi" and "sorry to bother you" — every real cold call opens with a
-#     softener; a clean declarative opening is what marks it as a script.
-#   the confirmation question comes EARLY, because that is what you actually
-#     want to know first and it hands them a turn immediately.
-#   "it's Sarah" not "this is Sarah" — nobody says "this is" on the phone
-#     unless they are announcing something.
-#   "about a doctor listing" not "we keep a directory of doctors up to date" —
-#     the second is a company description, and people do not describe their
-#     employer's function when they ring you.
+# One breath, American business-phone convention, nothing extra.
+#
+# Two earlier versions were worse in opposite directions:
+#   "Hi there! This is {name} from {org} — we keep a directory of doctors up to
+#    date. Is this {hospital}?"   Three clauses, and the middle one is a
+#    company description. Nobody explains what their employer does when they
+#    ring you.
+#   "Oh hi, sorry to bother you — is that {hospital}? It's {name} here..."
+#    Written in British English by accident. "Oh" signals surprise at someone
+#    answering a call you placed; "sorry to bother you" is over-apologetic for
+#    a US business call and delays the point; "is that" and "it's ... here" are
+#    both British. American convention is "this is <name> with <company>".
 _HUMAN_GREETING = (
-    "Oh hi, sorry to bother you — is that {hospital}? "
-    "It's {agent_name} here, calling from {org} about a doctor listing."
+    "Hi, this is {agent_name} with {org}, calling about a doctor listing — "
+    "is this {hospital}?"
 )
 
 

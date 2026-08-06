@@ -388,8 +388,19 @@ async def main():
     # how a person says why they rang.
     check("doctor listing" in ctx or "directory of doctors" in ctx,
           "greeting states the purpose")
-    check("sorry to bother you" in ctx,
-          "greeting opens with a softener, as a real cold call does")
+    # Not "opens with a softener" — that assertion was written for a greeting
+    # that turned out to be British-sounding ("oh hi, sorry to bother you —
+    # is that...?"). What actually matters is US phone convention and one
+    # breath: name, company, why, then the confirmation question.
+    greeting = tpl.build_greeting(
+        Doctor(doctor_name="Dr. Jane Okafor",
+               hospital_name="Northside Medical Group"))
+    check(greeting.count(".") + greeting.count("?") <= 2,
+          "greeting is one or two sentences, not a paragraph")
+    check(len(greeting.split()) <= 24,
+          f"greeting stays short ({len(greeting.split())} words)")
+    check("this is" in greeting.lower() and " with " in greeting.lower(),
+          "uses US phone convention: 'this is <name> with <company>'")
     check(any(i["item"].get("type") == "function_call_output" for i in items),
           "tool result returned to the model")
 
