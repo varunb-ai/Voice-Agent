@@ -94,6 +94,46 @@ def _realtime_tools() -> list[dict]:
     return result
 
 
+# ── Session audio configuration ───────────────────────────────────────────────
+
+def build_audio_config(*, transcribe_model: str, transcribe_hint: str,
+                       audio_format: str, noise_reduction: str,
+                       turn_detection: str, eagerness: str,
+                       voice: str) -> dict:
+    """Assemble the session.update `audio` block.
+
+    Split out so check_realtime.py can probe variants against the live API
+    without duplicating the shape — the settings below are empirical questions,
+    not things to settle by reading.
+    """
+    fmt: dict = ({"type": "audio/pcmu"} if audio_format == "pcmu"
+                 else {"type": "audio/pcm", "rate": _OAI_SR})
+
+    if turn_detection == "semantic_vad":
+        td: dict = {"type": "semantic_vad", "eagerness": eagerness}
+    else:
+        td = {
+            "type": "server_vad",
+            "threshold": 0.55,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 550,
+        }
+
+    audio_in: dict = {
+        "format": fmt,
+        "transcription": {
+            "model": transcribe_model,
+            "language": "en",
+            "prompt": transcribe_hint,
+        },
+        "turn_detection": td,
+    }
+    if noise_reduction and noise_reduction != "off":
+        audio_in["noise_reduction"] = {"type": noise_reduction}
+
+    return {"input": audio_in, "output": {"format": fmt, "voice": voice}}
+
+
 # ── Grounding: a saved location must be one the caller actually said ─────────
 
 # Words that carry no identifying information, so their presence in the
@@ -547,38 +587,15 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                 "type":         "realtime",
                 "instructions": template.instructions,
                 "tools":        _realtime_tools(),
-                "audio": {
-                    "input": {
-                        "transcription": {
-                            "model":    settings.realtime_transcribe_model,
-                            "language": "en",
-                            "prompt":   template.transcribe_hint,
-                        },
-                        # Measured on the first live call: agent response
-                        # latency was 2.45s / 3.80s / 4.05s against a human
-                        # baseline of 0.2-0.5s. silence_duration_ms is a direct
-                        # additive component — the model cannot begin until VAD
-                        # has waited this long after the caller stops.
-                        # 360ms cut people off. On call 3 the caller said
-                        # "yeah, well, he works at..." and the agent started
-                        # talking 0.20s later, over the top of them. Being
-                        # interrupted mid-sentence reads as far more robotic
-                        # than a slightly longer pause, and most of the latency
-                        # win came from fixing the echo gate, not from this.
-                        "turn_detection": {
-                            "type":                "server_vad",
-                            "threshold":            0.55,
-                            "prefix_padding_ms":    300,
-                            "silence_duration_ms":  550,
-                        },
-                        # A phone handset is a near-field mic. This lets the
-                        # model separate the caller from line noise and echo,
-                        # which is what the aggressive local echo gate below
-                        # was compensating for.
-                        "noise_reduction": {"type": "near_field"},
-                    },
-                    "output": {"voice": settings.realtime_voice},
-                },
+                "audio": build_audio_config(
+                    transcribe_model=settings.realtime_transcribe_model,
+                    transcribe_hint=template.transcribe_hint,
+                    audio_format=settings.realtime_audio_format,
+                    noise_reduction=settings.realtime_noise_reduction,
+                    turn_detection=settings.realtime_turn_detection,
+                    eagerness=settings.realtime_vad_eagerness,
+                    voice=settings.realtime_voice,
+                ),
                 "max_output_tokens": settings.realtime_max_response_tokens,
             },
         }))

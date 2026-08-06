@@ -121,6 +121,30 @@ class Settings(BaseSettings):
     # "whisper-1" if the account lacks access.
     realtime_transcribe_model: str = "gpt-4o-transcribe"
 
+    # ── Audio path ───────────────────────────────────────────────────────────
+    # "pcmu"  — g711 μ-law, the format Twilio already speaks. Passes through
+    #           untouched: no μ-law decode, no 8k->24k resample in, no 24k->8k
+    #           resample out. Two fewer resamples per 20ms frame.
+    # "pcm"   — PCM16 24kHz. Requires converting every frame in both directions.
+    # Confirm the account/API accepts pcmu with: python check_realtime.py --audio-probe
+    realtime_audio_format: str = "pcm"
+
+    # "near_field" | "far_field" | "off".
+    # Untested. The earlier justification ("a handset is a near-field mic") was
+    # a guess: the model never receives handset audio, it receives 8kHz μ-law.
+    # Which setting actually helps on telephony is an empirical question.
+    realtime_noise_reduction: str = "near_field"
+
+    # "server_vad"   — pure silence timing. silence_duration_ms is additive dead
+    #                  time on every turn, and too low cuts people off mid-word.
+    # "semantic_vad" — the model scores whether the speaker has actually
+    #                  finished, so it can respond fast without truncating a
+    #                  pause. Designed for exactly this trade-off.
+    realtime_turn_detection: str = "server_vad"
+    # semantic_vad only: "low" | "medium" | "high" | "auto".
+    # low = gives the speaker more thinking time, high = chunks quickly.
+    realtime_vad_eagerness: str = "medium"
+
     # ── Realtime pricing, USD per 1M tokens ──────────────────────────────────
     # Set for gpt-realtime-2, from developers.openai.com/api/docs/pricing,
     # checked 2026-08-05. The old code hardcoded preview-era rates

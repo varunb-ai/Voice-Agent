@@ -78,10 +78,72 @@ async def try_model(model: str, instructions: str, tools: list) -> tuple[bool, s
         return False, f"{type(e).__name__}: {e}"
 
 
+async def probe_audio_variants(instructions: str, tools: list, hint: str) -> None:
+    """Ask the live API which audio settings it actually accepts.
+
+    Format, noise reduction and turn detection are all things the docs either
+    show only one example of or do not mention at all. Rather than reason about
+    them, send each variant and see what session.update says. Costs nothing —
+    no response is ever created.
+    """
+    import websockets
+    from agents.voice.realtime_worker import build_audio_config
+
+    base = dict(transcribe_model=settings.realtime_transcribe_model,
+                transcribe_hint=hint, audio_format="pcm",
+                noise_reduction="near_field", turn_detection="server_vad",
+                eagerness="medium", voice=settings.realtime_voice)
+
+    variants = [
+        ("format: audio/pcmu (g711 passthrough)", {**base, "audio_format": "pcmu"}),
+        ("format: audio/pcm 24k (current)",       {**base, "audio_format": "pcm"}),
+        ("turn_detection: semantic_vad",          {**base, "turn_detection": "semantic_vad"}),
+        ("turn_detection: server_vad (current)",  {**base, "turn_detection": "server_vad"}),
+        ("noise_reduction: near_field (current)", {**base, "noise_reduction": "near_field"}),
+        ("noise_reduction: far_field",            {**base, "noise_reduction": "far_field"}),
+        ("noise_reduction: off",                  {**base, "noise_reduction": "off"}),
+    ]
+
+    url = f"wss://api.openai.com/v1/realtime?model={settings.realtime_model}"
+    headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+
+    print("\n5. Audio configuration probe (no response created, nothing billed)")
+    for label, kwargs in variants:
+        try:
+            async with websockets.connect(url, additional_headers=headers) as ws:
+                await asyncio.wait_for(ws.recv(), timeout=15.0)
+                await ws.send(json.dumps({
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "instructions": instructions,
+                        "tools": tools,
+                        "audio": build_audio_config(**kwargs),
+                        "max_output_tokens": settings.realtime_max_response_tokens,
+                    },
+                }))
+                verdict = "no session.updated"
+                for _ in range(10):
+                    m = json.loads(await asyncio.wait_for(ws.recv(), timeout=15.0))
+                    if m.get("type") == "error":
+                        verdict = "REJECTED: " + (m.get("error", {}).get("message") or "")[:88]
+                        break
+                    if m.get("type") == "session.updated":
+                        verdict = "accepted"
+                        break
+            mark = _PASS if verdict == "accepted" else _WARN
+            print(f"{mark} {label:42} {verdict}")
+        except Exception as e:
+            print(f"{_WARN} {label:42} {type(e).__name__}: {e}")
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", action="store_true",
                     help="also test the other Realtime models")
+    ap.add_argument("--audio-probe", action="store_true",
+                    help="ask the API which audio formats / VAD / noise "
+                         "reduction settings it accepts")
     args = ap.parse_args()
 
     print("\n" + "=" * 64)
@@ -281,6 +343,9 @@ async def main() -> int:
                 continue
             ok_m, detail_m = await try_model(m, tpl.instructions, tools)
             print(f"        {'OK  ' if ok_m else 'no  '} {m:20s} {detail_m}")
+
+    if args.audio_probe:
+        await probe_audio_variants(tpl.instructions, tools, tpl.transcribe_hint)
 
     print("\n" + "=" * 64)
     if _failures:
