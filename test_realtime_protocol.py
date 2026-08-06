@@ -513,6 +513,29 @@ async def main():
               f"{'accepts' if expect_ok else 'rejects'} {branch!r}"
               + (f" with city={city_arg!r}" if city_arg else ""))
 
+    # "<Placename> branch" — the city list can never keep up ("New York branch"
+    # was caught, "Newark branch" was saved on a live call). The shape is the
+    # reliable signal. Push back once, then accept, because a group with one
+    # Newark office genuinely does call it the Newark branch and rejecting
+    # outright would loop forever.
+    for branch in ("Newark branch", "the Boston office", "London Branch"):
+        mem = CallMemory(call_id="validator-test")
+        mem.clear()
+        first = bool(save_branch(mem, branch).get("ok"))
+        second = bool(save_branch(mem, branch).get("ok"))
+        check(not first and second,
+              f"{branch!r}: asks once, then accepts on retry")
+        check(bool(mem.get("branch_needed_clarification")),
+              f"{branch!r}: flagged as having needed clarification")
+
+    for branch, city_arg in (("Northgate Campus", None),
+                             ("1420 Beacon Street", "Boston"),
+                             ("Mercy General South Campus", "Sacramento")):
+        mem = CallMemory(call_id="validator-test")
+        mem.clear()
+        check(bool(save_branch(mem, branch, city=city_arg).get("ok")),
+              f"{branch!r}: real site name accepted first time")
+
     print("\n" + "=" * 66)
     print("  SCENARIO 4 — invalid branch ('the branch') must be rejected")
     print("=" * 66)

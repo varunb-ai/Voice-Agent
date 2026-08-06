@@ -1,0 +1,51 @@
+{
+  "call_id": "call-20260806-1350-e8ec",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": "Newark branch",
+  "resolved": true,
+  "duration_seconds": 35,
+  "cost_usd": 0.062167,
+  "template": "forage_data_collection",
+  "model": "gpt-realtime-2",
+  "usage": {
+    "responses": 3,
+    "input_audio": 535,
+    "input_audio_cached": 384,
+    "output_audio": 330,
+    "input_text": 13923,
+    "input_text_cached": 9280,
+    "output_text": 173,
+    "cache_hit_rate": 0.6684
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, good afternoon! This is Sarah from Forage AI Healthcare \u2014 we keep a directory of doctors up to date. Is this Northside Medical Group?",
+      "timestamp": "13:50:50"
+    },
+    {
+      "role": "caller",
+      "text": "Yes, good afternoon. What do you need?",
+      "timestamp": "13:51:02"
+    },
+    {
+      "role": "agent",
+      "text": "I\u2019m checking where Dr. Okafor sees patients right now, which office is she at?",
+      "timestamp": "13:51:03"
+    },
+    {
+      "role": "caller",
+      "text": "Okay, the doctor is working in the Newark branch.",
+      "timestamp": "13:51:14"
+    },
+    {
+      "role": "agent",
+      "text": "Got it, thanks for the location \u2014 I\u2019ll save the Newark branch now.",
+      "timestamp": "13:51:15"
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Newark branch. NOTE: branch \"Newark branch\" is a city plus a presence word; under the current validator the agent would ask whether it is their only Newark office before saving.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260806-1350-e8ec.wav",
+  "recorded_at": "2026-08-06T13:50:44.861721"
+}

@@ -248,6 +248,27 @@ def _strip_place_nouns(text: str) -> str:
     return " ".join(words).strip()
 
 
+def _looks_like_presence_in_a_place(cleaned: str) -> bool:
+    """True for "<Placename> branch" / "the Newark office" and similar.
+
+    The city list cannot keep up. "New York branch" was caught because New York
+    is in it; "Newark branch" was saved on a live call because Newark is not,
+    and there will always be another. The SHAPE is the reliable signal: one or
+    two words naming somewhere, plus a word meaning "our presence there".
+
+    Deliberately narrow. "Mercy General South Campus" and "1420 Beacon Street"
+    do not match, because 'campus' names a site and a street address has more
+    parts. Only the "<name> branch" pattern trips it.
+    """
+    words = cleaned.split()
+    if not (2 <= len(words) <= 3):
+        return False
+    if words[-1] not in _PRESENCE_WORDS:
+        return False
+    lead = [w for w in words[:-1] if w not in {"the", "our", "a", "an"}]
+    return 1 <= len(lead) <= 2
+
+
 def _is_bare_city(cleaned: str, city: str | None) -> str | None:
     """Return a rejection reason if `cleaned` names no more than a city."""
     core = _strip_place_nouns(cleaned)
@@ -259,17 +280,18 @@ def _is_bare_city(cleaned: str, city: str | None) -> str | None:
         return (f"'{city}' is already the city — the branch field needs the "
                 f"specific office or site within it, not the city again")
 
-    if core in _MAJOR_CITIES or core in _US_STATES:
-        words = cleaned.split()
-        # "New York" / "Boston" on its own.
-        if core == cleaned:
-            return (f"'{cleaned}' is a city or state, not a specific office. "
-                    f"Ask which office or site within it.")
-        # "the New York branch" — a presence word plus the city restates it.
-        # "Northgate Campus" is left alone: 'campus' can name a real site.
-        if any(w in _PRESENCE_WORDS for w in words):
-            return (f"'{cleaned}' only says there is a presence in {core} — "
-                    f"ask for the name or address of the specific office.")
+    # A city or state with nothing else attached. Hard reject: there is no site
+    # information here at all, so there is nothing a retry could confirm.
+    if (core in _MAJOR_CITIES or core in _US_STATES) and core == cleaned:
+        return (f"'{cleaned}' is a city or state, not a specific office. "
+                f"Ask which office or site within it.")
+
+    # "the New York branch" is NOT handled here. It used to be hard-rejected
+    # when the city happened to be in the list above, which meant "Boston
+    # office" was refused outright while "Newark branch" sailed through — the
+    # behaviour depended on list coverage rather than on the input. Both now
+    # fall through to the ask-once-then-accept path in save_branch, which
+    # treats them the same regardless of whether we recognise the place.
     return None
 
 def save_branch(
@@ -297,6 +319,26 @@ def save_branch(
     bare_city = _is_bare_city(cleaned, city)
     if bare_city:
         return {"ok": False, "error": bare_city}
+
+    # "<Placename> branch" — probably the city restated, but not certainly: a
+    # group with one Newark office really does call it the Newark branch.
+    # So push back ONCE and accept whatever comes back. Rejecting outright
+    # would loop forever when the caller confirms it is the only one.
+    if _looks_like_presence_in_a_place(cleaned):
+        if not memory.get("branch_clarification_asked"):
+            memory.update(branch_clarification_asked=True)
+            return {
+                "ok": False,
+                "error": (
+                    f"'{branch}' may just be naming the city. Ask whether "
+                    f"that is their only office there, or get the site name "
+                    f"or street address. If they confirm it is the only one, "
+                    f"call save_branch again with the same value and it will "
+                    f"be accepted."
+                ),
+            }
+        memory.update(branch_needed_clarification=True)
+
     memory.update(branch=branch, city=city, schedule=schedule, resolved=True)
     return {"ok": True, "branch": branch, "city": city, "schedule": schedule}
 
