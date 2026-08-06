@@ -29,6 +29,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime
@@ -150,6 +151,60 @@ def _loudest_window_rms(arr: np.ndarray, window_s: float = 0.3) -> float:
         seg = arr[start:start + win]
         best = max(best, float(np.sqrt(np.mean(seg ** 2))))
     return best
+
+
+def conversation_metrics(turns: list) -> dict:
+    """Count the conversational failures that prose rules keep failing to stop.
+
+    Three attempts at fixing the same behaviour by writing more forceful
+    instructions, each one ignored, is evidence the marginal rule is doing
+    less each time. These are constraints on the SHAPE of a turn rather than
+    its content, which makes them detectable in code even though the prompt
+    cannot reliably enforce them.
+
+    Nothing here changes behaviour — you cannot unsay a turn. The point is to
+    have a number, so the next prompt edit can be evaluated against the last
+    one instead of by reading a transcript and forming an impression.
+
+      stapled_questions  — agent asked a question in the same turn it answered
+                           one of theirs. Six of these in one 111s call.
+      back_to_back_asks  — agent asked in two consecutive turns.
+      repeated_sentences — same agent sentence said more than once.
+    """
+    agent = [t for t in turns if t.role == "agent"]
+    stapled = back_to_back = 0
+    prev_agent_asked = False
+
+    for i, turn in enumerate(turns):
+        if turn.role != "agent":
+            continue
+        asks = "?" in turn.text
+        prev_caller = next((turns[j] for j in range(i - 1, -1, -1)
+                            if turns[j].role == "caller"), None)
+        # Did the caller's most recent turn, immediately before this one, ask
+        # something? Then answering AND asking in one breath is the failure.
+        if asks and prev_caller is not None and i > 0 and turns[i - 1] is prev_caller \
+                and "?" in prev_caller.text:
+            stapled += 1
+        if asks and prev_agent_asked:
+            back_to_back += 1
+        prev_agent_asked = asks
+
+    seen: dict[str, int] = {}
+    for t in agent:
+        for sentence in re.split(r"(?<=[.!?])\s+", t.text.strip()):
+            key = sentence.strip().lower()
+            if len(key.split()) >= 4:
+                seen[key] = seen.get(key, 0) + 1
+    repeated = sum(n - 1 for n in seen.values() if n > 1)
+
+    return {
+        "agent_turns": len(agent),
+        "question_turns": sum(1 for t in agent if "?" in t.text),
+        "stapled_questions": stapled,
+        "back_to_back_asks": back_to_back,
+        "repeated_sentences": repeated,
+    }
 
 
 def _echo_gate_allows(raw: bytes) -> bool:
@@ -554,6 +609,10 @@ class RealtimeSession:
             # what they actually said — filter on this before treating a batch
             # of results as clean.
             "grounding":      self.memory.get("grounding"),
+            # Countable conversational failures. Prose rules against these have
+            # been ignored across three prompt versions; measuring them makes
+            # the next edit evaluable instead of impressionistic.
+            "conversation":   conversation_metrics(merged),
             "branch_needed_clarification":
                 bool(self.memory.get("branch_needed_clarification")),
             "model":          settings.realtime_model,
@@ -634,6 +693,16 @@ class RealtimeSession:
             print(f"  Recording: {audio_path}", flush=True)
         print(f"  JSON     : data/3 cases jsons/{self.call_id}.json", flush=True)
         print("═" * _W + "\n", flush=True)
+
+        m = conversation_metrics(merged)
+        print(f"  CONVERSATION SHAPE", flush=True)
+        print(f"    agent turns          {m['agent_turns']}", flush=True)
+        print(f"    of which questions   {m['question_turns']}", flush=True)
+        print(f"    stapled onto answers {m['stapled_questions']}"
+              f"{'   <- asked while answering them' if m['stapled_questions'] else ''}",
+              flush=True)
+        print(f"    asked twice running  {m['back_to_back_asks']}", flush=True)
+        print(f"    repeated sentences   {m['repeated_sentences']}", flush=True)
 
         self._print_cost(duration)
 
@@ -1170,11 +1239,11 @@ async def _oai_to_twilio(
                         result = {
                             "ok": False,
                             "error": (
-                                f"REJECTED — {ungrounded} does not appear "
-                                f"anywhere in what the caller said on this "
-                                f"call. Never save a location you were not "
-                                f"told. Ask them for it, and if they do not "
-                                f"give one, escalate."
+                                "REJECTED — that location does not appear "
+                                "anywhere in what the caller said on this "
+                                "call. Never save a location you were not "
+                                "told. Ask them for it, and if they do not "
+                                "give one, escalate."
                             ),
                         }
                         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
