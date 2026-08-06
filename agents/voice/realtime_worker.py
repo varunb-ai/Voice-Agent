@@ -32,6 +32,7 @@ import logging
 import re
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -1143,6 +1144,7 @@ async def _oai_to_twilio(
     _response_had_audio   = False   # True if current response included any audio (model spoke)
     _barge_in_pending     = False   # True when we cancelled a response — skip its transcript
     _closing_sent         = False   # True after we send closing response.create — wait for its response.done
+    _closing_retries      = 0       # a goodbye the caller talked over is not a goodbye
     # Tool results arrive on response.function_call_arguments.done, which fires
     # BEFORE response.done for the same response. Creating a response there
     # raises conversation_already_has_active_response, so defer it to response.done.
@@ -1552,6 +1554,12 @@ async def _oai_to_twilio(
                 _response_active    = False
                 _response_had_audio = False   # reset for next response
                 sess._responses    += 1
+                # "completed" | "cancelled" | "incomplete" | "failed". This was
+                # never read, so a closing response the caller talked over was
+                # indistinguishable from one that actually played, and the call
+                # hung up on a goodbye nobody heard.
+                _resp_status = ((msg.get("response") or {}).get("status")
+                                or "completed")
                 # A cancelled response may never emit transcript.done. Clearing
                 # the flag only there meant it leaked into the NEXT response and
                 # silently swallowed a real transcript line.
@@ -1656,6 +1664,18 @@ async def _oai_to_twilio(
                     if _closing_sent:
                         # This is the tool-call response.done — closing response is being generated, wait for it
                         _closing_sent = False
+                    elif _resp_status != "completed" and _closing_retries < 1:
+                        # The goodbye was cancelled — the caller was still
+                        # talking, so barge-in killed it. Hanging up here is
+                        # what drops the line in silence. The goodbye item is
+                        # still in the conversation; ask for it once more, after
+                        # a beat so we are not talking over them again.
+                        _closing_retries += 1
+                        print(f"[Realtime] Closing response was {_resp_status} — "
+                              f"caller talked over it. Retrying the goodbye once.",
+                              flush=True)
+                        await asyncio.sleep(0.8)
+                        await oai_ws.send(json.dumps({"type": "response.create"}))
                     else:
                         # This is the closing response.done.
                         # Wait for the FULL audio to finish playing on the caller's phone before hanging up.
@@ -1687,4 +1707,11 @@ async def _oai_to_twilio(
     except websockets.exceptions.ConnectionClosed:
         log.info("[Realtime] OAI WebSocket closed normally")
     except Exception as e:
-        log.info("[Realtime] OAI→Twilio loop ended: %s", e)
+        # This used to log at INFO with no traceback, so a bug in the event loop
+        # silently ended the call and looked, from the caller's side, exactly
+        # like a dropped line. A NameError here cost 12 test failures that all
+        # pointed somewhere else.
+        log.exception("[Realtime] OAI→Twilio loop CRASHED: %s", e)
+        print(f"\n[Realtime] ❌ EVENT LOOP CRASHED — the call was cut short.\n"
+              f"           {type(e).__name__}: {e}\n"
+              f"{traceback.format_exc()}", flush=True)
