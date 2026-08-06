@@ -48,6 +48,11 @@ from agents.voice.audio_utils import resample, _mulaw_decode, _mulaw_encode
 
 log = logging.getLogger(__name__)
 
+# Caller-utterance RMS below which the line is treated as too faint to trust.
+# Clear phone speech measures roughly 0.03-0.08; a live call that produced a
+# fabricated answer measured 0.004-0.012 throughout.
+_LOW_AUDIO_RMS = 0.015
+
 REALTIME_URL = "wss://api.openai.com/v1/realtime?model={model}"
 _TWILIO_SR = 8_000
 _OAI_SR    = 24_000
@@ -167,6 +172,8 @@ class RealtimeSession:
         # Set when response.create for the greeting is sent; cleared once the
         # first audio delta arrives, so we measure the callee's dead air.
         self._greeting_requested_at: Optional[float] = None
+        # Warn the model about a faint line at most once per call.
+        self._low_audio_warned: bool = False
 
         # Token usage tracking (from response.done events).
         # Cached tokens are counted SEPARATELY and billed at the cached rate —
@@ -829,6 +836,36 @@ async def _oai_to_twilio(
                     # keep this path pure speech-to-speech. Placeholders that
                     # never resolve are dropped from the transcript in save().
                     sess.add_turn("caller", "[...]")
+
+                    # Tell the model when the line is genuinely too quiet to
+                    # trust. Left to its own judgement it does not report
+                    # difficulty — on a live call a caller at roughly a tenth
+                    # of normal phone level produced a confident fabrication
+                    # rather than "sorry, I didn't catch that". Measured level
+                    # is evidence the model does not otherwise have.
+                    utterance = b"".join(sess._caller_pcm[_speech_start_pcm_pos:])
+                    if utterance and not sess._low_audio_warned:
+                        arr = np.frombuffer(utterance, dtype=np.int16).astype(np.float32) / 32768.0
+                        rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
+                        if 0.0 < rms < _LOW_AUDIO_RMS:
+                            sess._low_audio_warned = True
+                            print(f"[Realtime] Caller audio very faint "
+                                  f"(RMS {rms:.4f} vs ~0.03 typical) — telling "
+                                  f"the agent to ask them to speak up", flush=True)
+                            await oai_ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [{
+                                        "type": "input_text",
+                                        "text": ("(system: the caller's line is very "
+                                                 "faint and hard to make out. Ask them "
+                                                 "to speak up or repeat. Do not guess "
+                                                 "at anything you did not clearly hear.)"),
+                                    }],
+                                },
+                            }))
 
             # ── Audio → Twilio ─────────────────────────────────────────────
             # gpt-realtime-2 uses response.output_audio.delta (not response.audio.delta)
