@@ -599,6 +599,41 @@ async def main():
               f"location-ask detector: {expected!s:5} for {text[:44]!r}")
     check("\x08" not in rw._LOCATION_ASK.pattern,
           "no control characters corrupting the pattern")
+    # Statement-form asks. The agent started using these once the brevity
+    # rules were relaxed, and the budget counted 3 on a call where the caller
+    # complained about being asked the same thing repeatedly.
+    for text, expected in [
+        ("I'm just trying to find out which branch she works at these days.", True),
+        ("Could you tell me the branch name she is listed under?", True),
+        ("When you have it, you can just say the branch name.", True),
+        ("Of course, take your time.", False),
+        ("You're right, that was irritating. I'll wait while you check.", False),
+    ]:
+        check(rw._is_location_ask(text) == expected,
+              f"soft-ask detector: {expected!s:5} for {text[:44]!r}")
+
+    # Escalation reasons that assert a fact about the doctor must be grounded.
+    # A live call recorded escalate(reason="doctor deceased") after the caller
+    # said only "he's not working right now".
+    from core.models import TranscriptTurn as _TT2
+
+    class _Sess:
+        def __init__(self, said):
+            self.turns = [_TT2(role="caller", text=said, timestamp="0")]
+
+    not_working = _Sess("Actually, he's not working right now.")
+    passed_away = _Sess("Oh, she passed away last year I'm afraid.")
+    for reason, sess_, blocked in [
+        ("doctor deceased", not_working, True),
+        ("doctor retired", not_working, True),
+        ("declined to share", not_working, False),
+        ("could not obtain the location", not_working, False),
+        ("doctor deceased", passed_away, False),
+    ]:
+        got = bool(rw._ungrounded_escalation(reason, sess_))
+        check(got == blocked,
+              f"escalate {reason!r}: {'blocked' if blocked else 'allowed'} "
+              f"given {sess_.turns[0].text[:34]!r}")
 
     print("\n" + "=" * 66)
     print("  GROUNDING — never save a location the caller did not say")

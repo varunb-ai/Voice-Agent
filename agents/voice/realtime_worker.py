@@ -158,8 +158,25 @@ _LOCATION_ASK = re.compile(
     r"practis|practic|work)", re.I)
 
 
+# Asks carrying no question mark. Once the brevity rules were relaxed the agent
+# began asking in softer statement form — "I'm just trying to find out which
+# branch she works at" — which is every bit a request, but the counter did not
+# see it. The budget therefore read 3 asks on a call where the caller said
+# "why are you keep on asking the same question? It's kind of irritating."
+_SOFT_LOCATION_ASK = re.compile(
+    r"(trying to (find|work) out|need to know|just need|could you tell me|"
+    r"you can just say|let me know|hoping to (get|find))"
+    r".{0,60}(branch|location|office|campus|site)", re.I)
+
+
 def _is_location_ask(text: str) -> bool:
-    """Is this agent turn asking where the doctor practises?"""
+    """Is this agent turn asking where the doctor practises?
+
+    Counts statement-form asks as well as questions. A request phrased politely
+    is still a request, and the person on the other end experiences it as one.
+    """
+    if _SOFT_LOCATION_ASK.search(text):
+        return True
     return "?" in text and bool(_LOCATION_ASK.search(text))
 
 
@@ -268,6 +285,43 @@ def conversation_metrics(turns: list) -> dict:
         "back_to_back_asks": back_to_back,
         "repeated_sentences": repeated,
     }
+
+
+# Escalation reasons that assert a FACT about the doctor rather than describing
+# how the call went. "declined to share" is an observation about the call and
+# needs no evidence; "doctor deceased" is a claim about a real person and does.
+_FACTUAL_ESCALATIONS = {
+    "deceased": ("deceased", "died", "passed away", "passed", "late "),
+    "retired":  ("retired", "retirement"),
+    "left":     ("left", "no longer", "moved on", "resigned", "quit"),
+    "relocated": ("relocated", "transferred", "moved to"),
+    "on leave": ("on leave", "maternity", "sabbatical", "sick leave"),
+}
+
+
+def _ungrounded_escalation(reason: str, sess: "RealtimeSession") -> str:
+    """Reject an escalation reason asserting something the caller never said.
+
+    A live call ended with escalate(reason="doctor deceased") after the caller
+    said only "actually, he's not working right now". Nobody said died, passed
+    away, or deceased. save_branch was guarded against exactly this and
+    escalate was not — so a fabricated claim about a named real person went
+    into the record, where a reviewer would read it as fact.
+
+    Only claims ABOUT THE DOCTOR are checked. Reasons describing the call
+    itself ("declined to share", "wrong number", "no response") are the agent's
+    own observation and need no corroboration.
+    """
+    heard = " ".join(t.text.lower() for t in sess.turns
+                     if t.role == "caller" and t.text.strip() != "[...]")
+    if not heard.strip():
+        return ""
+    low = reason.lower()
+    for claim, markers in _FACTUAL_ESCALATIONS.items():
+        if claim in low and not any(m in heard for m in markers):
+            return (f"reason {reason!r} states the doctor is {claim}, which "
+                    f"nobody said on this call")
+    return ""
 
 
 def _echo_gate_allows(raw: bytes) -> bool:
@@ -1170,8 +1224,23 @@ async def _oai_to_twilio(
                     # of normal phone level produced a confident fabrication
                     # rather than "sorry, I didn't catch that". Measured level
                     # is evidence the model does not otherwise have.
+                    # If ANY caller turn has transcribed cleanly, the line is
+                    # audible by definition — never tell them otherwise.
+                    #
+                    # This alarm has now fired falsely on three consecutive
+                    # calls, twice in one of them, telling a caller measuring
+                    # 0.0335 RMS that they were "coming through really faint".
+                    # Measuring the loudest window instead of the mean was not
+                    # enough: server VAD sometimes fires speech_started on
+                    # noise, and the resulting slice contains no speech at all,
+                    # so any energy measure of it reads as silence.
+                    #
+                    # Working transcription is the evidence that matters.
+                    heard_clearly = any(
+                        t.role == "caller" and t.text.strip() not in ("", "[...]")
+                        for t in sess.turns)
                     utterance = b"".join(sess._caller_pcm[_speech_start_pcm_pos:])
-                    if utterance and not sess._low_audio_warned:
+                    if utterance and not sess._low_audio_warned and not heard_clearly:
                         arr = _wire_to_pcm16(utterance)
                         rms = _loudest_window_rms(arr)
                         if 0.0 < rms < _LOW_AUDIO_RMS:
@@ -1374,6 +1443,19 @@ async def _oai_to_twilio(
                         }
                         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
                               f"🚫 HALLUCINATED BRANCH BLOCKED: {args}", flush=True)
+                    else:
+                        result = run_tool(name, sess.memory, args)
+                elif name == "escalate":
+                    bad = _ungrounded_escalation(args.get("reason", ""), sess)
+                    if bad:
+                        result = {"ok": False, "error": (
+                            f"REJECTED — {bad}. Escalate with what actually "
+                            f"happened on the call, not an inference about the "
+                            f"doctor. If you are unsure why, say 'could not "
+                            f"obtain the location'.")}
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                              f"🚫 UNGROUNDED ESCALATION BLOCKED: {args}",
+                              flush=True)
                     else:
                         result = run_tool(name, sess.memory, args)
                 else:
