@@ -25,6 +25,8 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
     from twilio.rest import Client
     from twilio.base.exceptions import TwilioRestException
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+    # Kept for the window before register_call runs below; routing is
+    # by CallSid so concurrent calls cannot collide on it.
     worker.pending_doctor = doctor
 
     answer_url = settings.server_public_url + "/answer"
@@ -97,7 +99,13 @@ def _warmup() -> None:
     if settings.use_realtime:
         # Realtime API handles STT+LLM+TTS in one WebSocket — nothing to pre-load locally.
         print("  Mode     : OpenAI Realtime API (gpt-realtime-2)")
-        print("  Latency  : ~300-500ms | Cost: ~$0.06/min")
+        # Measured, not aspirational. Agent response latency across live
+        # calls: 3.43s, 2.83s, 1.93s, 2.15s. Cost per completed call:
+        # $0.06-$0.12. The banner used to claim "~300-500ms | ~$0.06/min",
+        # which our own measurements contradict — and it is the first thing
+        # printed on every run, so it is what ends up in a screenshot.
+        print("  Latency  : ~2s agent response (measured 1.9-3.4s)")
+        print("  Cost     : ~$0.06-0.12 per completed call (measured)")
         try:
             import websockets  # noqa: F401
         except ImportError:

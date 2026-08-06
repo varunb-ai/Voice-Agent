@@ -496,11 +496,43 @@ class _Session:
 # ── registry ──────────────────────────────────────────────────────────────────
 
 _sessions:      dict[str, _Session] = {}
-pending_doctor: Optional[Doctor]    = None
 _call_id_by_sid: dict[str, str]    = {}   # CallSid → call_id for recording filename
 # CallSid → Doctor for realtime calls. Kept separate from _sessions because the
 # realtime path builds no classic _Session. Popped when the media stream opens.
 _pending_realtime_doctor: dict[str, Doctor] = {}
+
+# ── Doctor routing ───────────────────────────────────────────────────────────
+# `pending_doctor` was a single module global: the caller set it, /answer read
+# it. Two concurrent calls therefore shared one doctor, and the second call
+# would quietly ask about the first one's — corrupt data, no error.
+#
+# Today that cannot happen, because the global itself makes concurrency
+# impossible. The danger is the moment someone turns this into a batch runner:
+# the global stops being a lock and starts being a data-corruption bug, silently.
+#
+# Routing is now by CallSid, which Twilio gives us when the call is created.
+# `pending_doctor` remains only as the fallback for the window between placing
+# a call and Twilio's webhook arriving, and for anything still setting it.
+_doctor_by_sid: dict[str, Doctor] = {}
+_routing_lock = threading.Lock()
+pending_doctor: Optional[Doctor] = None
+
+
+def register_call(call_sid: str, doctor: Doctor) -> None:
+    """Bind a placed call to its doctor. Safe under concurrency."""
+    with _routing_lock:
+        _doctor_by_sid[call_sid] = doctor
+
+
+def _doctor_for(call_sid: str) -> Optional[Doctor]:
+    """Which doctor is this CallSid about?"""
+    with _routing_lock:
+        doctor = _doctor_by_sid.pop(call_sid, None)
+    if doctor is not None:
+        return doctor
+    # Fallback: the webhook beat register_call, or a caller that still sets the
+    # global. Correct for one call at a time, which is all the global ever was.
+    return pending_doctor
 
 
 # ── TwiML webhook ─────────────────────────────────────────────────────────────
@@ -512,7 +544,7 @@ async def answer(request: Request):
         log.warning("Rejected unsigned /answer request")
         return _forbidden()
     csid = form.get("CallSid", "")
-    doc  = pending_doctor
+    doc  = _doctor_for(csid)
     if not doc:
         return Response(_twiml_hangup(), media_type="application/xml")
 

@@ -29,6 +29,7 @@ import asyncio
 import base64
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +69,9 @@ def json_dir() -> Path:
 
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime?model={model}"
+# Serialises the read-modify-write of master.json. See save().
+_MASTER_LOCK = threading.Lock()
+
 _TWILIO_SR = 8_000
 _OAI_SR    = 24_000
 
@@ -519,6 +523,13 @@ class RealtimeSession:
             "duration_seconds": duration,
             "cost_usd":       round(cost_usd, 6),
             "template":       settings.call_template,
+            # How much to trust `branch`. "SKIPPED" means the caller's speech
+            # never transcribed, so nothing verified the saved location against
+            # what they actually said — filter on this before treating a batch
+            # of results as clean.
+            "grounding":      self.memory.get("grounding"),
+            "branch_needed_clarification":
+                bool(self.memory.get("branch_needed_clarification")),
             "model":          settings.realtime_model,
             "usage": {
                 "responses":         self._responses,
@@ -541,26 +552,37 @@ class RealtimeSession:
         json_path = data_dir / f"{self.call_id}.json"
         json_path.write_text(json.dumps(record, indent=2))
 
-        # Update master.json
+        # Update master.json.
+        #
+        # Read-modify-write with no lock: two calls finishing together both read
+        # the same list, both append their own entry, and the second write
+        # silently discards the first. No error, no warning — a completed call
+        # simply is not in the index.
+        #
+        # Paired deliberately with the CallSid routing fix in twilio_worker.
+        # Fixing only that one would remove the module global that currently
+        # makes concurrency impossible, turning this from dormant into live.
         master = data_dir / "master.json"
-        try:
-            existing = json.loads(master.read_text()) if master.exists() else []
-        except Exception:
-            existing = []
-        existing.append({
-            "call_id":          self.call_id,
-            "time":             self.start_dt.isoformat(),
-            "doctor":           self.doctor.doctor_name,
-            "hospital":         self.doctor.hospital_name,
-            "branch":           branch,
-            "resolved":         resolved,
-            "duration_seconds": duration,
-            "cost_usd":         round(cost_usd, 6),
-            "summary":          summary,
-            "audio_path":       audio_path,
-            "json_path":        f"data/3 cases jsons/{self.call_id}.json",
-        })
-        master.write_text(json.dumps(existing, indent=2))
+        with _MASTER_LOCK:
+            try:
+                existing = json.loads(master.read_text()) if master.exists() else []
+            except Exception:
+                existing = []
+            existing.append({
+                "call_id":          self.call_id,
+                "time":             self.start_dt.isoformat(),
+                "doctor":           self.doctor.doctor_name,
+                "hospital":         self.doctor.hospital_name,
+                "branch":           branch,
+                "resolved":         resolved,
+                "grounding":        self.memory.get("grounding"),
+                "duration_seconds": duration,
+                "cost_usd":         round(cost_usd, 6),
+                "summary":          summary,
+                "audio_path":       audio_path,
+                "json_path":        f"data/3 cases jsons/{self.call_id}.json",
+            })
+            master.write_text(json.dumps(existing, indent=2))
         log.info("Realtime call saved: %s (resolved=%s branch=%s)", self.call_id, resolved, branch)
 
         # ── End-of-call summary ────────────────────────────────────────
@@ -1098,6 +1120,25 @@ async def _oai_to_twilio(
                 # So a location may only be saved if the caller actually said
                 # it. Verified against the transcript, not the model's claim.
                 if name == "save_branch":
+                    # The check switches itself off when nothing was
+                    # transcribed — correct, since absence of transcript is not
+                    # evidence of fabrication and blocking would kill genuine
+                    # saves on a bad line. But that is exactly the condition
+                    # that produces fabrications: bad line -> no transcript ->
+                    # guard off -> a location the model may have inferred gets
+                    # written as fact. And with the out-of-band whisper
+                    # fallback removed there is no second path to a transcript.
+                    #
+                    # So record it. A save that could not be verified must not
+                    # be indistinguishable downstream from one that was.
+                    heard_any = any(t.role == "caller" and t.text.strip() != "[...]"
+                                    for t in sess.turns)
+                    sess.memory.update(
+                        grounding="verified against caller transcript" if heard_any
+                        else "SKIPPED — no caller speech was transcribed on this "
+                             "call, so the saved location could not be checked "
+                             "against anything the caller actually said"
+                    )
                     ungrounded = _ungrounded_terms(args, sess)
                     if ungrounded:
                         result = {

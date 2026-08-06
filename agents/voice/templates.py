@@ -60,6 +60,18 @@ def is_usable_callback_number(number: str | None) -> bool:
 
 
 def time_of_day() -> str:
+    """Time of day at THIS SERVER — deliberately not used in any greeting.
+
+    The server runs in India and the calls go to the US. At 17:10 here it is
+    07:40 in Boston, so a greeting built from this clock opens with "good
+    evening" to a receptionist who has just arrived at work — in the first
+    three words, before anything else has a chance to land. Nothing signals
+    "this caller is not where they say they are" faster.
+
+    Correct fix is the destination's timezone: derive it from the area code,
+    or read it off the client record once real data arrives. Until then the
+    greetings simply omit it, because wrong is worse than absent.
+    """
     h = datetime.now().hour
     if h < 12:
         return "morning"
@@ -326,7 +338,7 @@ apply the other rule. Never defer either to a later turn."""
 # Greetings. Kept short — the first version was 33 words and took 12.8s of
 # unbroken speech, which leaves the callee no natural place to interrupt.
 _FORAGE_GREETING = (
-    "Hi, good {time_of_day}! I'm an automated assistant from {org} — we "
+    "Hi there! I'm an automated assistant from {org} — we "
     "verify doctor listings, and this call's recorded. Is this {hospital}?"
 )
 
@@ -335,7 +347,7 @@ _FORAGE_GREETING = (
 # validating publicly available information about doctors") — spoken by a named
 # person rather than announced as automated.
 _HUMAN_GREETING = (
-    "Hi, good {time_of_day}! This is {agent_name} from {org} — we keep a "
+    "Hi there! This is {agent_name} from {org} — we keep a "
     "directory of doctors up to date. Is this {hospital}?"
 )
 

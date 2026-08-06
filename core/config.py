@@ -96,7 +96,10 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
 
     # Use OpenAI Realtime API instead of the classic STT→LLM→TTS pipeline.
-    # Latency: ~300-500ms vs ~2s. Cost: ~$0.06/min vs ~$0.01/min.
+    # Measured on live calls: ~2s agent response latency (range 1.9-3.4s),
+    # $0.06-0.12 per completed call. Earlier comments here claimed
+    # ~300-500ms; that figure was never measured and is contradicted by
+    # every call we have recorded.
     # Defaults describe the path this project actually runs. They previously
     # described the retired classic pipeline, so a fresh clone booted into a
     # different system than the one being tested.
