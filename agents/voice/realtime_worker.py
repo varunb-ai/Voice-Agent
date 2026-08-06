@@ -153,6 +153,16 @@ def _loudest_window_rms(arr: np.ndarray, window_s: float = 0.3) -> float:
     return best
 
 
+_LOCATION_ASK = re.compile(
+    r"(which|what|where).{0,40}(branch|location|office|campus|site|"
+    r"practis|practic|work)", re.I)
+
+
+def _is_location_ask(text: str) -> bool:
+    """Is this agent turn asking where the doctor practises?"""
+    return "?" in text and bool(_LOCATION_ASK.search(text))
+
+
 def conversation_metrics(turns: list) -> dict:
     """Count the conversational failures that prose rules keep failing to stop.
 
@@ -205,6 +215,10 @@ def conversation_metrics(turns: list) -> dict:
     caller = [t for t in turns if t.role == "caller"]
     caller_questions = sum(1 for t in caller if "?" in t.text)
     return {
+        # How many times it asked where the doctor practises. On the call that
+        # exposed this it was six, with no location offered between any of
+        # them — the number that says "it would not let go".
+        "location_asks": sum(1 for t in agent if _is_location_ask(t.text)),
         "agent_turns": len(agent),
         "caller_turns": len(caller),
         "caller_questions": caller_questions,
@@ -371,6 +385,10 @@ class RealtimeSession:
         self._greeting_requested_at: Optional[float] = None
         # Warn the model about a faint line at most once per call.
         self._low_audio_warned: bool = False
+        # Asks for the location so far, and whether we have already told the
+        # model to stop. See realtime_max_location_asks.
+        self._location_asks: int = 0
+        self._give_up_sent: bool = False
 
         # Token usage tracking (from response.done events).
         # Cached tokens are counted SEPARATELY and billed at the cached rate —
@@ -1183,6 +1201,45 @@ async def _oai_to_twilio(
                     ts = datetime.now().strftime("%H:%M:%S")
                     print(f"\n[{ts}] 🤖 AGENT  : {text}", flush=True)
                     sess.add_turn("agent", text)
+
+                    # Enforce the exit condition the prompt never had.
+                    #
+                    # A live call asked for the location six times in 111
+                    # seconds. The caller engaged throughout but never refused,
+                    # never said they did not know, was not a wrong number and
+                    # was not voicemail — so none of the prompt's escalation
+                    # triggers matched, and "never close until you have saved a
+                    # location or escalated" left asking again as the only move.
+                    # The repetition was a symptom of having no way out, not a
+                    # phrasing failure, and no wording of a phrasing rule fixes
+                    # it. A budget does.
+                    if _is_location_ask(text) and not sess.done:
+                        sess._location_asks += 1
+                        if (sess._location_asks >= settings.realtime_max_location_asks
+                                and not sess._give_up_sent):
+                            sess._give_up_sent = True
+                            print(f"[Realtime] {sess._location_asks} asks with no "
+                                  f"location — telling the agent to stop and "
+                                  f"escalate", flush=True)
+                            await oai_ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [{
+                                        "type": "input_text",
+                                        "text": (
+                                            f"(system: you have now asked for the "
+                                            f"location {sess._location_asks} times "
+                                            f"and have not been given one. Stop "
+                                            f"asking. Thank them briefly, say "
+                                            f"goodbye, and call escalate with "
+                                            f"reason 'caller engaged but never "
+                                            f"provided a location'.)"
+                                        ),
+                                    }],
+                                },
+                            }))
                 _agent_text_buf = ""
 
             # ── Caller transcript — replace placeholder if transcription enabled ──

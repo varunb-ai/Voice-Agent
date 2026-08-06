@@ -118,6 +118,20 @@ class Settings(BaseSettings):
     realtime_echo_gate: str = "pass"
     realtime_echo_rms: float = 0.020
 
+    # How many times the agent may ask for the location before it must give up.
+    #
+    # A live call asked six times in 111 seconds and never got an answer. That
+    # was not a phrasing failure — the caller engaged throughout but never
+    # refused, never said they did not know, was not a wrong number and was not
+    # voicemail, so NONE of the prompt's escalation triggers matched. The
+    # standing instruction is "never close until you have saved a location or
+    # escalated", and with no exit condition the only thing left to do was ask
+    # again. The agent behaved exactly as specified.
+    #
+    # A budget is the missing condition, and unlike a phrasing rule it is
+    # enforceable rather than hoped for.
+    realtime_max_location_asks: int = 4
+
     # Which calling script to run — see agents/voice/templates.py
     call_template: str = "forage_data_collection"
 
