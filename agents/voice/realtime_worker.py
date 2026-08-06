@@ -1157,15 +1157,31 @@ async def _oai_to_twilio(
                         result = run_tool(name, sess.memory, args)
                 else:
                     result = run_tool(name, sess.memory, args)
+                # Report what the tool ACTUALLY did. This used to print
+                # "✅ BRANCH SAVED" unconditionally, without looking at the
+                # result — so a live call logged
+                #     🚫 HALLUCINATED BRANCH BLOCKED: {'branch': 'Downtown'}
+                #     ✅ BRANCH SAVED : {'branch': 'Downtown'}
+                # one line apart. The guard had worked and nothing was saved,
+                # but the log said otherwise. A safeguard that reports itself as
+                # having failed is worse than no log at all: it sends you
+                # hunting a bug that isn't there and hides the one that is.
                 ts = datetime.now().strftime("%H:%M:%S")
+                ok = bool(result.get("ok"))
                 if name == "save_branch":
-                    print(f"\n[{ts}] ✅ BRANCH SAVED : {args}", flush=True)
+                    if ok:
+                        print(f"\n[{ts}] ✅ BRANCH SAVED   : {args}", flush=True)
+                    else:
+                        print(f"\n[{ts}] ⛔ BRANCH REJECTED: {args}", flush=True)
+                        print(f"          reason: {result.get('error', '')}", flush=True)
                 elif name == "escalate":
-                    print(f"\n[{ts}] ⚠️  ESCALATED    : {args}", flush=True)
+                    label = "⚠️  ESCALATED     " if ok else "⛔ ESCALATE FAILED"
+                    print(f"\n[{ts}] {label}: {args}", flush=True)
                 elif name == "note_info":
-                    print(f"[{ts}] 📝 NOTE         : {args}", flush=True)
+                    print(f"[{ts}] {'📝 NOTE           ' if ok else '⛔ NOTE REJECTED  '}: {args}",
+                          flush=True)
                 else:
-                    print(f"[{ts}] 🔧 TOOL         : {name}({args}) → {result}", flush=True)
+                    print(f"[{ts}] 🔧 TOOL           : {name}({args}) → {result}", flush=True)
 
                 if name in ("save_branch", "escalate") and result.get("ok"):
                     sess.done = True

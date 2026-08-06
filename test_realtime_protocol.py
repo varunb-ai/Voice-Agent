@@ -397,25 +397,36 @@ async def main():
     # Match against whitespace-normalised text throughout: the instructions are
     # hard-wrapped, so an assertion must not depend on where a line happens to
     # break. Two of these failed on the consolidation purely from rewrapping.
-    flat_tpl = " ".join(tpl.instructions.split())
-    check("NEVER invent, guess, or approximate a phone number" in flat_tpl,
+    # One whitespace-normalised copy of the instructions. Assertions match
+    # against this so they never depend on where a hard-wrapped line breaks.
+    flat = " ".join(tpl.instructions.split())
+    check("NEVER invent, guess, or approximate a phone number" in flat,
           "instructions forbid inventing a phone number")
-    check("repeat it plainly and in full" in flat_tpl,
+    check("repeat it plainly and in full" in flat,
           "mid-call identity re-ask is handled")
-    check("identity and contact facts are exempt" in flat_tpl,
+    check("identity and contact facts are exempt" in flat,
           "identity facts exempt from the no-repetition rule")
 
     # The brevity rules once combined to make 5 of 6 agent turns bare
     # questions, including answering a caller's direct question with another
     # question. Guard the counterweight so tightening brevity again cannot
     # silently reintroduce it.
-    check("answer it before you ask anything of your own" in tpl.instructions,
+    check("answer it before you ask anything of your own" in flat,
           "caller questions get answered before the agent asks its own")
-    check("NEVER reply to a question with only a question" in tpl.instructions,
+    check("NEVER reply to a question with only a question" in flat,
           "never answers a question with only a question")
+    # A live call welded the same branch question onto four consecutive
+    # answers. The prose rule against it was already there and was ignored
+    # every time, so it is now a hard constraint on the shape of the output.
+    check("YOUR TURN CONTAINS NO QUESTION MARK" in flat,
+          "answering a question forbids asking one in the same turn")
+    check("NEVER ask for the branch twice in the same wording" in flat,
+          "cannot repeat the branch question verbatim")
+    check('say ONLY "Of course, take your time." and then STOP' in flat,
+          "a hold request gets no follow-up question")
     # Normalise whitespace — the instructions are hard-wrapped, so asserting on
     # a phrase that spans a line break must not depend on where it wraps.
-    flat = " ".join(tpl.instructions.split())
+    # (flat defined above)
     check("NOT a licence to strip a turn down to a bare question" in flat,
           "brevity rules explicitly subordinated to conversation")
     # Hospitals have branches, not offices — and the field we store into is
