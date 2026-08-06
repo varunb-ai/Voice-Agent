@@ -383,7 +383,13 @@ async def main():
     # uses no pretext. It does NOT announce itself as automated; that is the
     # forage_ai_disclosed variant, asserted separately below.
     check(tpl.org_name in ctx, "greeting names the organisation")
-    check("directory of doctors" in ctx, "greeting states the purpose")
+    # Purpose, not a company description. "we keep a directory of doctors up to
+    # date" is how a brochure explains an employer; "about a doctor listing" is
+    # how a person says why they rang.
+    check("doctor listing" in ctx or "directory of doctors" in ctx,
+          "greeting states the purpose")
+    check("sorry to bother you" in ctx,
+          "greeting opens with a softener, as a real cold call does")
     check(any(i["item"].get("type") == "function_call_output" for i in items),
           "tool result returned to the model")
 

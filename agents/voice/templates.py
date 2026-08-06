@@ -445,9 +445,20 @@ _FORAGE_GREETING = (
 # script as specified ("I'm calling from Forage AI. We're collecting or
 # validating publicly available information about doctors") — spoken by a named
 # person rather than announced as automated.
+# Written to sound like a person picking up the phone, not like copy being
+# read. Differences that matter, all small:
+#   "Oh hi" and "sorry to bother you" — every real cold call opens with a
+#     softener; a clean declarative opening is what marks it as a script.
+#   the confirmation question comes EARLY, because that is what you actually
+#     want to know first and it hands them a turn immediately.
+#   "it's Sarah" not "this is Sarah" — nobody says "this is" on the phone
+#     unless they are announcing something.
+#   "about a doctor listing" not "we keep a directory of doctors up to date" —
+#     the second is a company description, and people do not describe their
+#     employer's function when they ring you.
 _HUMAN_GREETING = (
-    "Hi there! This is {agent_name} from {org} — we keep a "
-    "directory of doctors up to date. Is this {hospital}?"
+    "Oh hi, sorry to bother you — is that {hospital}? "
+    "It's {agent_name} here, calling from {org} about a doctor listing."
 )
 
 
