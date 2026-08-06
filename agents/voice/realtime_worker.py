@@ -126,6 +126,32 @@ def _wire_samples(raw: bytes) -> int:
     return len(raw) if _passthrough_enabled() else len(raw) // 2
 
 
+def _loudest_window_rms(arr: np.ndarray, window_s: float = 0.3) -> float:
+    """RMS of the LOUDEST window in an utterance, not the mean across it.
+
+    Mean RMS over a whole utterance is dominated by the gaps between words. On
+    a live call a perfectly audible caller — peak 0.098, twelve windows above
+    0.02, every turn transcribing cleanly — measured 0.0016 by the mean and was
+    told "you're coming through faint". Telling an audible person they cannot
+    be heard is its own way to lose the call.
+
+    The loudest window answers the question actually being asked: when they
+    were speaking, was there enough signal? Utterances too short to judge
+    return 0.0, which the caller treats as "no opinion".
+    """
+    if arr.size == 0:
+        return 0.0
+    sr = _wire_sample_rate()
+    win = int(window_s * sr)
+    if arr.size < win:
+        return 0.0     # too short to judge — do not guess
+    best = 0.0
+    for start in range(0, arr.size - win + 1, max(1, win // 2)):
+        seg = arr[start:start + win]
+        best = max(best, float(np.sqrt(np.mean(seg ** 2))))
+    return best
+
+
 def _echo_gate_allows(raw: bytes) -> bool:
     """Should this caller frame reach OpenAI while the agent is speaking?
 
@@ -992,7 +1018,7 @@ async def _oai_to_twilio(
                     utterance = b"".join(sess._caller_pcm[_speech_start_pcm_pos:])
                     if utterance and not sess._low_audio_warned:
                         arr = _wire_to_pcm16(utterance)
-                        rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
+                        rms = _loudest_window_rms(arr)
                         if 0.0 < rms < _LOW_AUDIO_RMS:
                             sess._low_audio_warned = True
                             print(f"[Realtime] Caller audio very faint "
@@ -1284,7 +1310,13 @@ async def _oai_to_twilio(
                 async def _end_speaking_gate(s=sess, delay=_echo_cooldown):
                     await asyncio.sleep(delay)
                     s.agent_speaking = False
-                    print(f"[Realtime] Echo cooldown done ({delay:.2f}s) — listening for caller", flush=True)
+                    # Under REALTIME_ECHO_GATE=pass this window gates nothing —
+                    # frames flow throughout — so announcing it as "now
+                    # listening" was misleading output implying the caller had
+                    # been unheard for 6.91s when they had not.
+                    if settings.realtime_echo_gate != "pass":
+                        print(f"[Realtime] Echo cooldown done ({delay:.2f}s) — "
+                              f"listening for caller", flush=True)
                 asyncio.create_task(_end_speaking_gate())
                 usage = msg.get("response", {}).get("usage", {})
                 if usage:
