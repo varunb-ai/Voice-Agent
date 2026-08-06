@@ -334,11 +334,15 @@ async def main():
               "unusable CALLBACK_NUMBER withheld from the call context")
         check("NONE AVAILABLE" in ctx,
               "agent told explicitly that no callback number exists")
-    check("NEVER invent, guess, or approximate a phone number" in tpl.instructions,
+    # Match against whitespace-normalised text throughout: the instructions are
+    # hard-wrapped, so an assertion must not depend on where a line happens to
+    # break. Two of these failed on the consolidation purely from rewrapping.
+    flat_tpl = " ".join(tpl.instructions.split())
+    check("NEVER invent, guess, or approximate a phone number" in flat_tpl,
           "instructions forbid inventing a phone number")
-    check("repeat it plainly and in full" in tpl.instructions,
+    check("repeat it plainly and in full" in flat_tpl,
           "mid-call identity re-ask is handled")
-    check("identity and contact facts are exempt" in tpl.instructions,
+    check("identity and contact facts are exempt" in flat_tpl,
           "identity facts exempt from the no-repetition rule")
 
     # The brevity rules once combined to make 5 of 6 agent turns bare
