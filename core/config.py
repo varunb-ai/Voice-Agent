@@ -177,7 +177,11 @@ class Settings(BaseSettings):
     # forced a choice between cutting people off (360ms interrupted a caller
     # mid-sentence) and adding dead time to every turn (550ms). Semantic
     # detection removes the trade-off rather than tuning a threshold.
-    realtime_turn_detection: str = "semantic_vad"
+    realtime_turn_detection: str = "server_vad"
+    # server_vad only: silence after the caller stops before a response starts.
+    # This is additive dead time on every turn, so it is the direct lever on
+    # latency. 360ms cut people off mid-sentence; 550ms was the over-correction.
+    realtime_silence_ms: int = 500
     # semantic_vad only: "low" | "medium" | "high" | "auto".
     # low = gives the speaker more thinking time, high = chunks quickly.
     # "low" chosen because callers here pause mid-answer while looking

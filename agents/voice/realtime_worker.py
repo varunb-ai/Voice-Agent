@@ -362,7 +362,7 @@ def _realtime_tools() -> list[dict]:
 def build_audio_config(*, transcribe_model: str, transcribe_hint: str,
                        audio_format: str, noise_reduction: str,
                        turn_detection: str, eagerness: str,
-                       voice: str) -> dict:
+                       voice: str, silence_ms: int = 500) -> dict:
     """Assemble the session.update `audio` block.
 
     Split out so check_realtime.py can probe variants against the live API
@@ -379,7 +379,7 @@ def build_audio_config(*, transcribe_model: str, transcribe_hint: str,
             "type": "server_vad",
             "threshold": 0.55,
             "prefix_padding_ms": 300,
-            "silence_duration_ms": 550,
+            "silence_duration_ms": silence_ms,
         }
 
     audio_in: dict = {
@@ -913,6 +913,7 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                     turn_detection=settings.realtime_turn_detection,
                     eagerness=settings.realtime_vad_eagerness,
                     voice=settings.realtime_voice,
+                    silence_ms=settings.realtime_silence_ms,
                 ),
                 "max_output_tokens": settings.realtime_max_response_tokens,
             },
