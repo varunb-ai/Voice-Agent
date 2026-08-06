@@ -610,12 +610,27 @@ async def main():
         ("Of course, take your time.", False),
         ("Got it, thanks — have a good day.", False),
         ("Perfect, I have that — thanks a lot.", False),
-        ("Which branch is she at.", False),          # no question mark
+        # Transcription routinely drops question marks, so a missing '?' cannot
+        # be what decides this. It is an ask.
+        ("Which branch is she at.", True),
+        # Real wordings from a live call that the old whitelist scored as 0 asks
+        # while the agent asked four times.
+        ("I'm trying to confirm which branch Dr. Okafor works at.", True),
+        ("Thanks for checking; I'm ready for the branch details when you are.", True),
+        ("Yes, please share the branch name or address where she sees patients.", True),
+        # Reading a value back is not asking for one.
+        ("Thanks, I have that as the Riverside branch. Have a good day.", False),
     ]:
         check(rw._is_location_ask(text) == expected,
               f"location-ask detector: {expected!s:5} for {text[:44]!r}")
-    check("\x08" not in rw._LOCATION_ASK.pattern,
-          "no control characters corrupting the pattern")
+    # Every compiled pattern in the module, not just one. A patch script has now
+    # written 0x08 into a regex twice; the first time only _LOCATION_ASK was
+    # guarded, and the second landed in a pattern the guard did not cover.
+    import re as _re
+    for _name, _val in vars(rw).items():
+        if isinstance(_val, _re.Pattern):
+            check(not any(ord(c) < 32 and c not in "\t\n" for c in _val.pattern),
+                  f"no control characters in {_name}")
     # Statement-form asks. The agent started using these once the brevity
     # rules were relaxed, and the budget counted 3 on a call where the caller
     # complained about being asked the same thing repeatedly.

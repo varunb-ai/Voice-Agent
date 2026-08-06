@@ -170,15 +170,50 @@ _SOFT_LOCATION_ASK = re.compile(
     r".{0,60}(branch|location|office|campus|site)", re.I)
 
 
+# Turns that MENTION the location without asking for it: acknowledging a value
+# just given, or signing off. Everything else that names a location is a request,
+# whatever shape it takes.
+_NOT_AN_ASK = re.compile(
+    r"\b(thanks|thank you|got it|perfect|great|appreciate|have a (good|great)|"
+    r"take care|goodbye|bye now|i'?ll (note|record|pass)|i have that|"
+    r"that'?s all|no (problem|worries))\b", re.I)
+
+# Reading back a value the caller already gave.
+_CONFIRMS_VALUE = re.compile(
+    r"\b(i have that as|i'?ve got that|i'?ll note|noted as|recorded as|"
+    r"i'?ll put (that|it) down|so that'?s)\b", re.I)
+
+_LOCATION_NOUN = re.compile(
+    r"\b(branch|location|office|campus|site|address|practis\w*|practic\w*)\b", re.I)
+
+
 def _is_location_ask(text: str) -> bool:
     """Is this agent turn asking where the doctor practises?
 
     Counts statement-form asks as well as questions. A request phrased politely
     is still a request, and the person on the other end experiences it as one.
+
+    This used to be a whitelist of phrasings requiring a question mark, and it
+    scored 0 asks on a call that asked four times — the agent had simply picked
+    wordings that were not on the list ("trying to confirm" where the list held
+    "trying to find out"). Enumerating phrasings cannot work: the model has more
+    ways to ask than anyone can list.
+
+    So it is inverted. Naming a location IS an ask unless the turn is plainly
+    acknowledging or closing. This over-counts a little, which is the safe
+    direction for a budget whose purpose is to stop the agent pestering people.
     """
-    if _SOFT_LOCATION_ASK.search(text):
+    if not _LOCATION_NOUN.search(text):
+        return False
+    # Reading a value back is not asking for one.
+    if "?" not in text and _CONFIRMS_VALUE.search(text):
+        return False
+    if "?" in text:
         return True
-    return "?" in text and bool(_LOCATION_ASK.search(text))
+    # An acknowledgement that goes on to ask for something is still an ask, so
+    # only a turn that is ENTIRELY acknowledgement is exempt.
+    stripped = _NOT_AN_ASK.sub("", text)
+    return bool(_LOCATION_NOUN.search(stripped))
 
 
 def _ask_budget_outcome(turns: list, sent_at: Optional[int],
