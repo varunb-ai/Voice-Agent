@@ -354,7 +354,14 @@ async def main():
     flat = " ".join(tpl.instructions.split())
     check("NOT a licence to strip a turn down to a bare question" in flat,
           "brevity rules explicitly subordinated to conversation")
-    check("Wrong: \"Which office is she at?\"" in tpl.instructions,
+    # Hospitals have branches, not offices — and the field we store into is
+    # literally called `branch`, so asking "which office" is inconsistent with
+    # both the domain and the schema.
+    check("say BRANCH, not office" in flat,
+          "agent asks for a branch, not an office")
+    check('Never "which office"' in flat,
+          "'which office' explicitly ruled out as the agent's wording")
+    check("Wrong: \"Which branch is she at?\"" in tpl.instructions,
           "bare-question turn shown as a counter-example")
 
     # A caller who said only "Bye." was told "Thanks for checking" — thanked
