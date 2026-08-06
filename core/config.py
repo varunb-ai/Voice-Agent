@@ -181,7 +181,7 @@ class Settings(BaseSettings):
     # server_vad only: silence after the caller stops before a response starts.
     # This is additive dead time on every turn, so it is the direct lever on
     # latency. 360ms cut people off mid-sentence; 550ms was the over-correction.
-    realtime_silence_ms: int = 700
+    realtime_silence_ms: int = 1000
     # semantic_vad only: "low" | "medium" | "high" | "auto".
     # low = gives the speaker more thinking time, high = chunks quickly.
     # "low" chosen because callers here pause mid-answer while looking
