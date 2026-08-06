@@ -53,6 +53,20 @@ log = logging.getLogger(__name__)
 # fabricated answer measured 0.004-0.012 throughout.
 _LOW_AUDIO_RMS = 0.015
 
+# Where call artefacts land. Indirected through functions so tests can point
+# them at a temp directory — the protocol suite used to write real WAVs and
+# JSON into data/ on every run, polluting the actual call records.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def audio_dir() -> Path:
+    return _PROJECT_ROOT / "data" / "3 cases voice"
+
+
+def json_dir() -> Path:
+    return _PROJECT_ROOT / "data" / "3 cases jsons"
+
+
 REALTIME_URL = "wss://api.openai.com/v1/realtime?model={model}"
 _TWILIO_SR = 8_000
 _OAI_SR    = 24_000
@@ -354,7 +368,7 @@ class RealtimeSession:
 
         # Build WAV from accumulated streams
         try:
-            base_dir = Path(__file__).resolve().parent.parent.parent / "data" / "3 cases voice"
+            base_dir = audio_dir()
             base_dir.mkdir(parents=True, exist_ok=True)
             wav_path = base_dir / f"{self.call_id}.wav"
 
@@ -419,7 +433,7 @@ class RealtimeSession:
             log.error("Failed to save audio: %s", e, exc_info=True)
 
         # Save per-call JSON
-        data_dir = Path(__file__).resolve().parent.parent.parent / "data" / "3 cases jsons"
+        data_dir = json_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
         branch  = self.memory.get("branch")
         resolved = bool(self.memory.get("resolved"))

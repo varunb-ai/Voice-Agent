@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 import sys
+import tempfile
 import types
 from unittest import mock
 
@@ -108,8 +110,21 @@ def usage(text_in=2000, cached=1887, audio_in=400, audio_out=800):
     }}
 
 
+_ARTEFACTS = pathlib.Path(tempfile.gettempdir()) / "realtime-protocol-test"
+
+
 async def run_call(script):
-    """Run one scripted call, return (messages_sent_to_oai, session_memory)."""
+    """Run one scripted call, return (messages_sent_to_oai, session_memory).
+
+    Fully offline. Two things are stubbed that otherwise reach the outside
+    world on every run:
+
+      * the Twilio REST client — the handler starts a call recording, which
+        for a fake CallSid produced a 20404 against the LIVE api.twilio.com
+        using real credentials, and printed a wall of traceback per scenario.
+      * the artefact directories — save() wrote real WAVs and JSON into
+        data/, mixing test runs in with genuine call records.
+    """
     sent = []
     twilio = FakeTwilio([{"event": "start", "start": {"streamSid": "MZtest"}}])
     captured = {}
@@ -120,8 +135,22 @@ async def run_call(script):
         real_init(self, call_sid, doctor)
         captured["session"] = self
 
+    _ARTEFACTS.mkdir(parents=True, exist_ok=True)
+
+    class _NoTwilio:
+        """Stands in for twilio.rest.Client — never touches the network."""
+        def __init__(self, *a, **k): pass
+        def __call__(self, *a, **k): return self
+        def __getattr__(self, _): return self
+        def create(self, *a, **k):
+            raise RuntimeError("Twilio disabled in tests")
+
     with mock.patch.object(rw.websockets, "connect",
                            lambda *a, **k: FakeConn(FakeOAI(script, sent))), \
+         mock.patch.object(rw, "audio_dir", lambda: _ARTEFACTS), \
+         mock.patch.object(rw, "json_dir", lambda: _ARTEFACTS), \
+         mock.patch.dict("sys.modules",
+                         {"twilio.rest": types.SimpleNamespace(Client=_NoTwilio)}), \
          mock.patch.object(rw.RealtimeSession, "__init__", spy_init):
         doctor = Doctor(doctor_name="Dr. Jane Okafor",
                         hospital_name="Northside Medical Group",
@@ -241,7 +270,7 @@ def script_tool_fires_mid_question():
          "transcript": "Yes, she's at the Northgate campus."},
         # agent's turn ends in a question, yet the tool fires in the same response
         {"type": "response.output_audio_transcript.done",
-         "transcript": "Which office is Dr. Okafor working out of?"},
+         "transcript": "Which branch is Dr. Okafor working out of?"},
         {"type": "response.function_call_arguments.done", "call_id": "c9",
          "name": "save_branch", "arguments": json.dumps({"branch": "Northgate Campus"})},
         {"type": "response.done", "response": usage()},
