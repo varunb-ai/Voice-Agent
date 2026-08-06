@@ -77,6 +77,37 @@ def _convert_oai_to_twilio(pcm16_b64: str) -> str:
     return base64.b64encode(_mulaw_encode(f32_8k)).decode()
 
 
+# ── μ-law passthrough ─────────────────────────────────────────────────────────
+# With REALTIME_AUDIO_FORMAT=pcmu the session speaks the same g711 μ-law Twilio
+# already sends, so frames cross untouched in both directions: no μ-law decode,
+# no 8k→24k resample inbound, no 24k→8k resample and re-encode outbound. That is
+# two resamples removed from each 20ms frame, 50 frames a second, each way.
+#
+# Recording still needs linear PCM, but only to write a WAV — decoding μ-law at
+# 8kHz is cheap and skips the resample entirely, so the recording is written at
+# 8kHz rather than 24kHz. It is a phone call; 8kHz is the true bandwidth anyway.
+
+def _passthrough_enabled() -> bool:
+    return settings.realtime_audio_format == "pcmu"
+
+
+def _wire_sample_rate() -> int:
+    """Sample rate of whatever is stored in the recording buffers."""
+    return _TWILIO_SR if _passthrough_enabled() else _OAI_SR
+
+
+def _wire_to_pcm16(raw: bytes) -> np.ndarray:
+    """Decode a recording-buffer chunk to float32, whatever format it holds."""
+    if _passthrough_enabled():
+        return _mulaw_decode(raw)
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _wire_samples(raw: bytes) -> int:
+    """Number of audio samples in a chunk. μ-law is 1 byte/sample, PCM16 is 2."""
+    return len(raw) if _passthrough_enabled() else len(raw) // 2
+
+
 # ── Tool schema conversion ────────────────────────────────────────────────────
 
 def _realtime_tools() -> list[dict]:
@@ -299,6 +330,9 @@ class RealtimeSession:
 
     async def save(self) -> None:
         import soundfile as sf
+        # Recording buffers hold whatever the wire format is: 8kHz μ-law
+        # under passthrough, 24kHz PCM16 otherwise.
+        _SR = _wire_sample_rate()
         duration    = int((datetime.now() - self.start_dt).total_seconds())
         audio_path: Optional[str] = None
 
@@ -310,23 +344,23 @@ class RealtimeSession:
 
             # Caller: continuous stream from Twilio — already timeline-aligned (t=0 = stream start)
             caller_raw = b"".join(self._caller_pcm)
-            caller = (np.frombuffer(caller_raw, dtype=np.int16).astype(np.float32) / 32768.0
-                      if caller_raw else np.zeros(_OAI_SR, dtype=np.float32))
+            caller = (_wire_to_pcm16(caller_raw)
+                      if caller_raw else np.zeros(_SR, dtype=np.float32))
 
             # Agent: place each response block at its timestamp position.
             # Each block is a complete response — all deltas joined in order, so
             # PCM at 24 kHz naturally spans the correct duration from t_offset.
-            n = max(len(caller), int(duration * _OAI_SR), _OAI_SR)
+            n = max(len(caller), int(duration * _SR), _SR)
             agent = np.zeros(n, dtype=np.float32)
             print(f"[Realtime] Recording: caller={len(caller)} samples, "
                   f"agent_responses={len(self._agent_pcm)}, n={n}", flush=True)
             for (t_offset, pcm_bytes) in self._agent_pcm:
-                start = int(t_offset * _OAI_SR)
-                arr   = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                start = int(t_offset * _SR)
+                arr   = _wire_to_pcm16(pcm_bytes)
                 end   = min(start + len(arr), n)
                 if end > start:
                     agent[start:end] += arr[:end - start]
-                print(f"  agent block: t={t_offset:.2f}s, dur={len(pcm_bytes)/2/_OAI_SR:.2f}s, "
+                print(f"  agent block: t={t_offset:.2f}s, dur={_wire_samples(pcm_bytes)/_SR:.2f}s, "
                       f"samples={len(arr)}", flush=True)
 
             # Pad to same length
@@ -341,16 +375,16 @@ class RealtimeSession:
             # when they responded immediately after the agent stopped speaking.
             soft_gate = np.ones(n, dtype=np.float32)
             for (t_off, pcm_b) in self._agent_pcm:
-                s = int(t_off * _OAI_SR)
+                s = int(t_off * _SR)
                 # 0.3s tail after agent audio ends — covers residual phone echo
-                e = min(s + len(pcm_b) // 2 + int(0.30 * _OAI_SR), n)
+                e = min(s + _wire_samples(pcm_b) + int(0.30 * _SR), n)
                 if e > s:
                     soft_gate[s:e] = 0.10   # 10% = echo barely audible, speech still recorded
 
             gated_caller = caller * soft_gate
 
             # Debug: log raw caller RMS in 3s chunks to see if voice is present
-            chunk = 3 * _OAI_SR
+            chunk = 3 * _SR
             raw_rms = [float(np.sqrt(np.mean(caller[i:i+chunk]**2)))
                        for i in range(0, len(caller) - chunk, chunk)]
             print(f"[Realtime] Caller raw RMS per 3s: {[f'{r:.4f}' for r in raw_rms]}", flush=True)
@@ -362,7 +396,7 @@ class RealtimeSession:
             agent_norm  = _normalise(agent)
             caller_norm = _normalise(gated_caller)
             mono = np.clip(agent_norm + caller_norm, -1.0, 1.0)
-            sf.write(str(wav_path), mono, _OAI_SR)
+            sf.write(str(wav_path), mono, _SR)
             audio_path = str(wav_path)
             log.info("Realtime recording saved (mono, soft-gated caller): %s", wav_path)
         except Exception as e:
@@ -754,11 +788,17 @@ async def _twilio_to_oai(
                     continue
                 payload = msg["media"]["payload"]
                 try:
-                    raw_bytes = base64.b64decode(payload)
-                    pcm_24k = (resample(_mulaw_decode(raw_bytes), _TWILIO_SR, _OAI_SR) * 32767).astype(np.int16)
-                    # Always capture caller audio for the local recording, even
-                    # when we don't forward it — the WAV needs a continuous track.
-                    sess._caller_pcm.append(pcm_24k.tobytes())
+                    if _passthrough_enabled():
+                        # Twilio already speaks the session's format. Store the
+                        # μ-law bytes as-is and forward the payload untouched.
+                        raw_bytes = base64.b64decode(payload)
+                        sess._caller_pcm.append(raw_bytes)
+                        oai_payload = payload
+                    else:
+                        raw_bytes = base64.b64decode(payload)
+                        pcm_24k = (resample(_mulaw_decode(raw_bytes), _TWILIO_SR, _OAI_SR) * 32767).astype(np.int16)
+                        sess._caller_pcm.append(pcm_24k.tobytes())
+                        oai_payload = base64.b64encode(pcm_24k.tobytes()).decode()
                     if not sess.listen_enabled.is_set():
                         continue
                     if sess.agent_speaking:
@@ -771,7 +811,7 @@ async def _twilio_to_oai(
                         continue
                     await oai_ws.send(json.dumps({
                         "type":  "input_audio_buffer.append",
-                        "audio": base64.b64encode(pcm_24k.tobytes()).decode(),
+                        "audio": oai_payload,
                     }))
                 except Exception as e:
                     log.debug("[Realtime] Twilio→OAI audio error: %s", e)
@@ -862,7 +902,7 @@ async def _oai_to_twilio(
                     # is evidence the model does not otherwise have.
                     utterance = b"".join(sess._caller_pcm[_speech_start_pcm_pos:])
                     if utterance and not sess._low_audio_warned:
-                        arr = np.frombuffer(utterance, dtype=np.int16).astype(np.float32) / 32768.0
+                        arr = _wire_to_pcm16(utterance)
                         rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
                         if 0.0 < rms < _LOW_AUDIO_RMS:
                             sess._low_audio_warned = True
@@ -895,7 +935,7 @@ async def _oai_to_twilio(
                 if delta and sess.stream_sid:
                     try:
                         raw_pcm = base64.b64decode(delta)
-                        _samples_this_response += len(raw_pcm) // 2  # int16 = 2 bytes/sample
+                        _samples_this_response += _wire_samples(raw_pcm)
                         if _first_delta_sent_at is None:
                             _first_delta_sent_at = time.monotonic()
                         # Buffer for recording: stamp only the first delta of this response.
@@ -916,7 +956,8 @@ async def _oai_to_twilio(
                                 print(f"[Realtime]   ^ that is dead air on the "
                                       f"callee's end before the greeting starts",
                                       flush=True)
-                        twilio_payload = _convert_oai_to_twilio(delta)
+                        twilio_payload = (delta if _passthrough_enabled()
+                                          else _convert_oai_to_twilio(delta))
                         await twilio_ws.send_text(json.dumps({
                             "event":    "media",
                             "streamSid": sess.stream_sid,
@@ -1084,7 +1125,7 @@ async def _oai_to_twilio(
                     sess._agent_pcm.append((_current_response_start, b"".join(_current_response_pcm)))
                     print(f"[Realtime] Flushed agent response: {len(_current_response_pcm)} chunks, "
                           f"start={_current_response_start:.2f}s, "
-                          f"dur={_samples_this_response/_OAI_SR:.2f}s", flush=True)
+                          f"dur={_samples_this_response/_wire_sample_rate():.2f}s", flush=True)
                 _current_response_pcm.clear()
                 _current_response_start = None
                 # Dynamic echo cooldown: wait until audio finishes playing on the phone +
@@ -1106,7 +1147,7 @@ async def _oai_to_twilio(
                 #
                 # Playback ends at (first chunk sent) + (audio duration), since
                 # Twilio plays what we send at realtime speed.
-                _audio_seconds = _samples_this_response / _OAI_SR
+                _audio_seconds = _samples_this_response / _wire_sample_rate()
                 if _first_delta_sent_at is not None:
                     _playback_ends_at = _first_delta_sent_at + _audio_seconds
                     _echo_cooldown = max(0.3, _playback_ends_at + 0.25 - time.monotonic())

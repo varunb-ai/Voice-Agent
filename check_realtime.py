@@ -228,9 +228,22 @@ async def main() -> int:
 
     print(f"\n      GREETING THE CALLEE WILL HEAR:\n        {greeting}\n")
 
-    check("automated assistant" in greeting.lower(),
-          "greeting discloses it is automated")
-    check("recorded" in greeting.lower(), "greeting discloses recording")
+    # Template 1 is truthful about WHO and WHY — it names the organisation and
+    # uses no pretext. Announcing automation upfront is the forage_ai_disclosed
+    # variant, so assert per template rather than assuming one shape.
+    check(tpl.org_name.split()[0].lower() in greeting.lower(),
+          "greeting names the organisation")
+    if tpl.name == "forage_ai_disclosed":
+        check("automated" in greeting.lower(),
+              "disclosed variant announces automation upfront")
+        check("recorded" in greeting.lower(),
+              "disclosed variant discloses recording upfront")
+    else:
+        flat_i = " ".join(tpl.instructions.split())
+        check("say yes, you're an automated system" in flat_i
+              or "confirm plainly and immediately" in flat_i,
+              "confirms it is automated if asked point-blank")
+        check("recorded" in flat_i, "confirms the call is recorded if asked")
     check("Okafor" not in tpl.instructions and "Northside" not in tpl.instructions,
           "instructions contain no per-call data (cache prefix is stable)")
 
@@ -262,16 +275,21 @@ async def main() -> int:
 
             is_trial = (acct.type or "").lower() == "trial"
             if is_trial and settings.use_realtime:
-                # Hard blocker, not a nuisance. The realtime bridge is built on
-                # <Connect><Stream> (Media Streams), which trial accounts do not
-                # support — Twilio error 10002. The call places, /answer returns
-                # 200, and then Twilio ends the call after ~3s without ever
-                # opening the WebSocket, which looks like a bug in our code.
-                check(False, "account supports Media Streams (<Connect><Stream>)",
-                      "TRIAL account — Media Streams is a paid feature. The call "
-                      "will connect, play the trial message, then end after ~3s "
-                      "with no audio stream. Upgrade the account: "
-                      "console.twilio.com -> Billing -> Upgrade")
+                # NOT a hard failure — I had this wrong. One trial account here
+                # could not open <Connect><Stream> (call placed, /answer 200,
+                # line dropped after ~3s with no WebSocket), and I concluded
+                # Media Streams was paid-only. Another trial account on this
+                # same project runs it fine and has completed several calls.
+                # Both report type=Trial, so trial status is not the
+                # discriminator — newly created accounts appear to be
+                # restricted until fully provisioned, matching the 401
+                # "Policy evaluation failed" seen on the same account.
+                print(f"{_WARN} TRIAL account. Media Streams (<Connect><Stream>) "
+                      f"is what the realtime bridge runs on, and some trial "
+                      f"accounts cannot open it — the call connects then drops "
+                      f"after ~3s with no audio. If that happens, the account "
+                      f"needs upgrading. Trial also plays a 'you have a trial "
+                      f"account' message to the callee.")
             elif is_trial:
                 print(f"{_WARN} TRIAL account — trial message plays to the callee, "
                       f"calls limited to your sign-up country.")

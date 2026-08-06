@@ -140,10 +140,16 @@ class Settings(BaseSettings):
     # "semantic_vad" — the model scores whether the speaker has actually
     #                  finished, so it can respond fast without truncating a
     #                  pause. Designed for exactly this trade-off.
-    realtime_turn_detection: str = "server_vad"
+    # Probe confirmed the account accepts semantic_vad. Switched: server_vad
+    # forced a choice between cutting people off (360ms interrupted a caller
+    # mid-sentence) and adding dead time to every turn (550ms). Semantic
+    # detection removes the trade-off rather than tuning a threshold.
+    realtime_turn_detection: str = "semantic_vad"
     # semantic_vad only: "low" | "medium" | "high" | "auto".
     # low = gives the speaker more thinking time, high = chunks quickly.
-    realtime_vad_eagerness: str = "medium"
+    # "low" chosen because callers here pause mid-answer while looking
+    # something up, and being interrupted is worse than a slightly late reply.
+    realtime_vad_eagerness: str = "low"
 
     # ── Realtime pricing, USD per 1M tokens ──────────────────────────────────
     # Set for gpt-realtime-2, from developers.openai.com/api/docs/pricing,

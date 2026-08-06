@@ -300,8 +300,17 @@ async def main():
           "no response.create carries an instructions override",
           f"{len(creates)} response.create sent")
     check(session["audio"]["output"]["voice"] == settings.realtime_voice, "voice configured")
-    check(session["audio"]["input"]["turn_detection"]["type"] == "server_vad",
-          "turn detection configured")
+    check(session["audio"]["input"]["turn_detection"]["type"]
+          == settings.realtime_turn_detection,
+          f"turn detection configured ({settings.realtime_turn_detection})")
+    # The wire format must match on both legs, or the session speaks one codec
+    # and Twilio hears another — silence on a connected call.
+    check(session["audio"]["input"]["format"] == session["audio"]["output"]["format"],
+          "input and output audio formats agree")
+    expected_fmt = ("audio/pcmu" if settings.realtime_audio_format == "pcmu"
+                    else "audio/pcm")
+    check(session["audio"]["input"]["format"]["type"] == expected_fmt,
+          f"audio format is {expected_fmt}")
     check(session["audio"]["input"]["transcription"]["language"] == "en",
           "transcription pinned to en")
     check(session.get("max_output_tokens") == settings.realtime_max_response_tokens,
