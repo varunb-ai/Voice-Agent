@@ -749,6 +749,15 @@ class RealtimeSession:
             "branch_needed_clarification":
                 bool(self.memory.get("branch_needed_clarification")),
             "model":          settings.realtime_model,
+            # Recorded so latency across calls can be attributed to the settings
+            # that produced it, instead of reconstructed from memory afterwards.
+            "audio_settings": {
+                "turn_detection": settings.realtime_turn_detection,
+                "silence_ms":     settings.realtime_silence_ms,
+                "eagerness":      settings.realtime_vad_eagerness,
+                "voice":          settings.realtime_voice,
+                "noise_reduction": settings.realtime_noise_reduction,
+            },
             "usage": {
                 "responses":         self._responses,
                 "input_audio":       self._input_audio_tokens,
