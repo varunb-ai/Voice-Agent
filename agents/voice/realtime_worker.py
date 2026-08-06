@@ -543,7 +543,7 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                 "audio": {
                     "input": {
                         "transcription": {
-                            "model":    "whisper-1",
+                            "model":    settings.realtime_transcribe_model,
                             "language": "en",
                             "prompt":   template.transcribe_hint,
                         },
@@ -976,7 +976,19 @@ async def _oai_to_twilio(
                 }))
 
                 if sess.done:
-                    if _response_had_audio:
+                    # "_response_had_audio" was being read as "the agent said
+                    # goodbye", so the call hung up on whatever it happened to
+                    # be saying. On a live call it asked "which office is Dr.
+                    # Okafor working out of?", called save_branch in the same
+                    # response, and hung up — leaving the caller answering a
+                    # question to a dead line.
+                    #
+                    # An utterance ending in a question mark is not a farewell.
+                    last_agent = next((t.text for t in reversed(sess.turns)
+                                       if t.role == "agent"), "")
+                    sounded_like_a_goodbye = bool(last_agent) and not last_agent.rstrip().endswith("?")
+
+                    if _response_had_audio and sounded_like_a_goodbye:
                         # Model already said goodbye in its audio — don't inject another line
                         # The current response.done will trigger the close
                         _closing_sent = False

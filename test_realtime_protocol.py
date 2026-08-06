@@ -222,6 +222,32 @@ def script_identity_reask():
     ]
 
 
+def script_tool_fires_mid_question():
+    """save_branch succeeds while the agent's last utterance was a QUESTION.
+
+    A live call did exactly this: the agent asked "which office is Dr. Okafor
+    working out of?", called save_branch in the same response, and the bridge
+    hung up — the caller was answering a question into a dead line. The code
+    treated "this response contained audio" as "the agent said goodbye".
+
+    The call must request a proper closing instead of hanging up on a question.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, good afternoon..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Yes, she's at the Northgate campus."},
+        # agent's turn ends in a question, yet the tool fires in the same response
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Which office is Dr. Okafor working out of?"},
+        {"type": "response.function_call_arguments.done", "call_id": "c9",
+         "name": "save_branch", "arguments": json.dumps({"branch": "Northgate Campus"})},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
 def script_invalid_branch():
     """A bare city must be rejected by save_branch and the call must continue."""
     return HANDSHAKE + [
@@ -399,6 +425,18 @@ async def main():
           "forage_ai_disclosed announces automation upfront")
     check("automated" not in tpl.build_greeting(probe).lower(),
           "Template 1 does not announce automation upfront")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 5 — tool fires while the agent is mid-question")
+    print("=" * 66)
+    sent5, sess5 = await run_call(script_tool_fires_mid_question())
+    items5 = [m for m in sent5 if m.get("type") == "conversation.item.create"]
+    texts5 = [i["item"].get("content", [{}])[0].get("text", "")
+              for i in items5 if i["item"].get("type") == "message"]
+    check(any("goodbye" in t for t in texts5),
+          "asks for a closing instead of hanging up on a question")
+    check(sess5.memory.get("branch") == "Northgate Campus",
+          "the grounded branch is still saved")
 
     print("\n" + "=" * 66)
     print("  GROUNDING — never save a location the caller did not say")

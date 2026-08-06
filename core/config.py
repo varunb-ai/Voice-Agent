@@ -111,6 +111,16 @@ class Settings(BaseSettings):
     # sentences per turn; without a cap a runaway response is billed as audio out.
     realtime_max_response_tokens: int = 400
 
+    # Transcription model for the written transcript. NOT in the conversational
+    # path — the agent hears the caller's audio directly — but it IS what the
+    # grounding check compares a saved location against, so accuracy matters.
+    # whisper-1 hallucinates confident text on quiet audio: a caller saying
+    # "hello, how can I help you" at low volume was transcribed as "Okay, next
+    # slide, please", a stock phrase from its training data. gpt-4o-transcribe
+    # is markedly more reliable on telephony-grade input. Fall back to
+    # "whisper-1" if the account lacks access.
+    realtime_transcribe_model: str = "gpt-4o-transcribe"
+
     # ── Realtime pricing, USD per 1M tokens ──────────────────────────────────
     # Set for gpt-realtime-2, from developers.openai.com/api/docs/pricing,
     # checked 2026-08-05. The old code hardcoded preview-era rates
