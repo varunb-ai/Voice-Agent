@@ -1,0 +1,94 @@
+{
+  "call_id": "call-20260806-2029-af14",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": null,
+  "resolved": false,
+  "duration_seconds": 77,
+  "cost_usd": 0.144078,
+  "template": "forage_data_collection",
+  "grounding": null,
+  "conversation": {
+    "location_asks": 3,
+    "agent_turns": 5,
+    "caller_turns": 5,
+    "caller_questions": 4,
+    "question_turns": 4,
+    "stapled_questions": 3,
+    "staple_rate": 0.75,
+    "back_to_back_asks": 3,
+    "repeated_sentences": 1
+  },
+  "ask_budget": {
+    "limit": 4,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "branch_needed_clarification": false,
+  "model": "gpt-realtime-2",
+  "usage": {
+    "responses": 7,
+    "input_audio": 2702,
+    "input_audio_cached": 1920,
+    "output_audio": 534,
+    "input_text": 33909,
+    "input_text_cached": 24128,
+    "output_text": 590,
+    "cache_hit_rate": 0.7115
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi there! This is Sarah from Forage AI Healthcare \u2014 we keep a directory of doctors up to date. Is this Northside Medical Group?",
+      "timestamp": "20:29:47"
+    },
+    {
+      "role": "caller",
+      "text": "Hello?",
+      "timestamp": "20:29:54"
+    },
+    {
+      "role": "caller",
+      "text": "So, are you speaking a convertible to understand?",
+      "timestamp": "20:29:59"
+    },
+    {
+      "role": "agent",
+      "text": "I speak English. Which branch is Dr. Okafor working out of?",
+      "timestamp": "20:30:01"
+    },
+    {
+      "role": "caller",
+      "text": "Can you repeat the question again? I can understand that you're speaking English, but you're speaking something nonsense, I feel.",
+      "timestamp": "20:30:23"
+    },
+    {
+      "role": "agent",
+      "text": "Sorry, I'm speaking fast. Let me say that more clearly. Which branch is Dr. Okafor at?",
+      "timestamp": "20:30:25"
+    },
+    {
+      "role": "caller",
+      "text": "Can you repeat that question again? I didn't get you what you actually want.",
+      "timestamp": "20:30:40"
+    },
+    {
+      "role": "agent",
+      "text": "I'm trying to find which branch Dr. Okafor works at \u2014 which location is it?",
+      "timestamp": "20:30:42"
+    },
+    {
+      "role": "caller",
+      "text": "Sorry, we can't share the information about the doctors.",
+      "timestamp": "20:30:52"
+    },
+    {
+      "role": "agent",
+      "text": "No problem, take care.",
+      "timestamp": "20:30:54"
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260806-2029-af14.wav",
+  "recorded_at": "2026-08-06T20:29:41.883793"
+}
