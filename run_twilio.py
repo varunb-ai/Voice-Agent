@@ -45,13 +45,43 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
         # capture the ringing gap before the call connects.
     )
 
+    def _explain(err: TwilioRestException) -> str:
+        """Turn a Twilio error code into the thing to actually do about it."""
+        text = (err.msg or "")
+        if err.code == 573003 or "verified voice recipient" in text:
+            return (
+                f"{to_number} is not a verified caller ID for "
+                f"{settings.twilio_from_number} on this account.\n"
+                f"  On a trial account a verified recipient is tied to the trial "
+                f"number that verified it, so replacing your number breaks the\n"
+                f"  binding. Either re-verify the destination in the console, or "
+                f"upgrade the account — which removes the restriction entirely\n"
+                f"  and is required anyway for Media Streams."
+            )
+        if err.code == 21210 or "not a Twilio phone number" in text:
+            return (f"{settings.twilio_from_number} is not on this account. "
+                    f"Check TWILIO_FROM_NUMBER matches TWILIO_ACCOUNT_SID.")
+        if "disallowed parameter" in text.lower():
+            return ("Trial accounts reject some call parameters. Retried "
+                    "without them and it still failed — see above.")
+        return text
+
     try:
         call = client.calls.create(**full)
     except TwilioRestException as e:
         if "disallowed parameter" not in (e.msg or "").lower():
-            raise
+            print(f"\n  *** Could not place the call (Twilio {e.code}) ***")
+            print(f"  {_explain(e)}\n")
+            raise SystemExit(1)
         print("  Note     : trial account — retrying without status callbacks")
-        call = client.calls.create(**minimal)
+        try:
+            call = client.calls.create(**minimal)
+        except TwilioRestException as e2:
+            # The fallback failing for a DIFFERENT reason chained two full
+            # tracebacks together, burying a one-line configuration problem.
+            print(f"\n  *** Could not place the call (Twilio {e2.code}) ***")
+            print(f"  {_explain(e2)}\n")
+            raise SystemExit(1) from None
     print(f"\n  Call SID : {call.sid}")
     print(f"  Calling  : {to_number}")
     print(f"  From     : {settings.twilio_from_number}")
