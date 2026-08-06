@@ -163,6 +163,44 @@ def _is_location_ask(text: str) -> bool:
     return "?" in text and bool(_LOCATION_ASK.search(text))
 
 
+def _ask_budget_outcome(turns: list, sent_at: Optional[int],
+                        sent: bool, escalated: bool) -> dict:
+    """What happened after the give-up directive was injected.
+
+    The count alone is not enough. Thanking them and escalating in one turn is
+    the directive working. Taking two turns where the first contains another
+    question is the directive landing but not taking effect — a soft version of
+    the model ignoring it outright, and worth telling apart, because the fix
+    differs: a wording tweak versus enforcing the budget at the response level
+    instead of asking nicely in a user turn.
+    """
+    if not sent or sent_at is None:
+        return {"limit": settings.realtime_max_location_asks,
+                "directive_sent": False, "verdict": "not needed"}
+
+    after = [t for t in turns[sent_at:] if t.role == "agent"]
+    asked_again = sum(1 for t in after if _is_location_ask(t.text))
+
+    if not escalated:
+        verdict = "IGNORED — directive sent, agent never escalated"
+    elif asked_again:
+        verdict = f"OBEYED LATE — asked {asked_again} more time(s) first"
+    elif len(after) <= 1:
+        verdict = "OBEYED — closed on the next turn"
+    else:
+        verdict = f"OBEYED — took {len(after)} turns, no further asks"
+
+    return {
+        "limit": settings.realtime_max_location_asks,
+        "directive_sent": True,
+        "agent_turns_after": len(after),
+        "asked_again_after": asked_again,
+        "escalated": escalated,
+        "verdict": verdict,
+        "turns_after": [t.text[:90] for t in after],
+    }
+
+
 def conversation_metrics(turns: list) -> dict:
     """Count the conversational failures that prose rules keep failing to stop.
 
@@ -651,15 +689,9 @@ class RealtimeSession:
             # conversation item with no follow-up lever, so if the agent
             # acknowledges it and asks again there is nothing else to pull.
             # Recorded so the budget is evaluated, not trusted.
-            "ask_budget": {
-                "limit":            settings.realtime_max_location_asks,
-                "directive_sent":   self._give_up_sent,
-                "agent_turns_after": (
-                    sum(1 for t in self.turns[self._give_up_at_turn:]
-                        if t.role == "agent")
-                    if self._give_up_at_turn is not None else None),
-                "escalated":        bool(self.memory.get("escalated")),
-            },
+            "ask_budget": _ask_budget_outcome(
+                self.turns, self._give_up_at_turn,
+                self._give_up_sent, bool(self.memory.get("escalated"))),
             "branch_needed_clarification":
                 bool(self.memory.get("branch_needed_clarification")),
             "model":          settings.realtime_model,
