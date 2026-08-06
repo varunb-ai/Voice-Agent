@@ -89,6 +89,53 @@ def _realtime_tools() -> list[dict]:
     return result
 
 
+# ── Grounding: a saved location must be one the caller actually said ─────────
+
+# Words that carry no identifying information, so their presence in the
+# transcript proves nothing about whether the caller named a real place.
+_UNGROUNDED_STOPWORDS = {
+    "the", "a", "an", "of", "at", "in", "on", "our", "their", "and",
+    "branch", "branches", "office", "offices", "campus", "campuses",
+    "clinic", "clinics", "center", "centre", "centers", "centres",
+    "hospital", "location", "locations", "site", "sites", "medical",
+    "building", "unit", "practice", "city", "street", "road", "avenue",
+}
+
+
+def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
+    """Return a description of any branch/city term the caller never said.
+
+    Empty string means everything checks out. Compares against the caller's
+    own transcribed words only — the agent's words are excluded, or the model
+    could ground a fabrication in its own earlier hallucination.
+
+    If no caller speech was transcribed at all (every turn still a `[...]`
+    placeholder) the check is skipped rather than blocking every save, since
+    absence of transcript is not evidence of fabrication.
+    """
+    heard = " ".join(
+        t.text.lower() for t in sess.turns
+        if t.role == "caller" and t.text.strip() != "[...]"
+    )
+    if not heard.strip():
+        return ""   # nothing transcribed — cannot judge, do not block
+
+    missing = []
+    for field in ("branch", "city"):
+        value = (args.get(field) or "").strip()
+        if not value:
+            continue
+        terms = [w.strip(".,!?-—'\"") for w in value.lower().split()]
+        content = [w for w in terms if w and w not in _UNGROUNDED_STOPWORDS]
+        if not content:
+            continue
+        # One content word appearing is enough — transcription is imperfect and
+        # we would rather let a real answer through than block it.
+        if not any(w in heard for w in content):
+            missing.append(f"{field}={value!r}")
+    return " and ".join(missing)
+
+
 # ── Per-call session ──────────────────────────────────────────────────────────
 
 class RealtimeSession:
@@ -878,7 +925,34 @@ async def _oai_to_twilio(
                 except json.JSONDecodeError:
                     args = {}
 
-                result = run_tool(name, sess.memory, args)
+                # Grounding check. On a live call the model called save_branch
+                # with {'branch': 'Riverside Clinic', 'city': 'Atlanta'} when
+                # the caller had said only "Hello" and "Okay, next slide,
+                # please". "Riverside Campus" was an EXAMPLE in the prompt; the
+                # model reshaped it into a fabricated result and hung up.
+                # Nothing downstream could tell that record from a real one.
+                #
+                # So a location may only be saved if the caller actually said
+                # it. Verified against the transcript, not the model's claim.
+                if name == "save_branch":
+                    ungrounded = _ungrounded_terms(args, sess)
+                    if ungrounded:
+                        result = {
+                            "ok": False,
+                            "error": (
+                                f"REJECTED — {ungrounded} does not appear "
+                                f"anywhere in what the caller said on this "
+                                f"call. Never save a location you were not "
+                                f"told. Ask them for it, and if they do not "
+                                f"give one, escalate."
+                            ),
+                        }
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                              f"🚫 HALLUCINATED BRANCH BLOCKED: {args}", flush=True)
+                    else:
+                        result = run_tool(name, sess.memory, args)
+                else:
+                    result = run_tool(name, sess.memory, args)
                 ts = datetime.now().strftime("%H:%M:%S")
                 if name == "save_branch":
                     print(f"\n[{ts}] ✅ BRANCH SAVED : {args}", flush=True)

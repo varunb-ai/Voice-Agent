@@ -401,6 +401,42 @@ async def main():
           "Template 1 does not announce automation upfront")
 
     print("\n" + "=" * 66)
+    print("  GROUNDING — never save a location the caller did not say")
+    print("=" * 66)
+    # A live call produced save_branch({'branch':'Riverside Clinic',
+    # 'city':'Atlanta'}) when the caller had said only "Hello" and "Okay, next
+    # slide, please". "Riverside Campus" was an EXAMPLE in the prompt; the
+    # model reshaped it into a fabricated result, marked the call resolved and
+    # hung up. Nothing downstream could distinguish it from a real answer.
+    from core.models import TranscriptTurn as _TT
+
+    class _FakeSess:
+        def __init__(self, lines):
+            self.turns = [_TT(role="caller", text=t, timestamp="00:00:00")
+                          for t in lines]
+
+    grounding_cases = [
+        (["Hello.", "Okay, next slide, please."],
+         {"branch": "Riverside Clinic", "city": "Atlanta"}, True),
+        (["She's at the Northgate campus."],
+         {"branch": "Northgate Campus"}, False),
+        (["He works out of the Jubilee Hills office."],
+         {"branch": "Jubilee Hills", "city": "Hyderabad"}, True),
+        (["He's at 1420 Beacon Street in Boston."],
+         {"branch": "1420 Beacon Street", "city": "Boston"}, False),
+        (["Yes this is Northside."],
+         {"branch": "the main branch"}, True),
+        # No transcript at all: absence of evidence is not evidence of
+        # fabrication, so do not block every save on a bad-audio call.
+        (["[...]"], {"branch": "Anything At All"}, False),
+    ]
+    for lines, args, expect_blocked in grounding_cases:
+        blocked = bool(rw._ungrounded_terms(args, _FakeSess(lines)))
+        check(blocked == expect_blocked,
+              f"{'blocks' if expect_blocked else 'allows'} {args.get('branch')!r} "
+              f"given caller said {lines[0][:32]!r}")
+
+    print("\n" + "=" * 66)
     print("  BRANCH VALIDATOR — a city is not a branch")
     print("=" * 66)
     # A live call saved branch="New York branch", city="New York" as RESOLVED.
