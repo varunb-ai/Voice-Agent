@@ -724,6 +724,28 @@ async def main():
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
 
+    # Prompt-echo detection is DERIVED from the text we actually send, not
+    # copied by hand. The old list held "forage ai" for days after the
+    # organisation was renamed — a duplicated list rots silently every time the
+    # original changes, and the prompt has been edited eleven times this week.
+    from agents.voice.tools import _prompt_echoes as _echoes, save_branch as _sb
+    from agents.voice.memory import CallMemory as _CM
+    _derived = _echoes()
+    check(len(_derived) > 500,
+          "echo phrases derived from the live prompt", f"{len(_derived)} entries")
+    check("forage ai" not in _derived,
+          "renamed org no longer lingers in the echo list")
+    # A phrase actually in the current prompt must be caught...
+    _live = "never claim to be a nurse a doctor"
+    check(not _sb(_CM("t"), _live).get("ok"),
+          "an echo of the live prompt is rejected")
+    # ...and four-word sequences are long enough that real branch names, which
+    # are short proper nouns, cannot collide with them.
+    for _real in ("Northgate Campus", "Riverside Clinic", "Baptist Medical Center",
+                  "1420 Beacon Street", "Downtown East", "Methodist Medical Center"):
+        check(_sb(_CM("t"), _real).get("ok") is True,
+              f"real branch name still accepted: {_real!r}")
+
     # Two requests for the same fact in one turn. The rule was "EXACTLY ONE
     # question mark per turn", which this passes with a single "?" — the same
     # blind spot the ask detector had, left in the prompt after the detector was

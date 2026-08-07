@@ -9,6 +9,7 @@ Framework-neutral: works in the offline brain test and in all telephony workers.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from agents.voice.memory import CallMemory
@@ -148,25 +149,55 @@ _INVALID_BRANCH_WORDS = {
 }
 
 
-_PROMPT_ECHO_PHRASES = (
-    # STT hallucinations of the initial_prompt
-    "doctor name branch", "branch location city", "hospital branch location",
-    "branch city area", "doctor name branch city", "name branch location",
-    # Agent's own script lines — LLM sometimes saves these as the branch
-    "healthcare professionals", "medical directory", "forage ai",
-    "update our", "calling from", "practice locations", "directory for",
-    "database of doctors", "not shared or sold", "used internally",
-    # 8b fallback system prompt phrases leaking as branch name
-    "never share personal data", "not shared with", "share personal",
-    "only collect branch", "comply with regulation", "legitimate medical",
-    "real place name", "from these instructions", "the caller says",
-    "currently working at", "directory service", "directory company",
-    # Caller utterances mistakenly saved as branch
+# Filler the CALLER says that has been mistakenly saved as a branch. Not
+# derivable from anything we send — these are ordinary English, so they stay
+# enumerated. A short closed-ish list is the right shape for this half.
+_CALLER_FILLER_ECHOES = (
     "location is all i need", "location is all", "all i need",
     "answer from you", "answer from", "from you",
     "just answer", "that's all", "thats all", "is all i",
     "can i ask you", "ask you another", "another question",
 )
+
+
+def _ngrams(text: str, n: int) -> set:
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    return {" ".join(words[i:i + n]) for i in range(len(words) - n + 1)}
+
+
+def _derive_prompt_echoes() -> frozenset:
+    """Sequences from the text WE send, so an echo of it can be recognised.
+
+    This used to be 41 phrases copied by hand out of the prompt — including
+    "forage ai", which was still in the list days after the organisation was
+    renamed. A duplicated list rots silently every time the original changes,
+    and the prompt has been edited eleven times this week.
+
+    Derived from the actual instructions, greeting and transcription hint of
+    every template, so it cannot drift from what is really being sent.
+
+    Four-word sequences only. A real branch name is a short proper noun and will
+    essentially never contain four consecutive words of our own instructions,
+    so this cannot reject a genuine answer — whereas two-word sequences like
+    "medical directory" plausibly could.
+    """
+    from agents.voice.templates import TEMPLATES
+    grams: set = set()
+    for tpl in TEMPLATES.values():
+        for source in (tpl.instructions, tpl.greeting, tpl.transcribe_hint):
+            grams |= _ngrams(source, 4)
+    return frozenset(grams)
+
+
+_PROMPT_ECHO_PHRASES: frozenset = frozenset()
+
+
+def _prompt_echoes() -> frozenset:
+    """Derived once, lazily — templates import at module load would cycle."""
+    global _PROMPT_ECHO_PHRASES
+    if not _PROMPT_ECHO_PHRASES:
+        _PROMPT_ECHO_PHRASES = _derive_prompt_echoes() | frozenset(_CALLER_FILLER_ECHOES)
+    return _PROMPT_ECHO_PHRASES
 
 
 _CONJUNCTION_STARTS = {
@@ -325,7 +356,7 @@ def save_branch(
 ) -> dict:
     cleaned = branch.lower().strip().rstrip(".,!?")
     NEED = "site name or street address"
-    if any(p in cleaned for p in _PROMPT_ECHO_PHRASES):
+    if any(p in cleaned for p in _prompt_echoes()):
         return _reject(f"REJECTED {branch!r}: transcription artefact", NEED)
     if cleaned in _SPECIALIZATIONS:
         return _reject(f"REJECTED {branch!r}: department, not a place", NEED)
