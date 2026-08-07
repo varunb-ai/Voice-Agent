@@ -191,6 +191,27 @@ def script_happy_path():
     ]
 
 
+def script_silent_response():
+    """A response that COMPLETES having produced no audio at all.
+
+    This happened on a live call: the caller said the doctor had retired, the
+    model returned a response with out_audio=0, and the line went quiet for 8.2
+    seconds until the caller asked "are you there?" — which is what a person says
+    to a call they think has dropped. Nothing is queued behind an empty response,
+    so the silence lasts until the caller gives up and speaks.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, this is Sarah..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Actually, he is not working now. He's retired."},
+        # No transcript, no audio, status completed.
+        {"type": "response.done", "response": usage(1900, 1800, audio_out=0)},
+    ]
+
+
 def script_refusal():
     """Test line 5: 'I'm not allowed to give out that information.'"""
     return HANDSHAKE + [
@@ -340,6 +361,17 @@ async def main():
     from core.config import settings
 
     tpl = get_template(settings.call_template)
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0 — a response that says nothing must not become dead air")
+    print("=" * 66)
+    _s_sent, _ = await run_call(script_silent_response())
+    _s_creates = [m for m in _s_sent if m.get("type") == "response.create"]
+    # One for the greeting, one to recover the empty response.
+    check(len(_s_creates) >= 2,
+          "empty response triggers a re-request instead of silence",
+          f"{len(_s_creates)} response.create sent")
+    print(f"  response.create sent: {len(_s_creates)} (greeting + recovery)")
 
     print("\n" + "=" * 66)
     print("  SCENARIO 1 — happy path (branch obtained)")

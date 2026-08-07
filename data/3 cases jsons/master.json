@@ -350,5 +350,19 @@
     "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
     "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260806-2201-23e4.wav",
     "json_path": "data/3 cases jsons/call-20260806-2201-23e4.json"
+  },
+  {
+    "call_id": "call-20260807-1338-e9cb",
+    "time": "2026-08-07T13:38:05.121412",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": null,
+    "resolved": false,
+    "grounding": null,
+    "duration_seconds": 77,
+    "cost_usd": 0.232248,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260807-1338-e9cb.wav",
+    "json_path": "data/3 cases jsons/call-20260807-1338-e9cb.json"
   }
 ]

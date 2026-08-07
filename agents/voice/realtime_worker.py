@@ -1184,6 +1184,7 @@ async def _oai_to_twilio(
     _barge_in_pending     = False   # True when we cancelled a response — skip its transcript
     _closing_sent         = False   # True after we send closing response.create — wait for its response.done
     _closing_retries      = 0       # a goodbye the caller talked over is not a goodbye
+    _empty_responses      = 0       # responses that completed without saying anything
     # Tool results arrive on response.function_call_arguments.done, which fires
     # BEFORE response.done for the same response. Creating a response there
     # raises conversation_already_has_active_response, so defer it to response.done.
@@ -1591,6 +1592,7 @@ async def _oai_to_twilio(
             # ── Response done: extract token usage + check resolution ────
             elif event_type == "response.done":
                 _response_active    = False
+                _response_spoke     = _response_had_audio
                 _response_had_audio = False   # reset for next response
                 sess._responses    += 1
                 # "completed" | "cancelled" | "incomplete" | "failed". This was
@@ -1599,6 +1601,15 @@ async def _oai_to_twilio(
                 # hung up on a goodbye nobody heard.
                 _resp_status = ((msg.get("response") or {}).get("status")
                                 or "completed")
+                # The model's own count of audio it produced. Zero on a
+                # completed response means it said nothing at all, which on a
+                # phone line is indistinguishable from the call having dropped.
+                # Read from usage rather than from our local audio-delta flag so
+                # that a response carrying a tool call, or one whose deltas we
+                # gated, is judged by what the model actually emitted.
+                _out_audio_tokens = (((msg.get("response") or {}).get("usage") or {})
+                                     .get("output_token_details", {})
+                                     .get("audio_tokens", 0))
                 # A cancelled response may never emit transcript.done. Clearing
                 # the flag only there meant it leaked into the NEXT response and
                 # silently swallowed a real transcript line.
@@ -1698,6 +1709,20 @@ async def _oai_to_twilio(
                 # previous response has completed.
                 if _pending_response_create and not sess.done:
                     _pending_response_create = False
+                    await oai_ws.send(json.dumps({"type": "response.create"}))
+                elif (not sess.done and _resp_status == "completed"
+                      and _out_audio_tokens == 0 and _empty_responses < 2):
+                    # A response that COMPLETED without producing any audio is
+                    # dead air: nothing is queued behind it, so the line stays
+                    # silent until the caller gives up and speaks. On a live
+                    # call this ran 8.2 seconds and the caller asked "are you
+                    # there?" — exactly what a person says to a dropped line.
+                    # Cancelled responses are excluded: those are barge-ins,
+                    # where silence is correct because the caller is talking.
+                    _empty_responses += 1
+                    print(f"[Realtime] Response produced no audio — "
+                          f"re-requesting to avoid dead air "
+                          f"({_empty_responses}/2)", flush=True)
                     await oai_ws.send(json.dumps({"type": "response.create"}))
                 if sess.done:
                     if _closing_sent:
