@@ -86,7 +86,8 @@ def time_of_day() -> str:
 
 _FORAGE_INSTRUCTIONS = """\
 # Role & Objective
-You are placing an outbound phone call for {{ORG}}, which collects and
+You are placing an outbound phone call for the organisation named in CALL
+CONTEXT below — call it YOUR ORGANISATION here. It collects and
 validates publicly available information about medical providers.
 Success = learning which specific branch or site the doctor in CALL CONTEXT
 practises at, saved with save_branch. Coming away with nothing is an
@@ -282,13 +283,10 @@ Hold request — "one moment", "let me check", "let me see", "hang on", "I'll
   want?" -> this is a DIFFERENT question and needs a different answer. Say what
   you want FROM THEM, concretely, in the same breath. "I'm just trying to
   find out which branch Dr. <surname> works at — that's all I need."
-  Do NOT answer it by re-introducing yourself. On a real call the greeting had
-  already said "This is Sarah from Forage AI Healthcare — we keep a directory
-  of doctors up to date", and when asked the reason for the call the agent
-  replied "I'm Sarah on the directory team at Forage AI Healthcare, and I'm
-  updating doctor practice locations" — the same three facts again, and still
-  no mention of what it wanted. The caller's next words were "What should I
-  do?" They had no idea what was being asked of them.
+  Do NOT answer it by re-introducing yourself. Your name and your employer are
+  the answer to WHO, not to WHY, and someone who just heard them in the greeting
+  learns nothing from hearing them again — they are left not knowing what you
+  want from them.
   A job description is not a reason for calling. The reason is the thing you
   want.
 "Where did you get this number?" -> one truthful sentence, then stop.
@@ -314,7 +312,7 @@ Doctor left, retired, on leave, or moved -> one follow-up if useful, note_info
 Referred to a website or email -> note_info, thank them, escalate.
 Transferred -> "Sure, I'll hold." When someone new picks up, introduce
   yourself again in one sentence, then ask.
-Voicemail -> brief message naming {{ORG}}, the doctor, and the contact details
+Voicemail -> brief message naming your organisation, the doctor, and the details
   from CALL CONTEXT. No callback number available -> give the email only, do
   not substitute a number. Then escalate(reason="voicemail").
 Wrong number, non-medical business, or a patient rather than staff ->
@@ -356,7 +354,8 @@ location — keep asking, WITHIN the limit above. "Keep asking" is not "ask
 forever".
 
 # Reference Pronunciations
-- "{{ORG}}" -> say "FOR-ij", then the letters A-I, not "ay".
+- Say your organisation's name as written in CALL CONTEXT. If CALL CONTEXT
+  gives a pronunciation for it, use that.
 - Read the doctor's surname exactly as written in CALL CONTEXT. If you cannot
   pronounce it confidently, say "the doctor" rather than guessing.
 - Read phone numbers and email addresses digit by digit, and offer to repeat."""
@@ -392,22 +391,22 @@ disclosure is never dropped to stay brief, never skipped because the call is \
 ending, and never deferred to a later turn."""
 
 _IDENTITY_HUMAN = """\
-# Identity — you present as a person from {{ORG}}
-- You are {{AGENT_NAME}}, working on the directory team at {{ORG}}. Speak in \
+# Identity — you present as a person from your organisation
+- You are {{AGENT_NAME}}, working on the directory team at your organisation. Speak in \
 first person as that person throughout.
 - Do not describe yourself as automated, a system, or an assistant, and do not \
 volunteer anything about how the call is made.
 - The call IS recorded. If anyone asks whether it is being recorded, say yes. \
 Do not deny it.
 - IF ASKED DIRECTLY whether you are a real person, a bot, a recording, or AI — \
-say yes, you're an automated system from {{ORG}}, and carry straight on with \
+say yes, you're an automated system from your organisation, and carry straight on with \
 the call. Answer it the first time it is asked, plainly, without hedging or \
 turning it back into a question.
   This is the one line you do not cross. Presenting as a person is a style \
 choice; actively denying what you are when someone asks you straight out is a \
 different thing, and several US states regulate it.
 - Never claim to be a nurse, a doctor, a patient, or staff at the hospital you \
-are calling. You work for {{ORG}}, nowhere else.
+are calling. You work for your organisation, nowhere else.
 - Never invent a credential, a department, a colleague, or a previous \
 conversation that did not happen.
 - PRECEDENCE: the two rules above — recording, and answering the are-you-real \
@@ -471,16 +470,13 @@ class CallTemplate:
 
     ``instructions`` must not contain per-call data — see module docstring.
 
-    ``language`` and ``org_name`` are fixed by the template, NOT by
-    settings.agent_language / settings.org_name. The classic pipeline
-    interpolated both from config; templates cannot, because that text is baked
-    into the static instructions that form the prompt-cache prefix — anything
-    per-deployment in there breaks caching for everyone.
+    ``language`` is fixed by the template, NOT by settings.agent_language: the
+    language shapes every line of the static instructions, so it cannot vary
+    per call without breaking the cache prefix. See config_warnings().
 
-    The consequence is that two real config values are inert on this path. That
-    must never be silent: someone set them deliberately, and a call that goes
-    out under the wrong org name or in the wrong language cannot be taken back.
-    See config_warnings().
+    ORG_NAME is no longer in that category. The organisation is supplied per
+    call via build_context()/build_greeting() and appears only in the context
+    item, so the setting is live and needs no warning.
     """
     name: str
     description: str
@@ -488,9 +484,8 @@ class CallTemplate:
     greeting: str
     transcribe_hint: str
     language: str = "english"
-    org_name: str = ""
 
-    def config_warnings(self, *, agent_language: str, org_name: str) -> list[str]:
+    def config_warnings(self, *, agent_language: str, org_name: str = "") -> list[str]:
         """Report settings this template declares but does not read.
 
         Returns human-readable warnings, empty if config and template agree.
@@ -507,22 +502,19 @@ class CallTemplate:
                 f"(USE_REALTIME=false) or add a {configured_lang} template."
             )
 
-        configured_org = (org_name or "").strip()
-        if self.org_name and configured_org and configured_org != self.org_name:
-            warnings.append(
-                f"ORG_NAME={configured_org!r} is set, but template "
-                f"'{self.name}' says {self.org_name!r} in its script and "
-                f"ignores the setting. The callee will hear "
-                f"{self.org_name!r}. Decide which is correct and change the "
-                f"template text, not just the env var."
-            )
-
+        # There used to be an ORG_NAME warning here saying the setting was
+        # ignored. It is no longer ignored — the organisation is a per-call
+        # value now — so the warning is gone rather than reworded. A warning
+        # that a setting does nothing should be deleted the moment the setting
+        # starts doing something.
         return warnings
 
-    def build_greeting(self, doctor: Doctor) -> str:
+    def build_greeting(self, doctor: Doctor, *, org: str = "") -> str:
         return self.greeting.format(
             time_of_day=time_of_day(),
             hospital=doctor.hospital_name or "the doctor's office",
+            org=(org or "").strip() or DEFAULT_ORG,
+            agent_name=AGENT_PERSONA_NAME,
         )
 
     def build_context(
@@ -531,6 +523,7 @@ class CallTemplate:
         *,
         callback_number: str,
         callback_email: str,
+        org: str = "",
     ) -> str:
         """Per-call facts, sent as the first conversation item.
 
@@ -539,8 +532,17 @@ class CallTemplate:
         """
         name = clean_doctor_name(doctor.doctor_name)
         surname = name.split()[-1] if name.split() else name
+        # The organisation is per-call, not baked into the instructions. It used
+        # to sit 14 tokens into a ~4,000-token system prompt, so changing it
+        # invalidated 99% of the cached prefix — a cold cache on every campaign
+        # switch. Here it costs a few tokens instead.
+        spoken_org = (org or "").strip() or DEFAULT_ORG
         lines = [
             "CALL CONTEXT — this call only.",
+            f"YOUR ORGANISATION: {spoken_org} — this is who you are calling for. "
+            f"Say this name when you introduce yourself and whenever you are "
+            f"asked who you are with. Never name any other organisation as your "
+            f"employer.",
             f"Doctor: Dr. {name}  (say \"Dr. {surname}\" out loud, never the full name)",
         ]
         if doctor.specialization:
@@ -567,17 +569,23 @@ class CallTemplate:
         return "\n".join(lines)
 
 
-# The organisation named out loud. Set here rather than read from ORG_NAME
-# because it is baked into the static instructions that form the cache prefix —
-# a per-deployment value in there would break caching for every call.
-ORG_SPOKEN = "Forage AI Healthcare"
+# Fallback only. The organisation named out loud is now a PER-CALL value,
+# supplied by the caller of build_context()/build_greeting() and sourced from
+# ORG_NAME. It deliberately no longer appears anywhere in the static
+# instructions, so switching client campaigns costs a few tokens in the context
+# item rather than a cold prompt cache.
+#
+# "Forage AI Healthcare" was the previous value and was not a real entity —
+# Forage AI is real, Definitive Healthcare is real, that combination was not.
+# A script whose defining rule is truthful identification cannot open by naming
+# a company that does not exist.
+DEFAULT_ORG = "Definitive Healthcare"
 
 # The persona name used by the human-presenting template only.
 AGENT_PERSONA_NAME = "Sarah"
 
 
-def _build(identity: str, *, org: str = ORG_SPOKEN,
-           agent_name: str = AGENT_PERSONA_NAME) -> str:
+def _build(identity: str, *, agent_name: str = AGENT_PERSONA_NAME) -> str:
     """Compose a template's instructions from the shared body + identity block.
 
     Both templates share every rule about pacing, brevity, conversation,
@@ -585,10 +593,13 @@ def _build(identity: str, *, org: str = ORG_SPOKEN,
     substituted rather than duplicated — a fix to the shared rules then lands
     in both, and the difference between the two scripts stays readable in one
     place.
+
+    No organisation name is substituted here. The instructions say "your
+    organisation" and CALL CONTEXT supplies the actual name, which is what keeps
+    the instructions byte-identical across clients and therefore cacheable.
     """
     return (_FORAGE_INSTRUCTIONS
             .replace("{{IDENTITY}}", identity)
-            .replace("{{ORG}}", org)
             .replace("{{AGENT_NAME}}", agent_name))
 
 
@@ -601,12 +612,11 @@ FORAGE_DATA_COLLECTION = CallTemplate(
         "announced as automated."
     ),
     instructions=_build(_IDENTITY_HUMAN),
-    greeting=(_HUMAN_GREETING
-              .replace("{org}", ORG_SPOKEN)
-              .replace("{agent_name}", AGENT_PERSONA_NAME)),
+    # {org} and {agent_name} stay as placeholders — build_greeting() fills them
+    # per call, so the spoken organisation is a runtime value here too.
+    greeting=_HUMAN_GREETING,
     transcribe_hint=_US_TRANSCRIBE_HINT,
     language="english",
-    org_name=ORG_SPOKEN,
 )
 
 
@@ -622,10 +632,9 @@ FORAGE_AI_DISCLOSED = CallTemplate(
         "upfront AI disclosure is required."
     ),
     instructions=_build(_IDENTITY_TRUTHFUL),
-    greeting=_FORAGE_GREETING.replace("{org}", ORG_SPOKEN),
+    greeting=_FORAGE_GREETING,
     transcribe_hint=_US_TRANSCRIBE_HINT,
     language="english",
-    org_name=ORG_SPOKEN,
 )
 
 

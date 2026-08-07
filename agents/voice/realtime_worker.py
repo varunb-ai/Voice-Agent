@@ -904,11 +904,15 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
         log.warning("[Realtime] %s", warning)
         print(f"\n  ⚠  {warning}\n", flush=True)
 
-    greeting = template.build_greeting(doctor)
+    # The organisation is a runtime value: it names whichever client's campaign
+    # this call belongs to, and it reaches the model through the per-call
+    # context item, never through the cached instructions.
+    greeting = template.build_greeting(doctor, org=settings.org_name)
     context  = template.build_context(
         doctor,
         callback_number=settings.callback_number,
         callback_email=settings.callback_email,
+        org=settings.org_name,
     )
 
     # Let /recording_ready name the downloaded MP3 after this call_id so audio,

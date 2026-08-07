@@ -212,27 +212,29 @@ async def main() -> int:
     # Settings the template declares but does not read. Not failures — the
     # template wins by design — but they must never pass silently, because
     # someone set them deliberately and a call cannot be taken back.
-    warnings = tpl.config_warnings(agent_language=settings.agent_language,
-                                   org_name=settings.org_name)
+    warnings = tpl.config_warnings(agent_language=settings.agent_language)
     for w in warnings:
         print(f"{_WARN} {w}")
     if not warnings:
-        print(f"{_PASS} AGENT_LANGUAGE and ORG_NAME agree with the template")
+        print(f"{_PASS} AGENT_LANGUAGE agrees with the template")
 
     doctor = Doctor(doctor_name="Dr. Jane Okafor", hospital_name="Northside Medical Group",
                     specialization="Cardiology")
-    greeting = tpl.build_greeting(doctor)
+    greeting = tpl.build_greeting(doctor, org=settings.org_name)
     context = tpl.build_context(doctor,
                                 callback_number=settings.callback_number,
-                                callback_email=settings.callback_email)
+                                callback_email=settings.callback_email,
+                                org=settings.org_name)
 
     print(f"\n      GREETING THE CALLEE WILL HEAR:\n        {greeting}\n")
 
     # Template 1 is truthful about WHO and WHY — it names the organisation and
     # uses no pretext. Announcing automation upfront is the forage_ai_disclosed
     # variant, so assert per template rather than assuming one shape.
-    check(tpl.org_name.split()[0].lower() in greeting.lower(),
-          "greeting names the organisation")
+    check(settings.org_name.split()[0].lower() in greeting.lower(),
+          f"greeting names the organisation ({settings.org_name})")
+    check(settings.org_name not in tpl.instructions,
+          "organisation kept out of the cached instructions")
     if tpl.name == "forage_ai_disclosed":
         check("automated" in greeting.lower(),
               "disclosed variant announces automation upfront")

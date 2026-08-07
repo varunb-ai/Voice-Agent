@@ -382,7 +382,16 @@ async def main():
     # Template 1 is truthful about WHO and WHY — it names the organisation and
     # uses no pretext. It does NOT announce itself as automated; that is the
     # forage_ai_disclosed variant, asserted separately below.
-    check(tpl.org_name in ctx, "greeting names the organisation")
+    # The organisation is a per-call runtime value now, not a template constant.
+    # It must reach the model through the CONTEXT item, never the instructions —
+    # it used to sit 14 tokens into a ~4,000-token prompt, so changing clients
+    # invalidated 99% of the cache prefix.
+    check(settings.org_name in ctx, "context names the organisation")
+    check(settings.org_name not in tpl.instructions,
+          "organisation absent from the cached instructions")
+    for _other in ("Definitive Healthcare", "Forage AI Healthcare", "Acme Health"):
+        check(_other not in tpl.instructions,
+              f"no hardcoded client in instructions: {_other!r}")
     # Purpose, not a company description. "we keep a directory of doctors up to
     # date" is how a brochure explains an employer; "about a doctor listing" is
     # how a person says why they rang.
