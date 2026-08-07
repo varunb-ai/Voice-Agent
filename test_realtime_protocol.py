@@ -479,8 +479,17 @@ async def main():
           "identity-repetition exemption does not extend to purpose")
     check("NEVER ask for the branch twice in the same wording" in flat,
           "cannot repeat the branch question verbatim")
-    check('say ONLY "Of course, take your time." and then STOP' in flat,
+    # This used to assert the literal 'say ONLY "Of course, take your time."',
+    # which is the instruction that produced the verbatim repeat. The assertion
+    # was pinning the wording rather than the behaviour, so it locked the bug in
+    # place and would have failed the fix. Assert what must be true instead:
+    # acknowledge, stop, ask nothing.
+    check("acknowledge in ONE short line, then STOP" in flat,
+          "a hold request gets a short acknowledgement and nothing else")
+    check("Do not re-ask, do not rephrase the question" in flat,
           "a hold request gets no follow-up question")
+    check("THE HOLD LASTS UNTIL THEY COME BACK WITH AN ANSWER" in flat,
+          "the hold persists across turns, not just one")
     # Normalise whitespace — the instructions are hard-wrapped, so asserting on
     # a phrase that spans a line break must not depend on where it wraps.
     # (flat defined above)
@@ -682,6 +691,26 @@ async def main():
 
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
+
+    # Verbatim repeats. The agent said "Of course, take your time." twice in one
+    # call, and the cause was not the model ignoring the no-repetition rule — the
+    # prompt ordered that exact string: 'say ONLY "Of course, take your time."'.
+    # A specific literal beats a general rule, correctly. So the failure mode to
+    # guard is the SHAPE: any single quoted sentence the prompt commands will be
+    # repeated verbatim the moment its situation recurs, and hold requests,
+    # thanks and closings all recur.
+    _scripted = _re.findall(
+        r'say (?:ONLY|only|exactly)\s+["“]([^"”]{6,})["”]',
+        tpl.instructions)
+    check(not _scripted,
+          "no single sentence is scripted verbatim in the prompt",
+          "; ".join(_scripted)[:60] if _scripted else "")
+    # The recurring cases must offer alternatives, not one wording.
+    _hold = tpl.instructions[tpl.instructions.find("Hold request"):][:700]
+    check(_hold.count('"') >= 8,
+          "hold acknowledgement offers several wordings, not one")
+    check("PICK A DIFFERENT ONE EACH TIME" in _hold,
+          "hold guidance requires varying the wording")
     # The brevity over-correction must not come back. It was restored on purpose
     # to isolate the VAD variable, and that test is finished.
     for _dead in ("UNDER 15 WORDS", "under 15 words", "about eight",
