@@ -845,6 +845,31 @@ async def main():
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
 
+    # A caller repeating themselves is telling you that is all they have. On a
+    # live call they gave a street and a state twice, 36 seconds apart, and
+    # save_branch was never called — 135 seconds, an answer given, nothing
+    # recorded. Compared by word overlap so it survives the transcription
+    # drifting "Lombard" -> "Lambert", and needs no vocabulary of its own.
+    import types as _ns   # _t is rebound by an earlier loop variable
+    _T = lambda t: _ns.SimpleNamespace(role="caller", text=t)
+    _ss = lambda *ts: _ns.SimpleNamespace(turns=[_T(x) for x in ts])
+    for _now, _prior, _want, _why in [
+        ("He is working in Lambert Street in California.",
+         ["He is working in Lombard Street in California."], True, "drifted transcription"),
+        ("He's at the Northgate campus.",
+         ["He's at the Northgate campus."], True, "verbatim"),
+        ("He is working in Lambert Street in California.",
+         ["I think I know but I'm not sure about the brand."], False, "different answer"),
+        ("He's at the Northgate campus.",
+         ["Yeah, I heard he's working in California."], False, "narrowing, not repeating"),
+        # A repeated QUESTION is not a repeated answer — nudging the agent to
+        # save "what do you want?" would be nonsense.
+        ("What do you want now?", ["What do you want?"], False, "repeated question"),
+        ("Hello", ["Hello"], False, "too short to mean anything"),
+    ]:
+        check(bool(rw.caller_repeated_answer(_now, _ss(*_prior))) == _want,
+              f"caller repeat ({_why}): {_now[:34]!r}")
+
     # A caller going to look something up has not refused. The give-up directive
     # is one-shot: once fired, the agent escalates on its next turn whatever they
     # say in between. On a live call that next turn was "can you please give me a

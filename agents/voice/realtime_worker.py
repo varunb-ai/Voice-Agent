@@ -302,6 +302,57 @@ def is_hold_request(text: str) -> bool:
     return bool(_HOLD_REQUEST.search(text or ""))
 
 
+def _content_words(text: str) -> set:
+    """Words for comparing one caller turn against another.
+
+    Deliberately NOT _UNGROUNDED_STOPWORDS: that list drops street, campus,
+    branch and centre because they are not evidence of a specific place. Here
+    they are exactly the signal — two turns that both say "Street" and
+    "California" are the same answer. Only very short function words go.
+    """
+    return {w for w in re.findall(r"[a-z']+", (text or "").lower()) if len(w) > 1}
+
+
+def caller_repeated_answer(text: str, sess: "RealtimeSession") -> str:
+    """Has the caller now given substantially the same answer twice?
+
+    A person who repeats themselves is telling you that is all they have. On a
+    live call:
+
+        CALLER: "He is working in Lombard Street in California."
+        AGENT : "which city is that Lambert Street location in?"
+        CALLER: "He is working in Lambert Street in California."
+        AGENT : "which city is that Lambert Street site in?"
+
+    A street and a state is a location — it is exactly what the validator asks
+    for. The call ran 135 seconds, they answered twice, and save_branch was
+    never called. Nothing was recorded.
+
+    Compared by content-word overlap, so it survives the transcription drifting
+    ("Lombard" -> "Lambert") and needs no vocabulary of its own. Returns the
+    earlier wording, or "" if this is not a repeat.
+    """
+    # Only repeated ANSWERS count. "What do you want?" asked twice is a repeat
+    # too, and nudging the agent to save it would be nonsense.
+    if "?" in (text or ""):
+        return ""
+    now = _content_words(text)
+    if len(now) < 4:          # "hello", "yes" — too short to mean anything
+        return ""
+    for turn in reversed(sess.turns):
+        if turn.role != "caller" or not turn.text or turn.text == "[...]":
+            continue
+        if "?" in turn.text:
+            continue
+        prev = _content_words(turn.text)
+        if len(prev) < 4:
+            continue
+        overlap = len(now & prev) / max(len(now | prev), 1)
+        if overlap >= 0.7:
+            return turn.text
+    return ""
+
+
 def _double_ask(text: str) -> bool:
     """Two requests for the same thing inside one turn.
 
@@ -669,6 +720,7 @@ class RealtimeSession:
         self._greeting_requested_at: Optional[float] = None
         # Warn the model about a faint line at most once per call.
         self._low_audio_warned: bool = False
+        self._repeat_nudged: bool = False
         # RMS of the last utterance, held until its transcript arrives. Low
         # energy alone never means "we cannot hear you" — only low energy with
         # nothing transcribed does.
@@ -1623,6 +1675,26 @@ async def _oai_to_twilio(
                     # its next turn whatever they say in between — and on a live
                     # call that next turn was "can you please give me a minute?
                     # I just need to check". It thanked them and hung up.
+                    # They have said it twice — that is all they have. Asking a
+                    # third time gets the same words back and eventually a
+                    # hang-up, and on a live call it ended with nothing saved
+                    # despite a street and a state having been given.
+                    _again = caller_repeated_answer(text, sess)
+                    if _again and not sess.done and not sess.memory.get("branch") \
+                            and not sess._repeat_nudged:
+                        sess._repeat_nudged = True
+                        print(f"[Realtime] Caller has repeated their answer — "
+                              f"telling the agent to take what it has", flush=True)
+                        await oai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {"type": "message", "role": "user",
+                                     "content": [{"type": "input_text", "text": (
+                                         "(system: they have now given you the "
+                                         "same answer twice. That is all they "
+                                         "have — asking again will return the "
+                                         "same words. Save it with save_branch "
+                                         "exactly as they said it, then close.)")}]},
+                        }))
                     if is_hold_request(text) and not sess.done:
                         if sess._give_up_sent or sess._location_asks:
                             print(f"[Realtime] Caller is going to check — "
@@ -1959,7 +2031,8 @@ async def _oai_to_twilio(
                     sess._input_text_cached_tokens  += c_text
                     print(f"[Realtime] usage: in_text={details_in.get('text_tokens', 0)} "
                           f"(cached {c_text})  in_audio={details_in.get('audio_tokens', 0)} "
-                          f"(cached {c_audio})  out_audio={details_out.get('audio_tokens', 0)}",
+                          f"(cached {c_audio})  out_audio={details_out.get('audio_tokens', 0)}"
+                          f"  [{_resp_status}]",
                           flush=True)
                 # Enable caller audio forwarding after first response (greeting) finishes
                 if not sess.listen_enabled.is_set():
@@ -1970,15 +2043,19 @@ async def _oai_to_twilio(
                 if _pending_response_create and not sess.done:
                     _pending_response_create = False
                     await oai_ws.send(json.dumps({"type": "response.create"}))
-                elif (not sess.done and _resp_status == "completed"
+                elif (not sess.done and _resp_status != "cancelled"
                       and _out_audio_tokens == 0 and _empty_responses < 2):
                     # A response that COMPLETED without producing any audio is
                     # dead air: nothing is queued behind it, so the line stays
                     # silent until the caller gives up and speaks. On a live
                     # call this ran 8.2 seconds and the caller asked "are you
                     # there?" — exactly what a person says to a dropped line.
-                    # Cancelled responses are excluded: those are barge-ins,
-                    # where silence is correct because the caller is talking.
+                    # Only 'cancelled' is excluded — those are barge-ins, where
+                    # silence is correct because the caller is talking. This
+                    # used to require status == 'completed', so an 'incomplete'
+                    # or 'failed' response producing no audio slipped through
+                    # and became 10s of dead air on a live call. The status was
+                    # not logged either, so there was no way to tell which.
                     _empty_responses += 1
                     print(f"[Realtime] Response produced no audio — "
                           f"re-requesting to avoid dead air "

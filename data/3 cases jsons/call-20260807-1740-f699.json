@@ -1,0 +1,176 @@
+{
+  "call_id": "call-20260807-1740-f699",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": null,
+  "resolved": false,
+  "duration_seconds": 135,
+  "cost_usd": 0.25087,
+  "template": "forage_data_collection",
+  "grounding": null,
+  "conversation": {
+    "location_asks": 4,
+    "double_asks": 1,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 23,
+    "agent_turns": 11,
+    "caller_turns": 13,
+    "caller_questions": 2,
+    "question_turns": 4,
+    "stapled_questions": 1,
+    "staple_rate": 0.5,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0
+  },
+  "ask_budget": {
+    "limit": 4,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 700,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 15,
+    "input_audio": 7969,
+    "input_audio_cached": 6080,
+    "output_audio": 842,
+    "input_text": 73269,
+    "input_text_cached": 66752,
+    "output_text": 1842,
+    "cache_hit_rate": 0.8965
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Definitive Healthcare about a doctor listing.",
+      "timestamp": "17:40:48"
+    },
+    {
+      "role": "caller",
+      "text": "Hello, good evening Yes, this is Dr. Smith's office.",
+      "timestamp": "17:40:56"
+    },
+    {
+      "role": "agent",
+      "text": "Good evening \u2014 do you know which branch Dr. Okafor is working out of these days?",
+      "timestamp": "17:40:59"
+    },
+    {
+      "role": "caller",
+      "text": "I think I know but I'm not sure about the brand, it is the second one.",
+      "timestamp": "17:41:11"
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 take a moment to check, and I'll stay right here. Sure, no rush.",
+      "timestamp": "17:41:14"
+    },
+    {
+      "role": "caller",
+      "text": "Yes, thanks for understanding.",
+      "timestamp": "17:41:22"
+    },
+    {
+      "role": "agent",
+      "text": "Yeah, of course \u2014 all good.",
+      "timestamp": "17:41:23"
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, I heard he's working in California.",
+      "timestamp": "17:41:34"
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that update \u2014 is California the only site they have out there? Got it \u2014 which branch in California is that?",
+      "timestamp": "17:41:37"
+    },
+    {
+      "role": "caller",
+      "text": "Uh.",
+      "timestamp": "17:41:49"
+    },
+    {
+      "role": "agent",
+      "text": "Sorry, you're coming",
+      "timestamp": "17:41:49"
+    },
+    {
+      "role": "caller",
+      "text": "Wait, I need to check.",
+      "timestamp": "17:41:51"
+    },
+    {
+      "role": "agent",
+      "text": "Sure, take your time.",
+      "timestamp": "17:41:52"
+    },
+    {
+      "role": "caller",
+      "text": "Hold on a second.",
+      "timestamp": "17:41:58"
+    },
+    {
+      "role": "agent",
+      "text": "Sorry \u2014 it's Dr. Okafor I'm asking about.",
+      "timestamp": "17:42:00"
+    },
+    {
+      "role": "caller",
+      "text": "He is working in Lombard Street in California.",
+      "timestamp": "17:42:08"
+    },
+    {
+      "role": "caller",
+      "text": "Hello",
+      "timestamp": "17:42:18"
+    },
+    {
+      "role": "caller",
+      "text": "Are you there?",
+      "timestamp": "17:42:23"
+    },
+    {
+      "role": "agent",
+      "text": "Yeah, I'm here \u2014 which city is that Lambert Street location in?",
+      "timestamp": "17:42:24"
+    },
+    {
+      "role": "caller",
+      "text": "What do you want?",
+      "timestamp": "17:42:32"
+    },
+    {
+      "role": "agent",
+      "text": "Sorry, I didn't quite catch that \u2014 let me clarify what I'm asking. Right \u2014",
+      "timestamp": "17:42:35"
+    },
+    {
+      "role": "caller",
+      "text": "He is working in Lambert Street in California.",
+      "timestamp": "17:42:44"
+    },
+    {
+      "role": "agent",
+      "text": "I'm just trying to confirm the practice location for Dr. Okafor \u2014 which city is that Lambert Street site in?",
+      "timestamp": "17:42:48"
+    },
+    {
+      "role": "caller",
+      "text": "Let me transfer you to our north campus.",
+      "timestamp": "17:42:55"
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260807-1740-f699.wav",
+  "recorded_at": "2026-08-07T17:40:43.296478"
+}
