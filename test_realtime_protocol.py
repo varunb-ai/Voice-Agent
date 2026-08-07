@@ -450,6 +450,30 @@ async def main():
         check("?" not in _g, f"{_name}: opener ends flat, callee speaks next", _g[:52])
         check(settings.org_name not in _t.instructions,
               f"{_name}: organisation stays out of the cached instructions")
+
+    # The persona name must match the voice. A cedar (male) call introduced
+    # itself as Sarah and the caller spent three of six turns on it — "why is
+    # your name Sarah? I think you're a boy" — and never gave the branch. Voice
+    # and name were independent settings with nothing checking they agreed.
+    from core.config import persona_for_voice as _persona, VOICE_PERSONA as _VP, \
+        REALTIME_VOICES as _VOICES
+    check(set(_VP) == _VOICES,
+          "every valid voice has a persona name",
+          f"missing: {sorted(_VOICES - set(_VP))}")
+    check(_persona("marin") == "Sarah", "female voice keeps a female name")
+    check(_persona("cedar") == "David", "male voice gets a male name")
+    check(_persona("") != "" and _persona("nonsense") != "",
+          "unknown voice still yields a usable name")
+    for _v in sorted(_VOICES):
+        _g = tpl.build_greeting(_probe, org=settings.org_name,
+                                agent_name=_persona(_v))
+        check(_persona(_v) in _g, f"greeting uses the {_v} persona name")
+    # Derived per call, so it must not be baked into the cached prefix — the
+    # marin/cedar A/B otherwise costs a cold cache each time it switches.
+    for _n, _t2 in _ALL.items():
+        for _name_val in set(_VP.values()):
+            check(_name_val not in _t2.instructions,
+                  f"{_n}: persona {_name_val!r} stays out of the instructions")
     check(settings.org_name not in tpl.instructions,
           "organisation absent from the cached instructions")
     for _other in ("Definitive Healthcare", "Forage AI Healthcare", "Acme Health"):

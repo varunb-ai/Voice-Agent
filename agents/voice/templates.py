@@ -397,7 +397,8 @@ ending, and never deferred to a later turn."""
 
 _IDENTITY_HUMAN = """\
 # Identity — you present as a person from your organisation
-- You are {{AGENT_NAME}}, calling ON BEHALF OF the organisation in CALL CONTEXT \
+- You are the person named in CALL CONTEXT, calling ON BEHALF OF the \
+organisation named there \
 — not as an employee of it. Say "calling on behalf of <organisation>", never \
 "with <organisation>" or "from <organisation>": "with" claims employment, and \
 that claim does not survive a receptionist checking later. Speak in \
@@ -509,12 +510,13 @@ class CallTemplate:
         # starts doing something.
         return warnings
 
-    def build_greeting(self, doctor: Doctor, *, org: str = "") -> str:
+    def build_greeting(self, doctor: Doctor, *, org: str = "",
+                       agent_name: str = "") -> str:
         return self.greeting.format(
             time_of_day=time_of_day(),
             hospital=doctor.hospital_name or "the doctor's office",
             org=(org or "").strip() or DEFAULT_ORG,
-            agent_name=AGENT_PERSONA_NAME,
+            agent_name=(agent_name or "").strip() or DEFAULT_PERSONA,
         )
 
     def build_context(
@@ -524,6 +526,7 @@ class CallTemplate:
         callback_number: str,
         callback_email: str,
         org: str = "",
+        agent_name: str = "",
     ) -> str:
         """Per-call facts, sent as the first conversation item.
 
@@ -539,6 +542,9 @@ class CallTemplate:
         spoken_org = (org or "").strip() or DEFAULT_ORG
         lines = [
             "CALL CONTEXT — this call only.",
+            f"YOUR NAME ON THIS CALL: {agent_name}. It is chosen to match the "
+            f"voice you speak in. Give this name when you introduce yourself and "
+            f"whenever you are asked who you are.",
             f"CALLING ON BEHALF OF: {spoken_org}. Say it that way — \"on behalf "
             f"of {spoken_org}\" — not \"with\" or \"from\", which claim you work "
             f"there. You do not. Give this name when you introduce yourself and "
@@ -583,10 +589,13 @@ class CallTemplate:
 DEFAULT_ORG = "Definitive Healthcare"
 
 # The persona name used by the human-presenting template only.
-AGENT_PERSONA_NAME = "Sarah"
+# Fallback only. The spoken name is a PER-CALL value derived from the voice —
+# see core.config.persona_for_voice — so it stays out of the static
+# instructions and switching voices costs nothing in cache.
+DEFAULT_PERSONA = "Alex"
 
 
-def _build(identity: str, *, agent_name: str = AGENT_PERSONA_NAME) -> str:
+def _build(identity: str) -> str:
     """Compose a template's instructions from the shared body + identity block.
 
     Both templates share every rule about pacing, brevity, conversation,
@@ -601,7 +610,7 @@ def _build(identity: str, *, agent_name: str = AGENT_PERSONA_NAME) -> str:
     """
     return (_FORAGE_INSTRUCTIONS
             .replace("{{IDENTITY}}", identity)
-            .replace("{{AGENT_NAME}}", agent_name))
+            )
 
 
 FORAGE_DATA_COLLECTION = CallTemplate(

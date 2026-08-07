@@ -14,6 +14,34 @@ REALTIME_VOICES = {
     "marin", "cedar",
 }
 
+# The persona name must match the voice the callee actually hears. Switching to
+# cedar while the script still said "this is Sarah" derailed an entire call:
+#   caller: "Oh, why is your name Sarah? I think you're a boy, right?"
+#   caller: "But first answer me this, why are you keeping a girl and being a boy?"
+# Three of six caller turns went on it and the branch never came up. Voice and
+# name were two independent settings with nothing checking they agreed.
+#
+# Derived from the voice rather than configured separately, so they cannot drift
+# apart. Names chosen to be common, unremarkable and clear at 8kHz — the point of
+# a persona name is that nobody asks about it.
+VOICE_PERSONA = {
+    "marin":   "Sarah",
+    "coral":   "Sarah",
+    "shimmer": "Sarah",
+    "sage":    "Sarah",
+    "cedar":   "David",
+    "ash":     "David",
+    "echo":    "David",
+    "ballad":  "David",
+    "verse":   "David",
+    "alloy":   "Alex",   # neutral voice, neutral name
+}
+
+
+def persona_for_voice(voice: str) -> str:
+    """The name the agent gives, matched to the voice the callee hears."""
+    return VOICE_PERSONA.get((voice or "").strip().lower(), "Alex")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

@@ -42,7 +42,7 @@ import websockets
 import websockets.exceptions
 from fastapi import WebSocket
 
-from core.config import settings
+from core.config import settings, persona_for_voice
 from core.models import Doctor, TranscriptTurn
 from agents.voice.memory import CallMemory
 from agents.voice.templates import get_template
@@ -1043,12 +1043,18 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
     # The organisation is a runtime value: it names whichever client's campaign
     # this call belongs to, and it reaches the model through the per-call
     # context item, never through the cached instructions.
-    greeting = template.build_greeting(doctor, org=settings.org_name)
+    # The spoken name must match the voice the callee hears. These were two
+    # independent settings until a cedar (male) call introduced itself as Sarah
+    # and the caller spent three turns on it instead of the branch.
+    persona = persona_for_voice(settings.realtime_voice)
+    greeting = template.build_greeting(doctor, org=settings.org_name,
+                                       agent_name=persona)
     context  = template.build_context(
         doctor,
         callback_number=settings.callback_number,
         callback_email=settings.callback_email,
         org=settings.org_name,
+        agent_name=persona,
     )
 
     # Let /recording_ready name the downloaded MP3 after this call_id so audio,
