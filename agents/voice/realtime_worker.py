@@ -254,6 +254,27 @@ def _ask_budget_outcome(turns: list, sent_at: Optional[int],
     }
 
 
+def _double_ask(text: str) -> bool:
+    """Two requests for the same thing inside one turn.
+
+    Counted by requests, not by question marks. "I need the specific branch name
+    or street address where Dr. Okafor sees patients. Which one is it?" carries
+    one "?" and asks twice — a statement-form request followed by a question.
+    The trailing question is also vaguer than the statement it repeats, so it
+    reads as asking the caller to choose between the options just listed.
+    """
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
+    # "Which one is it?" names nothing, so it is not an ask by content — it is an
+    # ask by context, pointing back at the request before it. That is precisely
+    # what makes it vague. So the shape to catch is a statement-form request
+    # followed by a separate question, not two recognisable location asks.
+    statement_asks = [p for p in parts if "?" not in p and _is_location_ask(p)]
+    questions      = [p for p in parts if "?" in p]
+    if statement_asks and questions:
+        return True
+    return sum(1 for p in questions if _is_location_ask(p)) > 1
+
+
 def conversation_metrics(turns: list) -> dict:
     """Count the conversational failures that prose rules keep failing to stop.
 
@@ -310,6 +331,12 @@ def conversation_metrics(turns: list) -> dict:
         # exposed this it was six, with no location offered between any of
         # them — the number that says "it would not let go".
         "location_asks": sum(1 for t in agent if _is_location_ask(t.text)),
+        # Two requests for the same fact inside one turn. The prompt's rule was
+        # "EXACTLY ONE question mark per turn", which a statement-form request
+        # followed by a question passes with one "?" — the same blind spot the
+        # ask DETECTOR had. On a live call: "I need the specific branch name or
+        # street address where Dr. Okafor sees patients. Which one is it?"
+        "double_asks": sum(1 for t in agent if _double_ask(t.text)),
         "agent_turns": len(agent),
         "caller_turns": len(caller),
         "caller_questions": caller_questions,
@@ -957,6 +984,7 @@ class RealtimeSession:
         print(f"    stapled onto answers {m['stapled_questions']} of "
               f"{m['caller_questions']}  ({rate})", flush=True)
         print(f"    asked twice running  {m['back_to_back_asks']}", flush=True)
+        print(f"    asked twice in a turn {m['double_asks']}", flush=True)
         print(f"    repeated sentences   {m['repeated_sentences']}"
               f"{'   <- this is the one that correlates with a bad call' if m['repeated_sentences'] else ''}",
               flush=True)

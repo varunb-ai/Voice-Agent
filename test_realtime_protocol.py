@@ -724,6 +724,29 @@ async def main():
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
 
+    # Two requests for the same fact in one turn. The rule was "EXACTLY ONE
+    # question mark per turn", which this passes with a single "?" — the same
+    # blind spot the ask detector had, left in the prompt after the detector was
+    # fixed. From a live call, and the trailing question is vaguer than the
+    # statement it repeats: having just named two options, "which one is it?"
+    # sounds like asking the caller to choose between them.
+    for _t, _want in [
+        ("I need the specific branch name or street address where Dr. Okafor "
+         "sees patients. Which one is it?", True),
+        ("I'm trying to find out which branch she works at. Do you know?", True),
+        ("Do you know which branch she's working out of these days?", False),
+        ("Sure, we keep a doctor directory — which branch is she at?", False),
+        ("Thanks, I have that as the Riverside branch. Have a good day.", False),
+        (tpl.build_greeting(Doctor(doctor_name="Dr. Jane Okafor",
+                                   hospital_name="Northside Medical Group"),
+                            org=settings.org_name), False),
+    ]:
+        check(rw._double_ask(_t) == _want, f"double-ask: {_want!s:5} for {_t[:40]!r}")
+    check("ONE ASK PER TURN" in tpl.instructions,
+          "rule counts asks, not question marks")
+    check("EXACTLY ONE question mark per turn" not in tpl.instructions,
+          "the question-mark-counting rule is gone")
+
     # Wrong organisation. A branch saved against the wrong hospital is corrupt
     # data, and it is the one failure grounding cannot see: every word can be
     # genuinely quoted from the caller and the record still be wrong, because
