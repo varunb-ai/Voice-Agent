@@ -254,6 +254,26 @@ def _ask_budget_outcome(turns: list, sent_at: Optional[int],
     }
 
 
+# Abbreviations whose full stop does not end a sentence. Without this, "Which
+# branch is Dr. Okafor at?" splits into "Which branch is Dr." + "Okafor at?",
+# which reads as a statement-request followed by a question — so the double-ask
+# detector fired on nearly every turn, since almost every turn names the doctor.
+_ABBREV = re.compile(
+    r"\b(Dr|Mr|Mrs|Ms|Prof|St|Ave|Blvd|Rd|Ste|Dept|Inc|Co|approx|no)\.\s",
+    re.I)
+# A visible sentinel. The empty string is wrong (replacing "" inserts
+# the replacement between every character) and a control byte is worse:
+# invisible in source, and a literal 0x08 has landed in this file twice.
+_ABBREV_MARK = "@@DOT@@"
+
+
+def _sentences(text: str) -> list:
+    """Split into sentences without treating "Dr." as the end of one."""
+    protected = _ABBREV.sub(lambda m: m.group(0).replace(".", _ABBREV_MARK), text)
+    parts = re.split(r"(?<=[.!?])\s+", protected.strip())
+    return [p.replace(_ABBREV_MARK, ".").strip() for p in parts if p.strip()]
+
+
 def _double_ask(text: str) -> bool:
     """Two requests for the same thing inside one turn.
 
@@ -263,7 +283,7 @@ def _double_ask(text: str) -> bool:
     The trailing question is also vaguer than the statement it repeats, so it
     reads as asking the caller to choose between the options just listed.
     """
-    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
+    parts = _sentences(text)
     # "Which one is it?" names nothing, so it is not an ask by content — it is an
     # ask by context, pointing back at the request before it. That is precisely
     # what makes it vague. So the shape to catch is a statement-form request
@@ -314,7 +334,7 @@ def conversation_metrics(turns: list) -> dict:
 
     seen: dict[str, int] = {}
     for t in agent:
-        for sentence in re.split(r"(?<=[.!?])\s+", t.text.strip()):
+        for sentence in _sentences(t.text):
             key = sentence.strip().lower()
             if len(key.split()) >= 4:
                 seen[key] = seen.get(key, 0) + 1

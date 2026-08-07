@@ -698,6 +698,34 @@ async def main():
         if isinstance(_val, _re.Pattern):
             check(not any(ord(c) < 32 and c not in "\t\n" for c in _val.pattern),
                   f"no control characters in {_name}")
+    # Plain string constants too, not just regexes. A 0x01 sentinel landed in
+    # _ABBREV_MARK and the regex-only guard could not see it — the third control
+    # byte to reach this file. Read renders them invisibly, so nothing catches
+    # these by eye.
+    for _name, _val in vars(rw).items():
+        if isinstance(_val, str) and not _name.startswith("__"):
+            check(not any(ord(c) < 32 and c not in "\t\n" for c in _val),
+                  f"no control characters in string {_name}")
+
+    # "Dr." is not the end of a sentence. Without protecting it, "Which branch
+    # is Dr. Okafor at?" splits into "Which branch is Dr." + "Okafor at?" — a
+    # statement-request followed by a question — so double_ask fired on nearly
+    # every turn, because nearly every turn names the doctor. The original tests
+    # missed it: none of the negative cases contained "Dr.", which is the single
+    # most common token in the agent's speech.
+    check(rw._sentences("Which office is Dr. Okafor working out of?") ==
+          ["Which office is Dr. Okafor working out of?"],
+          "'Dr.' does not split a sentence")
+    for _t, _want in [
+        ("Which office is Dr. Okafor working out of?", False),
+        ("Right, thanks for checking — which branch does Dr. Okafor practice at?", False),
+        ("Got it, thanks for coming back — which branch does Dr. Okafor work at?", False),
+        ("Yes, which office is that?", False),
+        ("I need the branch name or street address where Dr. Okafor sees "
+         "patients. Which one is it?", True),
+    ]:
+        check(rw._double_ask(_t) == _want,
+              f"double-ask with a title: {_want!s:5} for {_t[:38]!r}")
 
     # Tool rejections must not be speakable. On a live call the agent read this
     # module's rejection text to a receptionist, lightly paraphrased:
