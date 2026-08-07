@@ -428,11 +428,28 @@ async def main():
     _greet = tpl.build_greeting(
         Doctor(doctor_name="Dr. Jane Okafor", hospital_name="Northside Medical Group"),
         org=settings.org_name)
-    check("on behalf of " + settings.org_name in _greet,
-          "greeting says 'on behalf of', not claiming employment")
-    for _claim in (f"with {settings.org_name}", f"from {settings.org_name}",
-                   f"at {settings.org_name}"):
-        check(_claim not in _greet, f"greeting makes no employment claim: {_claim!r}")
+    # EVERY template, not just the configured one. Asserting on `tpl` alone let
+    # forage_ai_disclosed keep "I'm an automated assistant FROM {org}" — the
+    # exact employment claim that had just been removed from the human greeting.
+    # Same shape as the pronunciation line: fixed in one place, silently kept in
+    # the other. A per-template loop is the only thing that catches it.
+    from agents.voice.templates import TEMPLATES as _ALL
+    _probe = Doctor(doctor_name="Dr. Jane Okafor",
+                    hospital_name="Northside Medical Group")
+    for _name, _t in _ALL.items():
+        _g = _t.build_greeting(_probe, org=settings.org_name)
+        check("on behalf of " + settings.org_name in _g,
+              f"{_name}: says 'on behalf of', not claiming employment", _g[:52])
+        for _claim in (f"with {settings.org_name}", f"from {settings.org_name}",
+                       f"at {settings.org_name}"):
+            check(_claim not in _g,
+                  f"{_name}: no employment claim {_claim!r}")
+        # The hospital-confirmation question was ignored by 10 of 11 callees and
+        # the check it stood for now lives in hospital_mismatch(), so the opening
+        # no longer spends its one question on it.
+        check("?" not in _g, f"{_name}: opener ends flat, callee speaks next", _g[:52])
+        check(settings.org_name not in _t.instructions,
+              f"{_name}: organisation stays out of the cached instructions")
     check(settings.org_name not in tpl.instructions,
           "organisation absent from the cached instructions")
     for _other in ("Definitive Healthcare", "Forage AI Healthcare", "Acme Health"):
@@ -479,16 +496,16 @@ async def main():
           "instructions forbid inventing a phone number")
     check("repeat it plainly and in full" in flat,
           "mid-call identity re-ask is handled")
-    check("identity and contact facts are exempt" in flat,
+    check("EXCEPTION: identity and contact facts" in flat,
           "identity facts exempt from the no-repetition rule")
 
     # The brevity rules once combined to make 5 of 6 agent turns bare
     # questions, including answering a caller's direct question with another
     # question. Guard the counterweight so tightening brevity again cannot
     # silently reintroduce it.
-    check("answer it before you ask anything of your own" in flat,
+    check("answer it before asking anything of your own" in flat,
           "caller questions get answered before the agent asks its own")
-    check("NEVER reply to a question with only a question" in flat,
+    check("never reply to a question with only a question" in flat,
           "never answers a question with only a question")
     # A live call welded the same branch question onto four consecutive
     # answers. The prose rule against it was already there and was ignored
@@ -497,9 +514,9 @@ async def main():
     # 100% -> 50%), and produced 13 seconds of dead air while a confused caller
     # asked "hello, are you there?". Ending a turn with nothing to respond to
     # is worse than asking. The failure was always repetition, not the question.
-    check("Answering and then asking in the same breath is FINE" in flat,
+    check("asking in the same breath is how a person hands the" in flat,
           "answering and asking in one turn is permitted")
-    check("It is asking THE SAME THING over and over" in flat,
+    check("Repetition is what makes people hang up" in flat,
           "repetition named as the actual failure")
     # A live call answered "what's the reason for calling?" by repeating its
     # name, org and job — all three already said in the greeting 15 seconds
@@ -507,9 +524,9 @@ async def main():
     # should I do?". WHO and WHY are different questions.
     check("A job description is not a reason for calling" in flat,
           "why-are-you-calling is answered with the actual ask")
-    check("This exemption covers WHO you are. It does NOT cover why you are" in flat,
+    check("This covers WHO you are. It does NOT cover WHY you are calling" in flat,
           "identity-repetition exemption does not extend to purpose")
-    check("NEVER ask for the branch twice in the same wording" in flat,
+    check("never ask for the branch twice in the same wording" in flat,
           "cannot repeat the branch question verbatim")
     # This used to assert the literal 'say ONLY "Of course, take your time."',
     # which is the instruction that produced the verbatim repeat. The assertion
@@ -525,8 +542,8 @@ async def main():
     # Normalise whitespace — the instructions are hard-wrapped, so asserting on
     # a phrase that spans a line break must not depend on where it wraps.
     # (flat defined above)
-    check("NOT a licence to strip a turn down to a bare question" in flat,
-          "brevity rules explicitly subordinated to conversation")
+    check('Wrong: "Which branch is she at?"' in flat,
+          "a bare question with no reaction is shown as wrong")
     # Hospitals have branches, not offices — and the field we store into is
     # literally called `branch`, so asking "which office" is inconsistent with
     # both the domain and the schema.
