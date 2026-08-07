@@ -657,6 +657,37 @@ async def main():
         if isinstance(_val, _re.Pattern):
             check(not any(ord(c) < 32 and c not in "\t\n" for c in _val.pattern),
                   f"no control characters in {_name}")
+
+    # Tool rejections must not be speakable. On a live call the agent read this
+    # module's rejection text to a receptionist, lightly paraphrased:
+    #   "I need the specific site name or street address. If that's the only
+    #    site, tell me that and I'll take it."
+    # The old messages were fluent English imperatives, so relaying one produced
+    # a grammatical sentence. They are terse fragments now, and a rejection that
+    # drifts back toward speakable prose should fail here rather than on a call.
+    from agents.voice.tools import save_branch as _save
+    from agents.voice.memory import CallMemory as _Mem
+    _SPEAKABLE = ("ask whether", "ask them", "get the site", "tell me",
+                  "i'll take it", "please provide", "could you", "you should")
+    for _bad in ("California Branch", "Cardiology", "and", "the", "x"):
+        _r = _save(_Mem("t"), _bad)
+        if _r.get("ok"):
+            continue
+        _err = _r["error"]
+        check(_err.startswith(("REJECTED", "NOT SAVED")),
+              f"rejection is machine-shaped: {_bad!r}", _err[:48])
+        for _phrase in _SPEAKABLE:
+            check(_phrase not in _err.lower(),
+                  f"rejection has no speakable imperative ({_phrase!r}): {_bad!r}")
+
+    check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
+          "prompt forbids reading tool results aloud")
+    # The brevity over-correction must not come back. It was restored on purpose
+    # to isolate the VAD variable, and that test is finished.
+    for _dead in ("UNDER 15 WORDS", "under 15 words", "about eight",
+                  "brilliant", "have a good evening"):
+        check(_dead not in tpl.instructions,
+              f"retired brevity/British wording absent: {_dead!r}")
     # Statement-form asks. The agent started using these once the brevity
     # rules were relaxed, and the budget counted 3 on a call where the caller
     # complained about being asked the same thing repeatedly.

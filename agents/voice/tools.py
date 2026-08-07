@@ -294,6 +294,29 @@ def _is_bare_city(cleaned: str, city: str | None) -> str | None:
     # treats them the same regardless of whether we recognise the place.
     return None
 
+def _reject(reason: str, need: str = "") -> dict:
+    """A rejection the model can act on but cannot read out.
+
+    On a live call the agent said, out loud, to a receptionist:
+
+        "If there are several sites there, I need the specific site name or
+         street address. If that's the only site, tell me that and I'll take it."
+
+    which is this module's rejection text, lightly paraphrased. The old messages
+    were written as fluent English imperatives — "Ask whether that is their only
+    office there, or get the site name or street address" — so relaying them
+    verbatim produced a grammatical sentence, and the model duly relayed one. No
+    person says "I'll take it" about a branch name; it was the most machine-like
+    turn in the best call we had.
+
+    Rejections are therefore written as terse fragments in a register nobody
+    speaks. Paraphrasing one now yields something visibly wrong rather than
+    something plausible, which pushes the model to say the next thing in its own
+    words. Paired with the "tool results are internal" rule in the prompt.
+    """
+    return {"ok": False, "error": reason + (f" | NEED: {need}" if need else "")}
+
+
 def save_branch(
     memory: CallMemory,
     branch: str,
@@ -301,24 +324,25 @@ def save_branch(
     schedule: str | None = None,
 ) -> dict:
     cleaned = branch.lower().strip().rstrip(".,!?")
+    NEED = "site name or street address"
     if any(p in cleaned for p in _PROMPT_ECHO_PHRASES):
-        return {"ok": False, "error": f"'{branch}' looks like an STT hallucination, not a real location"}
+        return _reject(f"REJECTED {branch!r}: transcription artefact", NEED)
     if cleaned in _SPECIALIZATIONS:
-        return {"ok": False, "error": f"'{branch}' is a specialization/department, not a location"}
+        return _reject(f"REJECTED {branch!r}: department, not a place", NEED)
     if len(cleaned) < 3:
-        return {"ok": False, "error": "branch value too short"}
+        return _reject(f"REJECTED {branch!r}: too short", NEED)
     if cleaned in _INVALID_BRANCH_WORDS:
-        return {"ok": False, "error": f"'{branch}' is not a valid branch name"}
+        return _reject(f"REJECTED {branch!r}: generic word", NEED)
     words = cleaned.split()
     if words and words[0] in _CONJUNCTION_STARTS:
-        return {"ok": False, "error": f"'{branch}' starts with a conjunction — not a real location name"}
+        return _reject(f"REJECTED {branch!r}: leading conjunction", NEED)
     if words and len(words[0]) == 1:
-        return {"ok": False, "error": f"'{branch}' starts with a single letter — not a real location name"}
+        return _reject(f"REJECTED {branch!r}: leading single letter", NEED)
     if words and all(w in _INVALID_BRANCH_WORDS for w in words):
-        return {"ok": False, "error": f"'{branch}' contains only filler words"}
+        return _reject(f"REJECTED {branch!r}: filler only", NEED)
     bare_city = _is_bare_city(cleaned, city)
     if bare_city:
-        return {"ok": False, "error": bare_city}
+        return _reject(f"REJECTED {branch!r}: names a city, not a site", NEED)
 
     # "<Placename> branch" — probably the city restated, but not certainly: a
     # group with one Newark office really does call it the Newark branch.
@@ -327,16 +351,11 @@ def save_branch(
     if _looks_like_presence_in_a_place(cleaned):
         if not memory.get("branch_clarification_asked"):
             memory.update(branch_clarification_asked=True)
-            return {
-                "ok": False,
-                "error": (
-                    f"'{branch}' may just be naming the city. Ask whether "
-                    f"that is their only office there, or get the site name "
-                    f"or street address. If they confirm it is the only one, "
-                    f"call save_branch again with the same value and it will "
-                    f"be accepted."
-                ),
-            }
+            return _reject(
+                f"NOT SAVED {branch!r}: possibly the city restated",
+                "confirmation this is their only location there, OR a site "
+                "name/street address. Same value on retry is accepted.",
+            )
         memory.update(branch_needed_clarification=True)
 
     memory.update(branch=branch, city=city, schedule=schedule, resolved=True)
