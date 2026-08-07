@@ -387,6 +387,20 @@ async def main():
     # it used to sit 14 tokens into a ~4,000-token prompt, so changing clients
     # invalidated 99% of the cache prefix.
     check(settings.org_name in ctx, "context names the organisation")
+    # "on behalf of", never "with"/"from". Sarah is not an employee of the client
+    # — the calling entity is a different company — so "Sarah with <client>" is a
+    # false claim about who the receptionist spoke to, and it does not survive
+    # them checking later. Same category of invented identity as the fake
+    # "Forage AI Healthcare" org this replaced; it just reads more naturally,
+    # which is exactly why it would slip back in.
+    _greet = tpl.build_greeting(
+        Doctor(doctor_name="Dr. Jane Okafor", hospital_name="Northside Medical Group"),
+        org=settings.org_name)
+    check("on behalf of " + settings.org_name in _greet,
+          "greeting says 'on behalf of', not claiming employment")
+    for _claim in (f"with {settings.org_name}", f"from {settings.org_name}",
+                   f"at {settings.org_name}"):
+        check(_claim not in _greet, f"greeting makes no employment claim: {_claim!r}")
     check(settings.org_name not in tpl.instructions,
           "organisation absent from the cached instructions")
     for _other in ("Definitive Healthcare", "Forage AI Healthcare", "Acme Health"):
@@ -408,8 +422,11 @@ async def main():
           "greeting is one or two sentences, not a paragraph")
     check(len(greeting.split()) <= 24,
           f"greeting stays short ({len(greeting.split())} words)")
-    check("this is" in greeting.lower() and " with " in greeting.lower(),
-          "uses US phone convention: 'this is <name> with <company>'")
+    # "this is <name>" is the US convention and stays. The "<name> with <company>"
+    # half was dropped deliberately: it is the natural phrasing, and it is a
+    # false employment claim. Accuracy wins over idiom on the identity line.
+    check("this is" in greeting.lower(),
+          "uses US phone convention: 'this is <name>'")
     check(any(i["item"].get("type") == "function_call_output" for i in items),
           "tool result returned to the model")
 
