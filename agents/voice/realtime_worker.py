@@ -669,6 +669,10 @@ class RealtimeSession:
         self._greeting_requested_at: Optional[float] = None
         # Warn the model about a faint line at most once per call.
         self._low_audio_warned: bool = False
+        # RMS of the last utterance, held until its transcript arrives. Low
+        # energy alone never means "we cannot hear you" — only low energy with
+        # nothing transcribed does.
+        self._pending_low_rms: Optional[float] = None
         # Asks for the location so far, and whether we have already told the
         # model to stop. See realtime_max_location_asks.
         self._location_asks: int = 0
@@ -1461,29 +1465,25 @@ async def _oai_to_twilio(
                     heard_clearly = any(
                         t.role == "caller" and t.text.strip() not in ("", "[...]")
                         for t in sess.turns)
+                    #
+                    # Fourth false fire, and the "wait until something has
+                    # transcribed" guard could never have helped: the alarm goes
+                    # off on the FIRST utterance, when nothing has transcribed
+                    # yet by definition. The slice measured came from a VAD
+                    # trigger during the greeting, before the caller had said a
+                    # word — so it measured silence and called it a faint line.
+                    # The agent then spent a whole turn asking a perfectly
+                    # audible person to speak up, instead of answering the
+                    # question they had just asked.
+                    #
+                    # RMS cannot decide this. Whether the words came through is
+                    # the only evidence that matters, and that is not known until
+                    # the transcript arrives. So measure here, decide there.
                     utterance = b"".join(sess._caller_pcm[_speech_start_pcm_pos:])
                     if utterance and not sess._low_audio_warned and not heard_clearly:
                         arr = _wire_to_pcm16(utterance)
                         rms = _loudest_window_rms(arr)
-                        if 0.0 < rms < _LOW_AUDIO_RMS:
-                            sess._low_audio_warned = True
-                            print(f"[Realtime] Caller audio very faint "
-                                  f"(RMS {rms:.4f} vs ~0.03 typical) — telling "
-                                  f"the agent to ask them to speak up", flush=True)
-                            await oai_ws.send(json.dumps({
-                                "type": "conversation.item.create",
-                                "item": {
-                                    "type": "message",
-                                    "role": "user",
-                                    "content": [{
-                                        "type": "input_text",
-                                        "text": ("(system: the caller's line is very "
-                                                 "faint and hard to make out. Ask them "
-                                                 "to speak up or repeat. Do not guess "
-                                                 "at anything you did not clearly hear.)"),
-                                    }],
-                                },
-                            }))
+                        sess._pending_low_rms = rms if 0.0 < rms < _LOW_AUDIO_RMS else None
 
             # ── Audio → Twilio ─────────────────────────────────────────────
             # gpt-realtime-2 uses response.output_audio.delta (not response.audio.delta)
@@ -1590,6 +1590,31 @@ async def _oai_to_twilio(
             # ── Caller transcript — replace placeholder if transcription enabled ──
             elif event_type == "conversation.item.input_audio_transcription.completed":
                 text = msg.get("transcript", "").strip()
+                # The faint-line decision belongs here, not at speech_stopped.
+                # Words that arrived are proof the line carried them, whatever
+                # the RMS says; nothing arriving on a quiet slice is the only
+                # combination that actually means "we cannot hear you".
+                _low = getattr(sess, "_pending_low_rms", None)
+                sess._pending_low_rms = None
+                if _low is not None and not text and not sess._low_audio_warned:
+                    sess._low_audio_warned = True
+                    print(f"[Realtime] Caller audio faint AND nothing "
+                          f"transcribed (RMS {_low:.4f}) — asking them to "
+                          f"speak up", flush=True)
+                    await oai_ws.send(json.dumps({
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{
+                                "type": "input_text",
+                                "text": ("(system: that came through too faint to "
+                                         "make out and nothing was transcribed. Ask "
+                                         "them to repeat it. Do not guess at "
+                                         "anything you did not clearly hear.)"),
+                            }],
+                        },
+                    }))
                 if text:
                     ts = datetime.now().strftime("%H:%M:%S")
                     print(f"[{ts}] 👤 CALLER : {text}", flush=True)
