@@ -212,6 +212,35 @@ def script_silent_response():
     ]
 
 
+def script_hold_then_escalate():
+    """The give-up directive fires, then the caller offers to go and check.
+
+    From a live call, in this order:
+        budget hit 4 asks -> "stop asking and escalate" injected
+        CALLER: "can you please give me a minute? I just need to check"
+        escalate(caller engaged but never provided a location)
+    The most cooperative thing said on the call, answered by hanging up.
+
+    Clearing the internal flag is not enough — the directive is already in the
+    model's context and it will act on it. The escalation has to be blocked at
+    the tool call.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, this is David..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Oh yeah, can you please give me a minute? I just need to check"},
+        {"type": "response.function_call_arguments.done", "call_id": "c9",
+         "name": "escalate",
+         "arguments": json.dumps({"reason": "caller engaged but never provided a location"})},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Sure, no rush."},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
 def script_refusal():
     """Test line 5: 'I'm not allowed to give out that information.'"""
     return HANDSHAKE + [
@@ -372,6 +401,29 @@ async def main():
           "empty response triggers a re-request instead of silence",
           f"{len(_s_creates)} response.create sent")
     print(f"  response.create sent: {len(_s_creates)} (greeting + recovery)")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0b — must not hang up on someone going to check")
+    print("=" * 66)
+    _h_sent, _h_sess = await run_call(script_hold_then_escalate())
+    _h_out = [json.loads(m["item"]["output"]) for m in _h_sent
+              if m.get("type") == "conversation.item.create"
+              and m["item"].get("type") == "function_call_output"]
+    check(any(o.get("ok") is False for o in _h_out),
+          "escalation refused while the caller is checking",
+          str(_h_out[:1]))
+    check(not _h_sess.memory.get("escalated"),
+          "call is NOT marked escalated")
+    check(not _h_sess.done, "call stays open so they can come back with it")
+    # And the model is told the earlier directive no longer applies, otherwise
+    # it will simply try to escalate again on the next turn.
+    _texts = " ".join(
+        c["text"] for m in _h_sent
+        if m.get("type") == "conversation.item.create"
+        and m["item"].get("type") == "message"
+        for c in m["item"].get("content", []) if c.get("type") == "input_text")
+    check("disregard the earlier instruction" in _texts,
+          "the stop-and-escalate directive is explicitly withdrawn")
 
     print("\n" + "=" * 66)
     print("  SCENARIO 1 — happy path (branch obtained)")

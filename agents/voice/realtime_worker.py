@@ -1696,6 +1696,43 @@ async def _oai_to_twilio(
                     else:
                         result = run_tool(name, sess.memory, args)
                 elif name == "escalate":
+                    # Clearing sess._give_up_sent stops us RE-SENDING the
+                    # directive; it cannot unsay it. Once injected, the model has
+                    # "stop asking and escalate" in its context and will act on
+                    # it whatever the caller says next — which on a live call was
+                    # "can you please give me a minute? I just need to check".
+                    # So the block has to be here, at the tool call, the same way
+                    # a fabricated branch is blocked.
+                    last_caller = next((t.text for t in reversed(sess.turns)
+                                        if t.role == "caller" and t.text
+                                        and t.text != "[...]"), "")
+                    if is_hold_request(last_caller) and not sess.memory.get("branch"):
+                        result = {"ok": False, "error": (
+                            "NOT ESCALATED — they just asked for time to go and "
+                            "check. That is not a refusal and not a dead end; it "
+                            "is them about to get you the answer. Wait for them. "
+                            "Say something short like 'sure, no rush' and stop.")}
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                              f"⏳ ESCALATION BLOCKED — caller is checking: "
+                              f"{last_caller[:60]!r}", flush=True)
+                        await oai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {"type": "message", "role": "user",
+                                     "content": [{"type": "input_text", "text": (
+                                         "(system: disregard the earlier "
+                                         "instruction to stop and escalate. They "
+                                         "are looking the branch up right now. "
+                                         "Wait for them.)")}]},
+                        }))
+                        _pending_tools.pop(call_id, None)
+                        await oai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {"type": "function_call_output",
+                                     "call_id": call_id,
+                                     "output": json.dumps(result)},
+                        }))
+                        _agent_text_buf = ""
+                        continue
                     bad = _ungrounded_escalation(args.get("reason", ""), sess)
                     if bad:
                         result = {"ok": False, "error": (
