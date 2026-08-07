@@ -724,6 +724,34 @@ async def main():
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
 
+    # Wrong organisation. A branch saved against the wrong hospital is corrupt
+    # data, and it is the one failure grounding cannot see: every word can be
+    # genuinely quoted from the caller and the record still be wrong, because
+    # the call reached somewhere else. On a live call the record said "Northside
+    # Medical Group", the caller answered "Thank you for calling the Methodist
+    # Medical Center", nothing noticed, and the agent invented an address for it.
+    import types as _types
+    def _sess(rec, *turns):
+        return _types.SimpleNamespace(
+            doctor=_types.SimpleNamespace(hospital_name=rec),
+            turns=[_types.SimpleNamespace(role="caller", text=t) for t in turns])
+    _R = "Northside Medical Group"
+    for _turn, _want, _why in [
+        ("Thank you for calling the Methodist Medical Center.", True, "different org"),
+        ("You've reached Riverside Clinic, how can I help?",    True, "different org"),
+        ("This is Mercy General Hospital.",                     True, "different org"),
+        # Silence is the norm, not a signal — most people never name the place,
+        # and firing on absence would block nearly every call.
+        ("Thank you for calling Northside Medical Center.", False, "same place, other suffix"),
+        ("Northside, this is Amy.",                        False, "person's name, right place"),
+        ("Hello, this is Amy.",                            False, "person's name, no org"),
+        ("Hello dear, how can I help you?",                False, "no self-identification"),
+        ("Yes, speaking.",                                 False, "no org named"),
+        ("this is the medical center",                     False, "generic words only"),
+    ]:
+        check(bool(rw.hospital_mismatch(_sess(_R, _turn))) == _want,
+              f"wrong-organisation check ({_why}): {_turn[:38]!r}")
+
     # Verbatim repeats. The agent said "Of course, take your time." twice in one
     # call, and the cause was not the model ignoring the no-repetition rule — the
     # prompt ordered that exact string: 'say ONLY "Of course, take your time."'.

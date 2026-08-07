@@ -446,6 +446,77 @@ _UNGROUNDED_STOPWORDS = {
 }
 
 
+# Words that appear in almost every healthcare organisation's name. Matching on
+# these would make "Methodist Medical Center" look like "Northside Medical
+# Group", which is exactly the confusion this check exists to catch.
+_ORG_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "and", "for", "at", "st", "saint",
+    "hospital", "hospitals", "clinic", "clinics", "medical", "medicine",
+    "health", "healthcare", "center", "centre", "group", "practice",
+    "associates", "physicians", "care", "services", "system", "systems",
+    "institute", "department", "dept", "office", "offices", "campus",
+})
+
+# "thank you for calling X" / "you've reached X" — X can only be the place.
+_SELF_ID = re.compile(
+    r"(?:thank(?:s| you) for calling|you'?ve reached|you have reached|"
+    r"welcome to)\s+(.{3,60}?)(?:[,.!?]|$)", re.I)
+
+# "this is X" is how people give their OWN NAME — "Northside, this is Amy." So
+# it only counts as naming the organisation when the phrase carries an
+# organisational word. Without this, Amy reads as a rival hospital.
+_SELF_ID_WEAK = re.compile(r"this is\s+(.{3,60}?)(?:[,.!?]|$)", re.I)
+_ORG_WORD = re.compile(
+    r"\b(hospital|clinic|medical|health|centre|center|group|practice|"
+    r"associates|physicians|institute|system)\b", re.I)
+
+
+def _distinctive(name: str) -> set:
+    """The tokens in an organisation name that actually identify it."""
+    return {w for w in re.findall(r"[a-z]+", (name or "").lower())
+            if w not in _ORG_STOPWORDS and len(w) > 2}
+
+
+def hospital_mismatch(sess: "RealtimeSession") -> str:
+    """The caller answered as a DIFFERENT organisation than the one on record.
+
+    A branch saved against the wrong hospital is corrupt data, and it is the one
+    failure the grounding guard cannot see: every word can be genuinely quoted
+    from the caller and the record still ends up wrong, because the call reached
+    the wrong place.
+
+    On a live call the record said "Northside Medical Group" and the caller
+    answered "Thank you for calling the Methodist Medical Center." Nothing
+    noticed, and the agent went on to invent an address for it.
+
+    Fires only on a POSITIVE mismatch — a recognisable different name in an
+    answering phrase. Silence is the norm, not a signal: most people answer
+    without naming the place, and treating that as suspicion would block almost
+    every call. Empty string means no conflict found.
+    """
+    recorded = getattr(getattr(sess, "doctor", None), "hospital_name", "") or ""
+    on_record = _distinctive(recorded)
+    if not on_record:
+        return ""
+    for turn in sess.turns:
+        if turn.role != "caller" or not turn.text:
+            continue
+        # If the recorded name appears anywhere in this turn, they are the right
+        # place however else they phrase it. "Northside, this is Amy."
+        if on_record & _distinctive(turn.text):
+            continue
+        claims = list(_SELF_ID.findall(turn.text))
+        claims += [c for c in _SELF_ID_WEAK.findall(turn.text) if _ORG_WORD.search(c)]
+        for claimed in claims:
+            said = _distinctive(claimed)
+            # Overlap of even one distinctive token means the same place under a
+            # slightly different name — "Northside Medical Center" vs "Group".
+            if said and not (said & on_record):
+                return (f"caller answered as {claimed.strip()!r}, but this call "
+                        f"is recorded against {recorded!r}")
+    return ""
+
+
 def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
     """Return a description of any branch/city term the caller never said.
 
@@ -782,6 +853,10 @@ class RealtimeSession:
             "ask_budget": _ask_budget_outcome(
                 self.turns, self._give_up_at_turn,
                 self._give_up_sent, bool(self.memory.get("escalated"))),
+            # Recorded even when it does not fire, so there is data on how often
+            # a callee names themselves at all — the check is untestable until
+            # real hospital numbers are dialled.
+            "hospital_mismatch": hospital_mismatch(self) or None,
             "branch_needed_clarification":
                 bool(self.memory.get("branch_needed_clarification")),
             "model":          settings.realtime_model,
@@ -1495,6 +1570,21 @@ async def _oai_to_twilio(
                         }
                         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
                               f"🚫 HALLUCINATED BRANCH BLOCKED: {args}", flush=True)
+                    elif (mismatch := hospital_mismatch(sess)):
+                        # Every word can be genuinely quoted from the caller and
+                        # the record still be wrong, because the call reached
+                        # the wrong organisation. Grounding cannot see this.
+                        sess.memory.update(hospital_mismatch=mismatch)
+                        result = {
+                            "ok": False,
+                            "error": (
+                                f"NOT SAVED — wrong organisation. {mismatch}. "
+                                f"Confirm which place you have actually reached "
+                                f"before saving anything against this record."
+                            ),
+                        }
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                              f"🏥 WRONG ORGANISATION: {mismatch}", flush=True)
                     else:
                         result = run_tool(name, sess.memory, args)
                 elif name == "escalate":
