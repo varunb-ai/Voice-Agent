@@ -793,6 +793,38 @@ async def main():
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
 
+    # A caller going to look something up has not refused. The give-up directive
+    # is one-shot: once fired, the agent escalates on its next turn whatever they
+    # say in between. On a live call that next turn was "can you please give me a
+    # minute? I just need to check" — the most cooperative thing said on the
+    # call — and it thanked them and hung up.
+    for _t, _want in [
+        ("Oh yeah, can you please give me a minute? I just need to check", True),
+        ("Can you just wait for a moment, I'm getting another call.", True),
+        ("Hold on, let me transfer you to the main branch.", True),
+        ("Let me check.", True), ("one moment", True), ("bear with me", True),
+        ("Sorry, wrong number.", False),
+        ("I'm not allowed to give out that information.", False),
+        ("Actually, he is not working now. He's retired.", False),
+        ("He's at the Northgate campus.", False),
+        ("Yeah, what do you want now?", False),
+    ]:
+        check(rw.is_hold_request(_t) == _want,
+              f"hold request: {_want!s:5} for {_t[:40]!r}")
+
+    # The greeting quoted INSIDE the context item must carry the same org and
+    # name as the one the caller was told about. Called bare it fell back to the
+    # defaults, so the banner printed "this is David" while the model was
+    # instructed to open as "Alex" — and it said Alex. The org defaulted the same
+    # way, hidden only because DEFAULT_ORG matched the configured value.
+    _ctx = tpl.build_context(_probe, callback_number="", callback_email="",
+                             org="Acme Health", agent_name="Jordan")
+    _grt = tpl.build_greeting(_probe, org="Acme Health", agent_name="Jordan")
+    check(_grt in _ctx, "context quotes the SAME greeting the caller hears")
+    for _leak in ("Alex", "Definitive Healthcare"):
+        check(_leak not in _ctx,
+              f"context greeting does not fall back to the default {_leak!r}")
+
     # Stacked moves. The 46-word turn asked the caller to repeat themselves and
     # then answered the question it had just said it could not hear — four moves
     # in eighteen seconds. Counted as sentences, which needs no vocabulary: the

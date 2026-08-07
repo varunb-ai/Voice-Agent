@@ -274,6 +274,34 @@ def _sentences(text: str) -> list:
     return [p.replace(_ABBREV_MARK, ".").strip() for p in parts if p.strip()]
 
 
+# Asking for time to go and look something up. Matched by shape — a first-person
+# or please-wait construction plus a checking/waiting word — rather than a list
+# of phrasings, because "ways to ask for a minute" is an open set.
+#
+# An imperfect match is safe in one direction only, which is why a heuristic is
+# acceptable here: a false positive delays the give-up by a turn or two, while a
+# false negative just restores the behaviour we already have.
+_HOLD_REQUEST = re.compile(
+    r"\b(?:(?:let me|i'?ll|i will|i need to|i have to|i'?m going to|gonna)\s+"
+    r"(?:just\s+)?(?:check|look|see|find|ask|grab|pull)"
+    r"|(?:give|gimme)\s+me\s+a\s+(?:minute|moment|sec|second)"
+    r"|(?:can|could|would)\s+you\s+(?:just\s+|please\s+)*(?:wait|hold|hang on)"
+    r"|(?:hold on|hang on|one moment|just a (?:minute|moment|sec|second)"
+    r"|bear with me|one sec))\b", re.I)
+
+
+def is_hold_request(text: str) -> bool:
+    """Is the caller asking for time to go and find the answer?
+
+    This is the opposite of refusing. A live call ended because the give-up
+    directive had already fired, and the caller's very next words were "can you
+    please give me a minute? I just need to check" — the most cooperative thing
+    said on that call. The agent thanked them and hung up while they were on
+    their way to look it up.
+    """
+    return bool(_HOLD_REQUEST.search(text or ""))
+
+
 def _double_ask(text: str) -> bool:
     """Two requests for the same thing inside one turn.
 
@@ -1565,6 +1593,19 @@ async def _oai_to_twilio(
                 if text:
                     ts = datetime.now().strftime("%H:%M:%S")
                     print(f"[{ts}] 👤 CALLER : {text}", flush=True)
+                    # Someone going to look it up has not refused. The give-up
+                    # directive is a one-shot: once sent, the agent escalates on
+                    # its next turn whatever they say in between — and on a live
+                    # call that next turn was "can you please give me a minute?
+                    # I just need to check". It thanked them and hung up.
+                    if is_hold_request(text) and not sess.done:
+                        if sess._give_up_sent or sess._location_asks:
+                            print(f"[Realtime] Caller is going to check — "
+                                  f"give-up cancelled, ask count reset "
+                                  f"(was {sess._location_asks})", flush=True)
+                        sess._give_up_sent = False
+                        sess._give_up_at_turn = None
+                        sess._location_asks = 0
                     # Replace the most recent "[...]" placeholder with real text
                     for i in range(len(sess.turns) - 1, -1, -1):
                         if sess.turns[i].role == "caller" and sess.turns[i].text == "[...]":

@@ -571,7 +571,12 @@ class CallTemplate:
             "",
             "The call has just connected. Open by saying exactly this, then "
             "stop and wait for their reply:",
-            f'"{self.build_greeting(doctor)}"',
+            # Must carry the SAME org and name as the greeting the caller was
+            # told about. Called bare, this fell back to the defaults: the
+            # banner printed "this is David" while the model was instructed to
+            # open as "Alex", and it said Alex. The org defaulted too — hidden
+            # only because DEFAULT_ORG happened to match the configured one.
+            f'"{self.build_greeting(doctor, org=spoken_org, agent_name=agent_name)}"',
         ]
         return "\n".join(lines)
 
