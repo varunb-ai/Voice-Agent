@@ -752,6 +752,35 @@ async def main():
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
 
+    # Stacked moves. The 46-word turn asked the caller to repeat themselves and
+    # then answered the question it had just said it could not hear — four moves
+    # in eighteen seconds. Counted as sentences, which needs no vocabulary: the
+    # banned-phrase list for thinking-narration missed 2 of the 3 wordings
+    # actually used ("let me respond to that for a moment", "let me say that
+    # more clearly"), because "ways to narrate" is an open set, same as cities.
+    import types as _t
+    _mk = lambda r, x: _t.SimpleNamespace(role=r, text=x)
+    _turns = [
+        _mk("agent", "Hi, this is Sarah, calling on behalf of X."),   # greeting, exempt
+        _mk("caller", "Why should I tell you?"),
+        _mk("agent", "Sorry, you're coming through faint — could you say that "
+                     "again? It's a legitimate call. I'm Sarah on the directory "
+                     "team."),
+        _mk("agent", "Got it, thanks — which branch is Dr. Okafor at?"),
+    ]
+    _m = rw.conversation_metrics(_turns)
+    check(_m["piled_turns"] == 1, "a stacked turn is counted", _m["piled_turns"])
+    check(_m["longest_turn_sentences"] == 3, "longest turn measured in sentences",
+          _m["longest_turn_sentences"])
+    # The greeting is a fixed line, not a pile-up, and must not inflate the count.
+    _only_greeting = [_mk("agent", "One. Two. Three.")]
+    check(rw.conversation_metrics(_only_greeting)["piled_turns"] == 0,
+          "the greeting is exempt from the pile-up count")
+    check("ONE MOVE PER TURN" in tpl.instructions,
+          "prompt requires one move per turn")
+    check("NEVER ABOUT IT" in tpl.instructions,
+          "thinking-narration judged by a test, not a phrase list")
+
     # Prompt-echo detection is DERIVED from the text we actually send, not
     # copied by hand. The old list held "forage ai" for days after the
     # organisation was renamed — a duplicated list rots silently every time the

@@ -357,6 +357,16 @@ def conversation_metrics(turns: list) -> dict:
         # ask DETECTOR had. On a live call: "I need the specific branch name or
         # street address where Dr. Okafor sees patients. Which one is it?"
         "double_asks": sum(1 for t in agent if _double_ask(t.text)),
+        # Moves stacked into one turn, counted as sentences and needing no
+        # vocabulary at all — the banned-phrase list for thinking-narration
+        # missed 2 of the 3 wordings actually used, because "ways to narrate"
+        # is an open set. Sentence count is structural and cannot rot.
+        # The greeting is excluded: it is a fixed line, not a pile-up, and it
+        # would otherwise dominate the count.
+        "piled_turns": sum(1 for t in agent[1:] if len(_sentences(t.text)) >= 3),
+        "longest_turn_sentences": max((len(_sentences(t.text)) for t in agent[1:]),
+                                      default=0),
+        "longest_turn_words": max((len(t.text.split()) for t in agent[1:]), default=0),
         "agent_turns": len(agent),
         "caller_turns": len(caller),
         "caller_questions": caller_questions,
@@ -1005,6 +1015,9 @@ class RealtimeSession:
               f"{m['caller_questions']}  ({rate})", flush=True)
         print(f"    asked twice running  {m['back_to_back_asks']}", flush=True)
         print(f"    asked twice in a turn {m['double_asks']}", flush=True)
+        print(f"    turns stacking moves {m['piled_turns']}"
+              f"   (longest {m['longest_turn_sentences']} sentences, "
+              f"{m['longest_turn_words']} words)", flush=True)
         print(f"    repeated sentences   {m['repeated_sentences']}"
               f"{'   <- this is the one that correlates with a bad call' if m['repeated_sentences'] else ''}",
               flush=True)
