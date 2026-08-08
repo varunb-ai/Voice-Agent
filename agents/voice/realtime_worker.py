@@ -721,6 +721,14 @@ class RealtimeSession:
         # Warn the model about a faint line at most once per call.
         self._low_audio_warned: bool = False
         self._repeat_nudged: bool = False
+        # When the agent last stopped talking, and how many times we have
+        # prompted a silent callee. Both greetings now end on a statement rather
+        # than a question, which is the right shape — it hands the turn over —
+        # but it means a callee who simply waits produces no speech, so server
+        # VAD never fires and nothing creates a response. Without a watchdog the
+        # call sits in silence until Twilio times it out.
+        self._agent_quiet_since: Optional[float] = None
+        self._silence_prompts: int = 0
         # RMS of the last utterance, held until its transcript arrives. Low
         # energy alone never means "we cannot hear you" — only low energy with
         # nothing transcribed does.
@@ -1297,6 +1305,8 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                                 name="twilio->oai"),
             asyncio.create_task(_oai_to_twilio(oai_ws, twilio_ws, sess, done_event),
                                 name="oai->twilio"),
+            asyncio.create_task(_silence_watchdog(oai_ws, sess, done_event),
+                                name="silence-watchdog"),
         ]
         try:
             _finished, pending = await asyncio.wait(
@@ -1396,6 +1406,55 @@ async def _twilio_to_oai(
 
 # ── OpenAI → Twilio ───────────────────────────────────────────────────────────
 
+# How long to let a silence run before saying something. A person who has just
+# spoken and got nothing back waits about this long before "hello?".
+_SILENCE_PROMPT_AFTER = 7.0
+_MAX_SILENCE_PROMPTS = 2
+
+
+async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
+                            done_event: asyncio.Event) -> None:
+    """Speak again if the callee never does.
+
+    Both greetings end on a statement now, which is the right shape — it hands
+    the turn over instead of spending the opener on a question nobody answered.
+    But it means a callee who simply waits produces no speech at all, so server
+    VAD never fires, no response is ever created, and nothing in either pump
+    runs again. The call sits silent until Twilio times it out.
+
+    Nothing else can cover this. Every other recovery in this file is triggered
+    by an event — a transcript, a response, a tool call — and the failure here is
+    the absence of events.
+    """
+    while not done_event.is_set():
+        await asyncio.sleep(1.0)
+        quiet_since = sess._agent_quiet_since
+        if sess.done or quiet_since is None or not sess.listen_enabled.is_set():
+            continue
+        if time.time() - quiet_since < _SILENCE_PROMPT_AFTER:
+            continue
+        sess._agent_quiet_since = None          # don't re-fire while it speaks
+        if sess._silence_prompts >= _MAX_SILENCE_PROMPTS:
+            continue
+        sess._silence_prompts += 1
+        print(f"[Realtime] {_SILENCE_PROMPT_AFTER:.0f}s of silence — prompting "
+              f"the callee ({sess._silence_prompts}/{_MAX_SILENCE_PROMPTS})",
+              flush=True)
+        try:
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": (
+                             "(system: they have not said anything since you "
+                             "stopped speaking. Check they are still there in a "
+                             "few words — 'still with me?' — or ask your question "
+                             "again more simply. Say ONE short thing.)")}]},
+            }))
+            await oai_ws.send(json.dumps({"type": "response.create"}))
+        except Exception:
+            return
+
+
 async def _oai_to_twilio(
     oai_ws,
     twilio_ws: WebSocket,
@@ -1437,6 +1496,8 @@ async def _oai_to_twilio(
 
             # ── Caller barge-in: cancel current response immediately ───────
             if event_type == "input_audio_buffer.speech_started":
+                sess._agent_quiet_since = None    # they are talking; stand down
+                sess._silence_prompts = 0
                 _caller_speaking = True
                 _speech_start_pcm_pos = len(sess._caller_pcm)  # mark start of this utterance
                 if sess.done:
@@ -2034,6 +2095,10 @@ async def _oai_to_twilio(
                           f"(cached {c_audio})  out_audio={details_out.get('audio_tokens', 0)}"
                           f"  [{_resp_status}]",
                           flush=True)
+                # The agent has stopped talking; the ball is with the callee. If
+                # they never speak, no VAD event fires and nothing else in this
+                # loop will ever run again.
+                sess._agent_quiet_since = time.time()
                 # Enable caller audio forwarding after first response (greeting) finishes
                 if not sess.listen_enabled.is_set():
                     print("[Realtime] Greeting done — now listening to caller", flush=True)

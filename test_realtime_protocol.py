@@ -403,6 +403,65 @@ async def main():
     print(f"  response.create sent: {len(_s_creates)} (greeting + recovery)")
 
     print("\n" + "=" * 66)
+    print("  SCENARIO 0a — a callee who never speaks must not stall the call")
+    print("=" * 66)
+    # Both greetings now end on a statement, which hands the turn over properly.
+    # But a callee who simply waits produces no speech, so server VAD never
+    # fires, no response is created, and neither pump runs again — the failure
+    # is the ABSENCE of events, which nothing else in this file can see.
+    class _WS:
+        def __init__(self): self.sent = []
+        async def send(self, raw): self.sent.append(json.loads(raw))
+
+    _ws, _done = _WS(), asyncio.Event()
+    _sess = types.SimpleNamespace(
+        done=False, _agent_quiet_since=0.0, _silence_prompts=0,
+        listen_enabled=asyncio.Event())
+    _sess.listen_enabled.set()
+    async def _keep_quiet():
+        """Stand in for the agent speaking and getting nothing back, forever.
+
+        The watchdog clears _agent_quiet_since after prompting so it cannot
+        re-fire while the agent talks; response.done sets it again. Replaying
+        that is what exercises the CAP — without it the timer never rearms and
+        only one prompt ever fires, which would leave the runaway case untested.
+        """
+        for _ in range(6):
+            await asyncio.sleep(0.4)
+            if _sess._agent_quiet_since is None:
+                _sess._agent_quiet_since = 0.0
+
+    with mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
+        _wd = asyncio.create_task(rw._silence_watchdog(_ws, _sess, _done))
+        _rearm = asyncio.create_task(_keep_quiet())
+        await asyncio.sleep(3.2)
+        _done.set()
+        await asyncio.wait_for(_wd, timeout=2)
+        await _rearm
+    _creates = [m for m in _ws.sent if m.get("type") == "response.create"]
+    _nudges = [c["text"] for m in _ws.sent
+               if m.get("type") == "conversation.item.create"
+               for c in m["item"].get("content", []) if c.get("type") == "input_text"]
+    check(len(_creates) >= 1, "silence triggers a response", f"{len(_creates)} sent")
+    check(any("not said anything" in n for n in _nudges),
+          "the model is told the callee has gone quiet")
+    # Capped, or a silent line becomes the agent talking to itself forever.
+    check(_sess._silence_prompts <= rw._MAX_SILENCE_PROMPTS,
+          "silence prompts are capped", _sess._silence_prompts)
+    # And it must stand down the moment they speak.
+    _sess2 = types.SimpleNamespace(done=False, _agent_quiet_since=None,
+                                   _silence_prompts=0,
+                                   listen_enabled=asyncio.Event())
+    _sess2.listen_enabled.set()
+    _ws2, _done2 = _WS(), asyncio.Event()
+    with mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
+        _wd2 = asyncio.create_task(rw._silence_watchdog(_ws2, _sess2, _done2))
+        await asyncio.sleep(1.2)
+        _done2.set()
+        await asyncio.wait_for(_wd2, timeout=2)
+    check(not _ws2.sent, "no prompt while the caller has the turn", len(_ws2.sent))
+
+    print("\n" + "=" * 66)
     print("  SCENARIO 0b — must not hang up on someone going to check")
     print("=" * 66)
     _h_sent, _h_sess = await run_call(script_hold_then_escalate())
