@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import types
@@ -416,6 +417,7 @@ async def main():
     _ws, _done = _WS(), asyncio.Event()
     _sess = types.SimpleNamespace(
         done=False, _agent_quiet_since=0.0, _silence_prompts=0,
+        _response_active=False, turns=[],
         listen_enabled=asyncio.Event())
     _sess.listen_enabled.set()
     async def _keep_quiet():
@@ -450,7 +452,8 @@ async def main():
           "silence prompts are capped", _sess._silence_prompts)
     # And it must stand down the moment they speak.
     _sess2 = types.SimpleNamespace(done=False, _agent_quiet_since=None,
-                                   _silence_prompts=0,
+                                   _silence_prompts=0, _response_active=False,
+                                   turns=[],
                                    listen_enabled=asyncio.Event())
     _sess2.listen_enabled.set()
     _ws2, _done2 = _WS(), asyncio.Event()
@@ -460,6 +463,38 @@ async def main():
         _done2.set()
         await asyncio.wait_for(_wd2, timeout=2)
     check(not _ws2.sent, "no prompt while the caller has the turn", len(_ws2.sent))
+
+    # A response the VAD started in the same tick is already on its way. Sending
+    # a second response.create raises conversation_already_has_active_response,
+    # which the error handler logs and swallows — invisible. _response_active was
+    # a local in _oai_to_twilio and the watchdog runs in a different task, so it
+    # could not see it at all.
+    _ws3, _done3 = _WS(), asyncio.Event()
+    _sess3 = types.SimpleNamespace(done=False, _agent_quiet_since=0.0,
+                                   _silence_prompts=0, _response_active=True,
+                                   turns=[], listen_enabled=asyncio.Event())
+    _sess3.listen_enabled.set()
+    with mock.patch.object(rw, "_SILENCE_PROMPT_FIRST", 0.0), \
+         mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
+        _wd3 = asyncio.create_task(rw._silence_watchdog(_ws3, _sess3, _done3))
+        await asyncio.sleep(1.2)
+        _done3.set()
+        await asyncio.wait_for(_wd3, timeout=2)
+    check(not _ws3.sent,
+          "no response.create while one is already generating", len(_ws3.sent))
+
+    # Two thresholds. Mid-conversation a pause is someone thinking, and seven
+    # seconds of thinking room is right. Straight after the opening line there is
+    # nothing to think about, and seven seconds of dead air on a cold call is
+    # when people hang up.
+    check(rw._SILENCE_PROMPT_FIRST < rw._SILENCE_PROMPT_AFTER,
+          "first silence is given less rope than a mid-call one",
+          f"{rw._SILENCE_PROMPT_FIRST}s vs {rw._SILENCE_PROMPT_AFTER}s")
+    # The cap is for the CALL. Resetting it whenever the caller spoke meant a
+    # callee who says "hello?" and nothing else could be prompted forever.
+    _src = pathlib.Path("agents/voice/realtime_worker.py").read_text(encoding="utf-8")
+    check("sess._silence_prompts = 0" not in _src,
+          "silence budget is never reset mid-call, only at session init")
 
     print("\n" + "=" * 66)
     print("  SCENARIO 0b — must not hang up on someone going to check")
@@ -708,6 +743,20 @@ async def main():
           "transcript contains no injected system directives")
     check(not any(t.role == "caller" and "goodbye now" in t.text for t in sess.turns),
           "transcript contains no injected closing prompt")
+    # This was written when there were TWO injection paths. There are now five —
+    # ask budget, closing, silence watchdog, hold-cancels-escalation, and the
+    # caller-repeated nudge — and a scenario that never triggers one gives only
+    # incidental coverage. So assert against every directive the module can send,
+    # found by reading the source rather than by remembering to add them here.
+    _worker_src = pathlib.Path("agents/voice/realtime_worker.py").read_text(
+        encoding="utf-8")
+    _injected = set(re.findall(r'"\(system: ([a-z]{4,}[a-z ]{6,})', _worker_src))
+    check(len(_injected) >= 4,
+          "found the module's injected directives to check against",
+          f"{len(_injected)} paths")
+    for _phrase in _injected:
+        check(not any(_phrase in t.text for t in sess.turns),
+              f"injected directive stays out of the transcript: {_phrase[:34]!r}")
 
     check(sess.memory.get("branch") == "Northgate Campus", "branch saved to memory")
     check(bool(sess.memory.get("resolved")), "call marked resolved")

@@ -728,7 +728,12 @@ class RealtimeSession:
         # VAD never fires and nothing creates a response. Without a watchdog the
         # call sits in silence until Twilio times it out.
         self._agent_quiet_since: Optional[float] = None
+        # Budget for the WHOLE call, not per silence. Resetting it whenever the
+        # caller spoke meant someone who says "hello?" and nothing else could be
+        # prompted indefinitely — the cap held inside one silence run and not
+        # across the call, which is not what a cap is for.
         self._silence_prompts: int = 0
+        self._response_active: bool = False
         # RMS of the last utterance, held until its transcript arrives. Low
         # energy alone never means "we cannot hear you" — only low energy with
         # nothing transcribed does.
@@ -1406,8 +1411,15 @@ async def _twilio_to_oai(
 
 # ── OpenAI → Twilio ───────────────────────────────────────────────────────────
 
-# How long to let a silence run before saying something. A person who has just
-# spoken and got nothing back waits about this long before "hello?".
+# How long to let a silence run before saying something.
+#
+# Two thresholds, because the two cases are not alike. Mid-conversation, someone
+# who has just been asked something is usually thinking, and seven seconds of
+# thinking room is right — that is the whole reason silence_duration_ms sits at
+# 700ms rather than 360. But straight after the opening line there is nothing to
+# think about: a confused callee reacts in two or three seconds, and seven
+# seconds of dead air on a cold call is the point at which people hang up.
+_SILENCE_PROMPT_FIRST = 3.5
 _SILENCE_PROMPT_AFTER = 7.0
 _MAX_SILENCE_PROMPTS = 2
 
@@ -1427,17 +1439,28 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
     the absence of events.
     """
     while not done_event.is_set():
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5)
         quiet_since = sess._agent_quiet_since
         if sess.done or quiet_since is None or not sess.listen_enabled.is_set():
             continue
-        if time.time() - quiet_since < _SILENCE_PROMPT_AFTER:
+        # Nothing has been said yet, so the greeting is the only thing they have
+        # heard and there is nothing for them to be thinking about.
+        heard_from_them = any(t.role == "caller" and t.text
+                              and t.text != "[...]" for t in sess.turns)
+        wait_for = _SILENCE_PROMPT_AFTER if heard_from_them else _SILENCE_PROMPT_FIRST
+        if time.time() - quiet_since < wait_for:
+            continue
+        # A response the VAD started in the same tick is already on its way, and
+        # a second response.create raises conversation_already_has_active_response
+        # — logged, swallowed, and invisible. Let the real one run.
+        if sess._response_active:
+            sess._agent_quiet_since = None
             continue
         sess._agent_quiet_since = None          # don't re-fire while it speaks
         if sess._silence_prompts >= _MAX_SILENCE_PROMPTS:
             continue
         sess._silence_prompts += 1
-        print(f"[Realtime] {_SILENCE_PROMPT_AFTER:.0f}s of silence — prompting "
+        print(f"[Realtime] {wait_for:.1f}s of silence — prompting "
               f"the callee ({sess._silence_prompts}/{_MAX_SILENCE_PROMPTS})",
               flush=True)
         try:
@@ -1464,7 +1487,10 @@ async def _oai_to_twilio(
     """Forward OpenAI Realtime events to Twilio + handle tool calls."""
     _pending_tools: dict[str, dict] = {}
     _agent_text_buf       = ""
-    _response_active      = False   # True while model is generating audio
+    # _response_active lives on the SESSION, not here: the silence watchdog
+    # runs in a different task and must not create a response while one is
+    # already generating. As a local it was invisible to it.
+    sess._response_active = False
     _response_had_audio   = False   # True if current response included any audio (model spoke)
     _barge_in_pending     = False   # True when we cancelled a response — skip its transcript
     _closing_sent         = False   # True after we send closing response.create — wait for its response.done
@@ -1497,16 +1523,15 @@ async def _oai_to_twilio(
             # ── Caller barge-in: cancel current response immediately ───────
             if event_type == "input_audio_buffer.speech_started":
                 sess._agent_quiet_since = None    # they are talking; stand down
-                sess._silence_prompts = 0
                 _caller_speaking = True
                 _speech_start_pcm_pos = len(sess._caller_pcm)  # mark start of this utterance
                 if sess.done:
                     continue  # don't interrupt the closing farewell
-                if _response_active and not _barge_in_pending:
+                if sess._response_active and not _barge_in_pending:
                     # Only cancel once per active response — prevents inflation
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] ✋ BARGE-IN  : caller interrupted agent", flush=True)
                     _barge_in_pending = True
-                    _response_active  = False
+                    sess._response_active = False
                     sess.agent_speaking = False
                     # Flush whatever agent audio arrived before the cancel
                     if _current_response_pcm and _current_response_start is not None:
@@ -1604,7 +1629,7 @@ async def _oai_to_twilio(
                 delta = msg.get("delta", "")
                 if delta:
                     sess.agent_speaking  = True
-                    _response_active     = True
+                    sess._response_active = True
                     _response_had_audio  = True
                 if delta and sess.stream_sid:
                     try:
@@ -1984,7 +2009,7 @@ async def _oai_to_twilio(
 
             # ── Response done: extract token usage + check resolution ────
             elif event_type == "response.done":
-                _response_active    = False
+                sess._response_active = False
                 _response_spoke     = _response_had_audio
                 _response_had_audio = False   # reset for next response
                 sess._responses    += 1
