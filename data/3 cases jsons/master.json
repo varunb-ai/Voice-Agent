@@ -602,5 +602,19 @@
     "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
     "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260819-2006-7cd7.wav",
     "json_path": "data/3 cases jsons/call-20260819-2006-7cd7.json"
+  },
+  {
+    "call_id": "call-20260819-2044-568a",
+    "time": "2026-08-19T20:44:37.605980",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": "Mission Bay Clinic, 1825 4th Street",
+    "resolved": true,
+    "grounding": "verified against caller transcript",
+    "duration_seconds": 88,
+    "cost_usd": 0.164706,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Mission Bay Clinic, 1825 4th Street.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260819-2044-568a.wav",
+    "json_path": "data/3 cases jsons/call-20260819-2044-568a.json"
   }
 ]

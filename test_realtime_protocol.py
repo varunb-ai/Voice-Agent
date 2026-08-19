@@ -552,6 +552,70 @@ def script_barge_in():
     ]
 
 
+def script_double_spoken_item(second_text: str = "Sure, no rush."):
+    """ONE response that speaks the same short line twice — call-20260819-2044.
+
+    The callee asked for a minute to look something up and heard "Sure, no
+    rush. Sure, no rush." One response.done, one usage line, 2.85s of audio,
+    and two `response.output_audio_transcript.done` events with identical text.
+    Nothing in the codebase asked twice: the hold branch only stands the
+    watchdog down, and a second response.create would have produced a second
+    response.done. The model emitted two assistant items and both were spoken.
+
+    The item_id is the only thing that separates them while the audio can still
+    be stopped — the transcript arrives after the deltas are already on the
+    wire.
+    """
+    chunk = _b64_silence(600)
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, this is David..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Okay, alright, give me a minute, let me pull that up."},
+        {"type": "response.created"},
+        # First spoken item — this one the caller is meant to hear.
+        {"type": "response.output_audio.delta", "delta": chunk, "item_id": "item_one"},
+        {"type": "response.output_audio.delta", "delta": chunk, "item_id": "item_one"},
+        {"type": "response.output_audio_transcript.done", "item_id": "item_one",
+         "transcript": "Sure, no rush."},
+        # Second spoken item, same response, same words.
+        {"type": "response.output_audio.delta", "delta": chunk, "item_id": "item_two"},
+        {"type": "response.output_audio.delta", "delta": chunk, "item_id": "item_two"},
+        {"type": "response.output_audio_transcript.done", "item_id": "item_two",
+         "transcript": second_text},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
+def script_repeat_across_responses():
+    """The same short line spoken in two SEPARATE responses.
+
+    Distinct from script_double_spoken_item: both of these really are heard by
+    the caller, so both are turns and both must survive into the artifact. The
+    transcript cleanup in save() collapsed them — "Sure, no rush." is three
+    words, under the <=4-word fragment threshold, so the merge replaced the
+    pair with the second one and the duplicate-drop below would have removed it
+    anyway. Both rules were written for a barge-in logging double-fire and
+    cannot tell that from the model actually saying it twice.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, this is David..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Hang on, let me pull that up."},
+        {"type": "response.output_audio_transcript.done", "item_id": "r1",
+         "transcript": "Sure, no rush."},
+        {"type": "response.done", "response": usage()},
+        {"type": "response.output_audio_transcript.done", "item_id": "r2",
+         "transcript": "Sure, no rush."},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
 def script_invalid_branch():
     """A bare city must be rejected by save_branch and the call must continue."""
     return HANDSHAKE + [
@@ -2230,6 +2294,139 @@ async def main():
         ms = t.get("audio_end_ms")
         check(isinstance(ms, int) and ms >= 0,
               f"audio_end_ms is a sane offset ({ms}ms)")
+
+    # ── One spoken item per response ─────────────────────────────────────────
+    print("\n" + "=" * 66)
+    print("  SCENARIO 6b — the model speaks twice inside ONE response")
+    print("=" * 66)
+    _d_out = {}
+    _d_sent, _d_sess = await run_call(script_double_spoken_item(), out=_d_out)
+    _d_media = [m for m in _d_out["twilio"].sent if m.get("event") == "media"]
+    # Four deltas arrived, two per item. Only the first item's may be forwarded.
+    check(len(_d_media) == 2,
+          f"only the first item's audio reached the caller "
+          f"({len(_d_media)} of 4 deltas forwarded)",
+          "every delta forwarded means the callee hears it twice, which is "
+          "what call-20260819-2044 sounded like")
+    _d_agent = [t.text for t in _d_sess.turns if t.role == "agent"]
+    check(_d_agent.count("Sure, no rush.") == 1,
+          f"the muted item is not recorded as a turn ({_d_agent.count('Sure, no rush.')}x)",
+          "a turn nobody heard must not reach the guards or the metrics")
+    # Reply latency: measured from the caller stopping to the agent's first
+    # sound. Only the greeting was ever timed, so "the agent takes a while to
+    # answer" had no number on it for every turn after the first. Four audio
+    # deltas arrive here but they are ONE reply — the measurement is taken at
+    # the first and the clock is cleared, so it must not record four.
+    check(len(_d_sess.reply_latencies) == 1,
+          f"one reply latency recorded for one reply "
+          f"({len(_d_sess.reply_latencies)})",
+          "not cleared means every delta of every turn records a sample and "
+          "the median is meaningless")
+    check(all(x >= settings.realtime_silence_ms / 1000.0
+              for x in _d_sess.reply_latencies),
+          "the VAD silence window is counted in, not hidden",
+          "the caller waits through it too — it starts when they stop "
+          "talking, not when OpenAI notices")
+    # A turn that never came is not a slow reply, it is the silence watchdog's
+    # failure, and letting it into this list would drag the median somewhere
+    # no caller experienced.
+    _before = len(_d_sess.reply_latencies)
+    _d_sess.note_reply_latency(3600.0)
+    _d_sess.note_reply_latency(-1.0)
+    _d_sess.note_reply_latency(2.4)
+    check(len(_d_sess.reply_latencies) == _before + 1
+          and _d_sess.reply_latencies[-1] == 2.4,
+          "absurd gaps are rejected, a real one is kept",
+          f"list grew by {len(_d_sess.reply_latencies) - _before}, expected 1")
+    check(_d_sess.dropped_second_items == ["Sure, no rush."],
+          f"what was suppressed is kept for review ({_d_sess.dropped_second_items})",
+          "a guard that fires invisibly cannot be checked after the call")
+    # The rule is about the SECOND ITEM, not about the words. "Of course. Of
+    # course, take your time." is the same defect with different text, and a
+    # text-equality guard would let it straight through — which is why this
+    # fires on item_id and never reads the transcript.
+    _v_out = {}
+    _v_sent, _v_sess = await run_call(
+        script_double_spoken_item(second_text="Of course, take your time."),
+        out=_v_out)
+    check(len([m for m in _v_out["twilio"].sent if m.get("event") == "media"]) == 2,
+          "a DIFFERENT second sentence is dropped too",
+          "the trigger is a second spoken item, not repeated words")
+    check(_v_sess.dropped_second_items == ["Of course, take your time."],
+          f"and it is recorded as what was suppressed "
+          f"({_v_sess.dropped_second_items})")
+
+    # ── Repeats must survive into the artifact ───────────────────────────────
+    print("\n" + "=" * 66)
+    print("  METRICS — a verbatim repeat must not be tidied away")
+    print("=" * 66)
+    _rep = [
+        rw.TranscriptTurn(role="agent", text="Hi, this is David.", timestamp="20:45:29"),
+        rw.TranscriptTurn(role="caller", text="Give me a minute.", timestamp="20:45:30"),
+        rw.TranscriptTurn(role="agent", text="Sure, no rush.", timestamp="20:45:31"),
+        rw.TranscriptTurn(role="agent", text="Sure, no rush.", timestamp="20:45:31"),
+    ]
+    _m = rw.conversation_metrics(_rep)
+    check(_m["back_to_back_repeats"] == 1,
+          f"three-word verbatim repeat is counted ({_m['back_to_back_repeats']})",
+          "repeated_sentences has a >=4-word floor, so 'Sure, no rush.' scored "
+          "zero on the call where the live detector had already flagged it")
+    # "Consecutive" means consecutive AGENT turns — a caller turn in between
+    # does not excuse it. This deliberately matches the live 🔁 detector, which
+    # compares against the last agent turn and ignores what the caller said in
+    # between. The metric disagreeing with the console marker is how the
+    # call-20260819-2044 repeat came to be flagged live and scored zero after.
+    _apart = [
+        rw.TranscriptTurn(role="agent", text="Got it.", timestamp="20:45:01"),
+        rw.TranscriptTurn(role="caller", text="One second.", timestamp="20:45:05"),
+        rw.TranscriptTurn(role="agent", text="Got it.", timestamp="20:45:20"),
+    ]
+    check(rw.conversation_metrics(_apart)["back_to_back_repeats"] == 1,
+          "a caller turn in between does not excuse a verbatim repeat",
+          "the live detector fires here, so the metric must agree with it")
+    # But a different agent turn in between DOES break the run: coming back to
+    # the same phrasing later in a call is ordinary speech.
+    _broken = [
+        rw.TranscriptTurn(role="agent", text="Got it.", timestamp="20:45:01"),
+        rw.TranscriptTurn(role="agent", text="Which branch is that?", timestamp="20:45:05"),
+        rw.TranscriptTurn(role="agent", text="Got it.", timestamp="20:45:20"),
+    ]
+    check(rw.conversation_metrics(_broken)["back_to_back_repeats"] == 0,
+          "the same phrase with another turn between is NOT counted",
+          "otherwise every 'Got it.' in a call reads as a defect")
+    # Punctuation and case must not decide it — the same complaint as
+    # _norm_clause was written for.
+    _punct = [
+        rw.TranscriptTurn(role="agent", text="Sure, no rush.", timestamp="20:45:31"),
+        rw.TranscriptTurn(role="agent", text="sure, no rush", timestamp="20:45:31"),
+    ]
+    check(rw.conversation_metrics(_punct)["back_to_back_repeats"] == 1,
+          "case and trailing punctuation do not hide a repeat")
+
+    # End to end: the repeat must reach the SAVED artifact. The metric above is
+    # computed on the cleaned-up transcript, so a cleanup that deletes the pair
+    # makes a correct metric read zero — which is precisely what happened.
+    # Only call-*.json — the same directory also holds the rolled-up master
+    # index, which is a LIST, and picking it up made this blow up on a
+    # TypeError instead of asserting anything.
+    for _f in _ARTEFACTS.glob("call-*.json"):
+        _f.unlink()
+    _rr_sent, _rr_sess = await run_call(script_repeat_across_responses())
+    _saved = sorted(_ARTEFACTS.glob("call-*.json"))
+    check(bool(_saved), "the call wrote an artifact to read back")
+    if _saved:
+        _rec = json.loads(_saved[-1].read_text(encoding="utf-8"))
+        _texts = [t["text"] for t in _rec["transcript"] if t["role"] == "agent"]
+        check(_texts.count("Sure, no rush.") == 2,
+              f"both spoken repeats survive the transcript cleanup "
+              f"({_texts.count('Sure, no rush.')} of 2)",
+              "the <=4-word fragment merge collapsed them, so the artifact "
+              "showed one turn on a call where the console printed 🔁")
+        check(_rec["conversation"]["back_to_back_repeats"] == 1,
+              f"and the saved metric counts it "
+              f"({_rec['conversation']['back_to_back_repeats']})",
+              "an instrument that reads zero on the fault it exists to count "
+              "is worse than no instrument, because it is believed")
 
     print("\n" + "=" * 66)
     print("  DETECTORS — guard against silently matching nothing")

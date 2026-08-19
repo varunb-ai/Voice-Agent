@@ -3,17 +3,16 @@
     "doctor_name": "Dr. Jane Okafor",
     "hospital_name": "Northside Medical Group",
     "specialization": null,
-    "branch": null,
-    "city": null,
-    "source": "website",
-    "status": "missing_branch",
+    "branch": "Mission Bay Clinic, 1825 4th Street",
+    "city": "San Francisco",
+    "source": "voice",
+    "status": "partially_verified",
     "status_before": "discovered",
     "confidence": 0,
     "missing_for_complete": [
-      "specialization",
-      "branch"
+      "specialization"
     ],
-    "enriched_at": null,
-    "enriched_by": "call-20260819-2006-7cd7"
+    "enriched_at": "2026-08-19T15:16:05.868317+00:00",
+    "enriched_by": "call-20260819-2044-568a"
   }
 ]

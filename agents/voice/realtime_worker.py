@@ -802,6 +802,19 @@ def conversation_metrics(turns: list) -> dict:
                     clause_seen[key] = clause_seen.get(key, 0) + 1
     repeated += sum(n - 1 for n in clause_seen.values() if n > 1)
 
+    # Adjacent agent turns that are word-for-word identical.
+    #
+    # Separate from `repeated_sentences` because it needs no length floor. The
+    # ≥4-word floor above is there so "Got it." said in six different turns is
+    # not counted as five repetitions — across a call, a short stock phrase
+    # recurring is normal speech. Back to back it is not: "Sure, no rush. Sure,
+    # no rush." has no innocent reading, and the floor was the only reason
+    # call-20260819-2044 scored zero on a repeat the live detector had already
+    # flagged in the console.
+    back_to_back_repeats = sum(
+        1 for a, b in zip(agent, agent[1:])
+        if _norm_clause(a.text) and _norm_clause(a.text) == _norm_clause(b.text))
+
     # Denominators, so counts can be compared across calls of different
     # difficulty. A hostile caller who answers nothing gives the agent six
     # chances to staple; a cooperative one gives it one. Raw counts make the
@@ -839,6 +852,7 @@ def conversation_metrics(turns: list) -> dict:
         "staple_rate": round(stapled / caller_questions, 2) if caller_questions else None,
         "back_to_back_asks": back_to_back,
         "repeated_sentences": repeated,
+        "back_to_back_repeats": back_to_back_repeats,
     }
 
 
@@ -1746,6 +1760,20 @@ class RealtimeSession:
         # When the audio already handed to Twilio finishes playing, in
         # time.monotonic() terms. 0.0 means nothing is queued.
         self._playback_ends_at: float = 0.0
+        # Assistant item ids whose audio was withheld because they were a
+        # SECOND spoken item inside one response. Held on the session rather
+        # than in the loop so the transcript handler — a separate function —
+        # knows not to print or record a turn the caller never heard.
+        self._muted_items: set[str] = set()
+        # When the caller stopped speaking (monotonic), cleared by the first
+        # audio delta of the reply. See note_reply_latency.
+        self._caller_stopped_at: Optional[float] = None
+        # Every measured gap between a caller finishing and the agent's first
+        # sound, in seconds. One number per turn beats one impression per call.
+        self.reply_latencies: list[float] = []
+        # What those dropped items would have said, for the artifact. A guard
+        # that fires invisibly cannot be reviewed after the call.
+        self.dropped_second_items: list[str] = []
         # Backchannels. When the caller's current utterance began (None if they
         # are not speaking), whether we already made a noise during it, and the
         # last clip used so the same one is not repeated.
@@ -1812,6 +1840,16 @@ class RealtimeSession:
         rms, n = self._pending_utterance_rms, self._utterance_segments
         self._pending_utterance_rms, self._utterance_segments = None, 0
         return rms, n
+
+    def note_reply_latency(self, seconds: float) -> None:
+        """One measured caller-stops → agent-speaks gap.
+
+        Bounded because a stray measurement would poison the median that goes
+        in the artifact: anything past 30s is not a reply latency, it is a turn
+        that never came, and the silence watchdog owns that failure.
+        """
+        if 0.0 < seconds < 30.0:
+            self.reply_latencies.append(seconds)
 
     def add_turn(self, role: str, text: str,
                  audio_rms: Optional[float] = None) -> None:
@@ -2094,6 +2132,27 @@ class RealtimeSession:
                 else:
                     gap = 99
 
+                # A verbatim repeat is the DEFECT, not noise — keep both.
+                #
+                # call-20260819-2044: the agent said "Sure, no rush." twice in
+                # one breath, the live detector printed 🔁 REPEATED SENTENCE,
+                # and the saved artifact showed one turn and
+                # `repeated sentences 0`. The fragment merge below fired first
+                # ("Sure, no rush." is 3 words, under the ≤4 fragment
+                # threshold) and replaced the pair with a single turn, and the
+                # duplicate-drop further down would have removed it anyway.
+                #
+                # Both rules were written for a LOGGING artifact — the same
+                # turn recorded twice by a barge-in double-fire. They cannot
+                # tell that from the model genuinely saying it twice, so they
+                # deleted the evidence for the one case where it mattered. An
+                # instrument that reads zero on the fault it exists to count is
+                # worse than no instrument, because it is believed.
+                if (prev.role == "agent" == turn.role
+                        and _norm_clause(prev.text) == _norm_clause(turn.text)):
+                    merged.append(turn)
+                    continue
+
                 # Merge consecutive agent turns within 5s (fragment collapsed into next real turn)
                 if prev.role == "agent" == turn.role and gap <= 5:
                     prev_words = len(prev.text.strip().split())
@@ -2131,10 +2190,10 @@ class RealtimeSession:
                     )
                     continue
 
-                # Drop duplicate agent turns (same text within 3s)
-                if (prev.role == "agent" == turn.role and gap <= 3
-                        and prev.text.strip() == turn.text.strip()):
-                    continue
+                # (The duplicate-agent-turn drop that used to live here is gone
+                #  — see the keep-both rule above. It is unreachable now
+                #  regardless, since identical adjacent agent turns are settled
+                #  before either merge runs.)
 
             merged.append(turn)
 
@@ -2174,6 +2233,20 @@ class RealtimeSession:
             # someone happened to still have open. A guard that removes a
             # caller's words has to leave a trace of what it removed.
             "suppressed_echoes": self.suppressed_echoes or None,
+            # Second-spoken-item audio withheld before it reached the caller.
+            # Non-null here means the model tried to talk over itself.
+            "dropped_second_items": self.dropped_second_items or None,
+            # Measured caller-stops → agent-speaks gaps, in seconds. The median
+            # is the number to compare across calls; the max is the one the
+            # callee remembers.
+            "reply_latency": {
+                "turns":  len(self.reply_latencies),
+                "median": round(median(self.reply_latencies), 2)
+                          if self.reply_latencies else None,
+                "worst":  round(max(self.reply_latencies), 2)
+                          if self.reply_latencies else None,
+                "vad_hold_s": round(settings.realtime_silence_ms / 1000.0, 2),
+            } if self.reply_latencies else None,
             # Countable conversational failures. Prose rules against these have
             # been ignored across three prompt versions; measuring them makes
             # the next edit evaluable instead of impressionistic.
@@ -2330,6 +2403,20 @@ class RealtimeSession:
         print(f"    repeated sentences   {m['repeated_sentences']}"
               f"{'   <- this is the one that correlates with a bad call' if m['repeated_sentences'] else ''}",
               flush=True)
+        print(f"    said twice in a row  {m['back_to_back_repeats']}"
+              f"{'   <- word for word, back to back' if m['back_to_back_repeats'] else ''}",
+              flush=True)
+        if self.dropped_second_items:
+            print(f"    2nd items muted      {len(self.dropped_second_items)}"
+                  f"   (would have talked over itself)", flush=True)
+        if self.reply_latencies:
+            _vad = settings.realtime_silence_ms / 1000.0
+            print(f"    reply gap            "
+                  f"median {median(self.reply_latencies):.2f}s, "
+                  f"worst {max(self.reply_latencies):.2f}s "
+                  f"({len(self.reply_latencies)} turns)", flush=True)
+            print(f"      of which VAD hold  {_vad:.2f}s — the rest is "
+                  f"inference plus the round trip", flush=True)
         # Is the hint-echo guard's benefit-of-the-doubt exemption a corner case
         # or the common path? Only counting answers that.
         _meas = sum(1 for t in self.turns if t.role == "caller"
@@ -2467,7 +2554,7 @@ def _sweep_prewarmed() -> None:
     """Close sessions whose call was never answered."""
     now = time.time()
     for sid in [s for s, (_, _, t) in _PREWARMED.items() if now - t > _PREWARM_TTL_S]:
-        conn, _ws, _ = _PREWARMED.pop(sid)
+        conn, _, _ = _PREWARMED.pop(sid)
         asyncio.create_task(_close_quietly(conn))
         log.info("[Realtime] discarded a stale pre-warmed session for %s", sid)
 
@@ -3555,6 +3642,18 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         _barge_in_pending = False
         _agent_text_buf = ""
         return _agent_text_buf, _barge_in_pending
+    # A second spoken item in the same response, whose audio was withheld in
+    # the delta handler. The caller never heard it, so it is not a turn: the
+    # guards must not react to it, the metrics must not count it, and the
+    # transcript must not claim it was said. Kept out of the way in
+    # dropped_second_items so the artifact still shows what was suppressed.
+    _item = msg.get("item_id") or ""
+    if _item and _item in sess._muted_items:
+        _dropped = (msg.get("transcript") or _agent_text_buf).strip()
+        if _dropped:
+            sess.dropped_second_items.append(_dropped)
+            print(f"[Realtime]   ^ it would have said: {_dropped!r}", flush=True)
+        return "", _barge_in_pending
     text = (msg.get("transcript") or _agent_text_buf).strip()
     if text:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -3843,6 +3942,11 @@ async def _oai_to_twilio(
     # id of the assistant item currently being spoken — needed to truncate it
     # to what the caller actually heard when they interrupt
     _current_item_id: Optional[str] = None
+    # The FIRST assistant item in this response that produced audio. A phone
+    # turn is one spoken item; a second one is the agent talking to itself.
+    # Distinct from _current_item_id, which follows what is playing and is what
+    # a barge-in truncates.
+    _spoken_item_id: Optional[str] = None
     # response ids already accounted for, so a repeated response.done cannot
     # double-count its tokens into the cost figure
     _counted_responses: set[str] = set()
@@ -3921,6 +4025,10 @@ async def _oai_to_twilio(
                 if _caller_speaking and sess.listen_enabled.is_set():
                     _caller_speaking = False
                     sess._caller_speaking_since = None
+                    # Start the clock on the reply. Only the greeting was ever
+                    # timed, so "the agent takes a while to answer" has been an
+                    # impression with no number attached on every call since.
+                    sess._caller_stopped_at = time.monotonic()
                     # Placeholder — filled in by the session's own inline
                     # transcription when conversation.item.input_audio_
                     # transcription.completed arrives. Nothing else fills it:
@@ -4037,6 +4145,45 @@ async def _oai_to_twilio(
             # gpt-realtime-2 uses response.output_audio.delta (not response.audio.delta)
             elif event_type == "response.output_audio.delta":
                 delta = msg.get("delta", "")
+
+                # ── One spoken item per response ───────────────────────────
+                # call-20260819-2044: ONE response, ONE response.done, 2.85s of
+                # audio, and two `response.output_audio_transcript.done` events
+                # both reading "Sure, no rush." The callee heard it twice in a
+                # single breath. Same shape as the "of course, of course" turn
+                # the day before.
+                #
+                # Nothing in this codebase asked for it twice — the hold branch
+                # only stands the watchdog down, and a second response.create
+                # would have produced a second response.done. The model emitted
+                # two assistant items in one response and both were spoken.
+                #
+                # Every guard downstream of this is powerless here: the
+                # transcript arrives after the audio, so 🔁 REPEATED SENTENCE
+                # can only narrate what the callee already heard. The audio
+                # deltas are where it can still be stopped, and they are also
+                # where the two items are distinguishable — item_id changes.
+                #
+                # Dropping rather than cancelling is deliberate. response.cancel
+                # is protocol state that races with response.done, and the
+                # remaining tokens are a fraction of a second either way. Not
+                # forwarding costs nothing and cannot desynchronise anything.
+                #
+                # This does not fire on a tool call followed by speech: a
+                # function_call item emits no audio deltas, so the first item
+                # seen here is the spoken one.
+                _delta_item = msg.get("item_id") or ""
+                if delta and _delta_item:
+                    if _spoken_item_id is None:
+                        _spoken_item_id = _delta_item
+                    elif _delta_item != _spoken_item_id:
+                        if _delta_item not in sess._muted_items:
+                            sess._muted_items.add(_delta_item)
+                            print(f"[Realtime] 🔇 second spoken item in one "
+                                  f"response — dropping it before it reaches "
+                                  f"the caller", flush=True)
+                        delta = ""
+
                 if delta:
                     sess.agent_speaking  = True
                     sess._response_active = True
@@ -4066,6 +4213,23 @@ async def _oai_to_twilio(
                                 print(f"[Realtime]   ^ that is dead air on the "
                                       f"callee's end before the greeting starts",
                                       flush=True)
+                        # Every other turn. The wait the caller actually feels
+                        # starts when they stop talking, not when OpenAI's VAD
+                        # notices: the silence window elapses first and is part
+                        # of the gap, so it is added back rather than hidden.
+                        # Splitting it out is the point — the window is a knob
+                        # we own (realtime_silence_ms) and the rest is inference
+                        # plus the round trip to a US datacentre, which is not.
+                        elif sess._caller_stopped_at is not None:
+                            _after_vad = time.monotonic() - sess._caller_stopped_at
+                            sess._caller_stopped_at = None
+                            _vad = settings.realtime_silence_ms / 1000.0
+                            _felt = _vad + _after_vad
+                            sess.note_reply_latency(_felt)
+                            print(f"[Realtime] Reply {_felt:.2f}s after the "
+                                  f"caller stopped ({_vad:.2f}s VAD hold + "
+                                  f"{_after_vad:.2f}s think/round-trip)",
+                                  flush=True)
                         twilio_payload = (delta if _passthrough_enabled()
                                           else _convert_oai_to_twilio(delta))
                         await twilio_ws.send_text(json.dumps({
@@ -4245,6 +4409,7 @@ async def _oai_to_twilio(
                     _playback_remaining = 0.0
                 _first_delta_sent_at = None
                 _current_item_id = None
+                _spoken_item_id = None
                 _samples_this_response = 0
                 asyncio.create_task(_end_speaking_gate(sess, _echo_cooldown))
                 # Account each response's tokens ONCE. A live call logged the
