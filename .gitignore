@@ -28,3 +28,17 @@ data/3 cases voice/*.mp3
 
 # Stray editor/patch temp files
 *.tmp.*
+
+# ── Piper TTS voice models ───────────────────────────────────────────────────
+# ~345 MB of redistributable model weights, used only by the CLASSIC pipeline
+# (USE_REALTIME=false). They were committed in the root commit and every one of
+# the 84 commits carried them, which made the repo unpushable: GitHub rejects
+# any file over 100 MB and two of these are 115 MB and 109 MB. Purged from
+# history 2026-08-19 (320 MB -> 1.9 MB).
+#
+# They are not source. Piper hosts them, so fetch rather than commit:
+#   https://huggingface.co/rhasspy/piper-voices
+# Drop the .onnx and matching .onnx.json into data/voices/. See
+# agents/voice/tts_local.py, which looks them up by name there.
+data/voices/*.onnx
+data/voices/*.onnx.json
