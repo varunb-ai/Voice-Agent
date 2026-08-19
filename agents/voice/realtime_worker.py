@@ -1785,6 +1785,14 @@ class RealtimeSession:
         # Set when response.create for the greeting is sent; cleared once the
         # first audio delta arrives, so we measure the callee's dead air.
         self._greeting_requested_at: Optional[float] = None
+        # time.monotonic() when Twilio's /answer webhook fired — the pickup.
+        # Set by handle_realtime; None when the caller could not supply it.
+        self._answered_at: Optional[float] = None
+        # Seconds from pickup to the first sound the callee heard. THE number
+        # the question "why does it take so long to say hello" is about, and
+        # the one nothing measured: the only greeting figure this project had
+        # started its clock at our own response.create, well after the pickup.
+        self.pickup_to_greeting_s: Optional[float] = None
         # Warn the model about a faint line at most once per call.
         self._low_audio_warned: bool = False
         self._repeat_nudged: bool = False
@@ -2377,6 +2385,9 @@ class RealtimeSession:
             "dropped_second_items": self.dropped_second_items or None,
             # Why any response failed. Non-null means dead air with a cause.
             "response_failures": self.response_failures or None,
+            # Pickup to first sound, in seconds. The figure the callee
+            # experiences; None when /answer could not be timed.
+            "pickup_to_greeting_s": self.pickup_to_greeting_s,
             # Measured caller-stops → agent-speaks gaps, in seconds. The median
             # is the number to compare across calls; the max is the one the
             # callee remembers.
@@ -2550,6 +2561,10 @@ class RealtimeSession:
         if self.dropped_second_items:
             print(f"    2nd items muted      {len(self.dropped_second_items)}"
                   f"   (would have talked over itself)", flush=True)
+        if self.pickup_to_greeting_s is not None:
+            print(f"    pickup -> greeting   {self.pickup_to_greeting_s:.2f}s"
+                  f"{'   <- dead air before the agent says anything' if self.pickup_to_greeting_s > 3 else ''}",
+                  flush=True)
         if self.response_failures:
             print(f"    responses failed     {len(self.response_failures)}"
                   f"   <- each one is dead air on the line", flush=True)
@@ -2727,9 +2742,18 @@ def take_prewarmed(call_sid: str) -> Optional[tuple]:
     return conn, ws
 
 
-async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -> None:
-    """Bridge Twilio WebSocket ↔ OpenAI Realtime API for a single call."""
+async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor,
+                          answered_at: Optional[float] = None) -> None:
+    """Bridge Twilio WebSocket ↔ OpenAI Realtime API for a single call.
+
+    ``answered_at`` is time.monotonic() at the /answer webhook — the moment
+    Twilio says the callee picked up. Optional because the caller may not have
+    it (the test harness does not), and a missing value simply means the
+    pickup-to-greeting figure is not reported rather than a wrong one being
+    reported.
+    """
     sess     = RealtimeSession(call_sid, doctor)
+    sess._answered_at = answered_at
     template = get_template(settings.call_template)
 
     # Never let configured settings be silently ignored — someone set them for a
@@ -4442,6 +4466,20 @@ async def _oai_to_twilio(
                             sess._greeting_requested_at = None
                             print(f"[Realtime] First audio {gap:.2f}s after "
                                   f"response.create", flush=True)
+                            # The figure the callee actually experiences. The
+                            # line above starts its clock at OUR request, which
+                            # is after /answer, after the media WebSocket, and
+                            # after Twilio's stream-start handshake — so it can
+                            # read 1.08s on a call that felt like ten seconds
+                            # of nothing, and did.
+                            if sess._answered_at is not None:
+                                _pu = time.monotonic() - sess._answered_at
+                                sess.pickup_to_greeting_s = round(_pu, 2)
+                                _setup = max(0.0, _pu - gap)
+                                print(f"[Realtime] 📞 Greeting {_pu:.2f}s after "
+                                      f"they picked up ({_setup:.2f}s Twilio "
+                                      f"setup + {gap:.2f}s to first audio)",
+                                      flush=True)
                             if gap > 2.0:
                                 print(f"[Realtime]   ^ that is dead air on the "
                                       f"callee's end before the greeting starts",

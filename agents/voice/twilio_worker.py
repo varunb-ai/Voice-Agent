@@ -501,6 +501,17 @@ _call_id_by_sid: dict[str, str]    = {}   # CallSid → call_id for recording fi
 # realtime path builds no classic _Session. Popped when the media stream opens.
 _pending_realtime_doctor: dict[str, Doctor] = {}
 
+# When Twilio told us the callee picked up, per CallSid (time.monotonic()).
+#
+# "First audio 1.08s after response.create" was the only greeting figure this
+# project had, and it starts the clock at OUR request — after /answer, after
+# the media WebSocket is opened, after Twilio's stream-start handshake. The
+# question actually being asked is "how long between them pressing answer and
+# hearing a voice", and nothing measured it, so the pre-warm's effect on it was
+# never established either way. /answer fires the instant the call is answered,
+# which is as close to the pickup as this side of the wire can get.
+_answered_at: dict[str, float] = {}
+
 # CallSids whose Twilio Media Stream actually opened. This is the ONLY registry
 # both call paths write, which is the whole reason it exists: /status used to
 # ask `csid in _sessions` to decide whether anyone had spoken to the agent, but
@@ -613,6 +624,7 @@ async def answer(request: Request):
         # and the session was discarded at /stream anyway. realtime_worker owns
         # its own RealtimeSession, created when the media stream opens.
         _pending_realtime_doctor[csid] = doc
+        _answered_at[csid] = time.monotonic()
         log.info("Call answered (realtime): %s", csid)
     else:
         sess = _Session(csid, doc)
@@ -689,6 +701,9 @@ async def status_callback(request: Request):
         # _call_id_by_sid is left in place — /recording_ready fires after this
         # and needs it to name the MP3; that handler pops it.
         _pending_realtime_doctor.pop(csid, None)
+        # /stream pops this on a normal call; this is the unanswered path, where
+        # /stream never runs and the entry would otherwise be immortal.
+        _answered_at.pop(csid, None)
         # Read above, discarded here — a registry that is only ever added to is
         # a leak in a batch runner, which is the stated direction for this.
         _media_opened.discard(csid)
@@ -790,7 +805,8 @@ async def media_stream(ws: WebSocket, call_sid: str):
             return
         from agents.voice.realtime_worker import handle_realtime
         try:
-            await handle_realtime(ws, call_sid, doctor)
+            await handle_realtime(ws, call_sid, doctor,
+                                  answered_at=_answered_at.pop(call_sid, None))
         except Exception as e:
             log.error("[Realtime] Call failed: %s", e, exc_info=True)
             try:

@@ -153,7 +153,7 @@ def usage(text_in=2000, cached=1887, audio_in=400, audio_out=800):
 _ARTEFACTS = pathlib.Path(tempfile.gettempdir()) / "realtime-protocol-test"
 
 
-async def run_call(script, out=None, connect_failures=0):
+async def run_call(script, out=None, connect_failures=0, answered_at=None):
     """Run one scripted call, return (messages_sent_to_oai, session_memory).
 
     ``out`` is an optional dict that receives the FakeTwilio under key
@@ -217,7 +217,8 @@ async def run_call(script, out=None, connect_failures=0):
                         hospital_name="Northside Medical Group",
                         specialization="Cardiology")
         await asyncio.wait_for(
-            rw.handle_realtime(_fake(twilio), "CA000000000000000000000000testsid", doctor),
+            rw.handle_realtime(_fake(twilio), "CA000000000000000000000000testsid",
+                               doctor, answered_at=answered_at),
             timeout=30,
         )
     session = captured.get("session")
@@ -2490,6 +2491,35 @@ async def main():
           f"({_v_sess.dropped_second_items})")
 
     # ── Repeats must survive into the artifact ───────────────────────────────
+    # ── Pickup to greeting ───────────────────────────────────────────────────
+    print("\n" + "=" * 66)
+    print("  SCENARIO 6e — how long from picking up to hearing a voice")
+    print("=" * 66)
+    # "First audio 1.08s after response.create" starts its clock at OUR
+    # request — after /answer, after the media WebSocket, after Twilio's
+    # stream-start handshake. It can read 1.08s on a call that felt like ten
+    # seconds of silence, because it is not measuring the same thing.
+    # A script that actually emits audio deltas: the measurement is taken at
+    # the first sound, so a transcript-only script never reaches it. The first
+    # version of this test used script_happy_path, got None, and would have
+    # read as a broken feature rather than a test that never exercised it.
+    _pu_out = {}
+    _pu_sent, _pu_sess = await run_call(script_double_spoken_item(), out=_pu_out,
+                                        answered_at=time.monotonic() - 2.5)
+    check(_pu_sess.pickup_to_greeting_s is not None,
+          f"pickup-to-greeting is measured ({_pu_sess.pickup_to_greeting_s})",
+          "the one figure the 'why is it slow to say hello' question is about")
+    check((_pu_sess.pickup_to_greeting_s or 0) >= 2.5,
+          f"and it counts the setup BEFORE response.create "
+          f"({_pu_sess.pickup_to_greeting_s}s from a 2.5s-old pickup)",
+          "measuring only from our own request is what hid this")
+    # Optional by design: the value must be absent, never invented, when the
+    # pickup could not be timed.
+    _np_sent, _np_sess = await run_call(script_double_spoken_item())
+    check(_np_sess.pickup_to_greeting_s is None,
+          f"absent, not guessed, when the pickup was never timed "
+          f"({_np_sess.pickup_to_greeting_s!r})")
+
     # ── A failure must say why ───────────────────────────────────────────────
     print("\n" + "=" * 66)
     print("  SCENARIO 6d — a failed response records its reason")
