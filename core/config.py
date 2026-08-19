@@ -207,10 +207,33 @@ class Settings(BaseSettings):
     # detection removes the trade-off rather than tuning a threshold.
     realtime_turn_detection: str = "server_vad"
     # server_vad only: silence after the caller stops before a response starts.
-    # This is additive dead time on every turn, so it is the direct lever on
-    # latency. 360ms cut people off mid-sentence; 550ms was the over-correction.
-    # Measured on this rig: 500ms -> 0.71s observed gap, 1000ms -> 1.47s.
-    # Interpolating, 700ms lands near 1.0s, mid-band for the 0.8-1.1s target.
+    # Additive dead time on every turn, but NOT the whole gap and not the
+    # dominant term. 360ms cut people off mid-sentence; 550ms was the
+    # over-correction.
+    #
+    # The interpolation that used to live here was wrong, and wrong in a way
+    # worth naming: from "500ms -> 0.71s, 1000ms -> 1.47s" it concluded 700ms
+    # lands near 1.0s. That treats the gap as proportional to this setting.
+    # It is not. The gap is
+    #
+    #     silence_ms  +  model inference  +  round trip India->US
+    #
+    # and only the first term moves when you change this number. Measured on
+    # live calls at 700ms, the agent's first audio arrived 1.19s
+    # (call-20260818-1112) and 2.44s (call-20260818-1338) after
+    # response.create — and that is AFTER this silence has already elapsed. So
+    # the observed caller-stops-to-agent-speaks gap is ~1.9-3.1s, two to three
+    # times what the interpolation predicted.
+    #
+    # Consequence for tuning: 700 -> 400 buys about 300ms off a ~2.5s gap. Real,
+    # worth having, and nowhere near enough to reach 1s. The fixed component
+    # dominates and is not tunable from here — it is the floor for this
+    # architecture until the server sits closer to the callee. Sub-2s is the
+    # honest target, not sub-1s.
+    #
+    # Same class as the "~300-500ms" latency banner already corrected: a number
+    # derived by reasoning rather than measured, which then gets trusted.
+    # check_realtime.py can measure variants against the live API for free.
     realtime_silence_ms: int = 700
     # semantic_vad only: "low" | "medium" | "high" | "auto".
     # low = gives the speaker more thinking time, high = chunks quickly.

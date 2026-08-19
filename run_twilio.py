@@ -25,9 +25,6 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
     from twilio.rest import Client
     from twilio.base.exceptions import TwilioRestException
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
-    # Kept for the window before register_call runs below; routing is
-    # by CallSid so concurrent calls cannot collide on it.
-    worker.pending_doctor = doctor
 
     answer_url = settings.server_public_url + "/answer"
     status_url = settings.server_public_url + "/status"
@@ -84,6 +81,13 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
             print(f"\n  *** Could not place the call (Twilio {e2.code}) ***")
             print(f"  {_explain(e2)}\n")
             raise SystemExit(1) from None
+    # Bind the call to its doctor by CallSid, immediately and before anything
+    # else. This is what /answer resolves against; until 2026-08-18 nothing
+    # called it and every call fell through to a module global, so two calls in
+    # flight would have asked about one doctor. Twilio still has to ring the far
+    # end before it fetches /answer, so the gap between create() and here is
+    # microseconds against seconds — and /answer waits, so even that is covered.
+    worker.register_call(call.sid, doctor)
     print(f"\n  Call SID : {call.sid}")
     print(f"  Calling  : {to_number}")
     print(f"  From     : {settings.twilio_from_number}")

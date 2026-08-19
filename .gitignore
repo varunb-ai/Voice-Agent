@@ -25,3 +25,6 @@ data/crawled/
 # Transcripts/JSON are kept so results are reviewable in-repo.
 data/3 cases voice/*.wav
 data/3 cases voice/*.mp3
+
+# Stray editor/patch temp files
+*.tmp.*

@@ -1,0 +1,136 @@
+{
+  "call_id": "call-20260811-1640-0804",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": null,
+  "resolved": false,
+  "duration_seconds": 101,
+  "cost_usd": 0.301507,
+  "template": "forage_data_collection",
+  "grounding": "verified against caller transcript",
+  "conversation": {
+    "location_asks": 3,
+    "double_asks": 1,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 18,
+    "agent_turns": 6,
+    "caller_turns": 10,
+    "caller_questions": 5,
+    "question_turns": 4,
+    "stapled_questions": 2,
+    "staple_rate": 0.4,
+    "back_to_back_asks": 2,
+    "repeated_sentences": 0
+  },
+  "ask_budget": {
+    "limit": 4,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 700,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 21,
+    "input_audio": 4623,
+    "input_audio_cached": 2176,
+    "output_audio": 605,
+    "input_text": 79331,
+    "input_text_cached": 50304,
+    "output_text": 817,
+    "cache_hit_rate": 0.6251
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Definitive Healthcare about a doctor listing. Still with me?",
+      "timestamp": "16:40:15"
+    },
+    {
+      "role": "caller",
+      "text": "Hello?",
+      "timestamp": "16:40:25"
+    },
+    {
+      "role": "agent",
+      "text": "Hi \u2014 which branch does Dr. Okafor work out of?",
+      "timestamp": "16:40:27"
+    },
+    {
+      "role": "caller",
+      "text": "Nothing.",
+      "timestamp": "16:40:48"
+    },
+    {
+      "role": "caller",
+      "text": "Hello. Yes, speaking. Let me check. He practices at our main campus.",
+      "timestamp": "16:40:49"
+    },
+    {
+      "role": "agent",
+      "text": "No worries \u2014 is there someone there who might know which branch Dr. Okafor uses?",
+      "timestamp": "16:40:52"
+    },
+    {
+      "role": "caller",
+      "text": "Hello.",
+      "timestamp": "16:41:01"
+    },
+    {
+      "role": "agent",
+      "text": "Sure, no rush.",
+      "timestamp": "16:41:03"
+    },
+    {
+      "role": "caller",
+      "text": "One moment Hello?",
+      "timestamp": "16:41:08"
+    },
+    {
+      "role": "caller",
+      "text": "What do you want?",
+      "timestamp": "16:41:13"
+    },
+    {
+      "role": "caller",
+      "text": "Yes, speaking. Hello",
+      "timestamp": "16:41:18"
+    },
+    {
+      "role": "caller",
+      "text": "Are you doing good? How was your day today?",
+      "timestamp": "16:41:23"
+    },
+    {
+      "role": "caller",
+      "text": "How was your day today?",
+      "timestamp": "16:41:34"
+    },
+    {
+      "role": "agent",
+      "text": "It\u2019s going fine \u2014 which branch is that, Edica? It\u2019s going fine \u2014 is the branch called Edica?",
+      "timestamp": "16:41:36"
+    },
+    {
+      "role": "caller",
+      "text": "Hold on, let me check which office he practices at. I'm not sure",
+      "timestamp": "16:41:42"
+    },
+    {
+      "role": "agent",
+      "text": "No problem \u2014 thanks for your time.",
+      "timestamp": "16:41:47"
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260811-1640-0804.wav",
+  "recorded_at": "2026-08-11T16:40:09.602006"
+}

@@ -185,10 +185,33 @@ async def main() -> int:
     # webhook, so the call connects to dead air. Actually probe it.
     try:
         import httpx
+        # Probe /answer, not /. Any 200 from / proves a server is reachable —
+        # not that it is OUR server, which is a different claim and the one
+        # that matters. On three separate occasions a second project's uvicorn
+        # (bound to 127.0.0.1 while ours binds 0.0.0.0, and on Windows the more
+        # specific bind wins loopback, which is where ngrok forwards) answered
+        # the webhooks instead. Twilio got 404s, the callee heard nothing, and
+        # this check printed PASS every time because the other app's root route
+        # answered 200 quite happily.
+        #
+        # GET on a POST-only route returns 405: the route EXISTS and is ours,
+        # without invoking the handler. 404 means something else has the port.
         async with httpx.AsyncClient(timeout=6.0, follow_redirects=False) as c:
-            r = await c.get(settings.server_public_url.rstrip("/") + "/")
-        # FastAPI answers 404 for GET / — that still proves the tunnel reaches us.
-        print(f"{_PASS} SERVER_PUBLIC_URL is live (HTTP {r.status_code})")
+            r = await c.get(settings.server_public_url.rstrip("/") + "/answer")
+        if r.status_code == 405:
+            print(f"{_PASS} SERVER_PUBLIC_URL reaches THIS agent "
+                  f"(/answer -> 405, route present)")
+        elif r.status_code == 404:
+            check(False, "SERVER_PUBLIC_URL reaches this agent",
+                  f"/answer -> 404. The tunnel is up but another app is "
+                  f"answering on this port — check what else is bound to "
+                  f"127.0.0.1:8000, or run with --port on a free port. "
+                  f"Twilio's webhooks will 404 and the callee will hear "
+                  f"nothing.")
+        else:
+            print(f"{_WARN} /answer returned HTTP {r.status_code}, expected 405. "
+                  f"The tunnel reaches something, but this is not the shape "
+                  f"this agent answers with.")
     except Exception as e:
         print(f"{_WARN} SERVER_PUBLIC_URL is not reachable ({type(e).__name__}). "
               f"Expected if ngrok isn't running yet — but if it IS running, this "
@@ -241,10 +264,29 @@ async def main() -> int:
         check("recorded" in greeting.lower(),
               "disclosed variant discloses recording upfront")
     else:
-        flat_i = " ".join(tpl.instructions.split())
-        check("say yes, you're an automated system" in flat_i
-              or "confirm plainly and immediately" in flat_i,
+        flat_i = " ".join(tpl.instructions.split()).lower()
+        # Aimed at the RULE, not one phrasing of it. This used to match the
+        # literal "say yes, you're an automated system" and broke the moment
+        # that sentence was reworded — while the rule it stood for was still
+        # there, stronger than before. A wording-pinned check reports a
+        # regression that has not happened and hides one that has.
+        #
+        # Two parts have to be present: the trigger (someone asking what you
+        # are) and the affirmative answer (that it is automated).
+        check(any(w in flat_i for w in ("a bot", "a robot", "real person", "ai")),
+              "instructions anticipate being asked what it is")
+        check(("automated call" in flat_i or "you are automated" in flat_i
+               or "you're automated" in flat_i),
               "confirms it is automated if asked point-blank")
+        # And it must not have quietly become a denial or a dodge. Phrases that
+        # could only appear in an instruction TO deny — a bare "deny" matches
+        # the rules forbidding it ("Do not deny it", "actively denying what you
+        # are"), so it flags the prohibition as though it were the offence.
+        for _bad in ("say you are a person", "say you are human",
+                     "claim to be human", "do not admit",
+                     "never say you are automated", "deny being"):
+            check(_bad not in flat_i,
+                  f"never instructed to deny what it is ({_bad!r})")
         check("recorded" in flat_i, "confirms the call is recorded if asked")
     check("Okafor" not in tpl.instructions and "Northside" not in tpl.instructions,
           "instructions contain no per-call data (cache prefix is stable)")

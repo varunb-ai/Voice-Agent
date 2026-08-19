@@ -1,0 +1,18 @@
+[
+  {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": null,
+    "branch": "Downtown Branch",
+    "city": "Los Angeles",
+    "source": "voice",
+    "status": "partially_verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "specialization"
+    ],
+    "enriched_at": "2026-08-18T10:44:35.439981+00:00",
+    "enriched_by": "call-20260818-1613-6a8d"
+  }
+]

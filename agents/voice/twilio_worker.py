@@ -501,21 +501,42 @@ _call_id_by_sid: dict[str, str]    = {}   # CallSid → call_id for recording fi
 # realtime path builds no classic _Session. Popped when the media stream opens.
 _pending_realtime_doctor: dict[str, Doctor] = {}
 
+# CallSids whose Twilio Media Stream actually opened. This is the ONLY registry
+# both call paths write, which is the whole reason it exists: /status used to
+# ask `csid in _sessions` to decide whether anyone had spoken to the agent, but
+# _sessions is written on the classic path alone — the realtime branch of
+# /answer deliberately builds no _Session. The test was therefore False for
+# every realtime call, and each one, including a flawless 86-second
+# conversation, was reported as "NO CONVERSATION — nobody spoke to it".
+#
+# Written where the fact happens: Twilio opens this socket only after the call
+# is answered, so its absence still catches the 2026-08-13 case (completed at
+# 14s having never fetched /answer). Discarded in /status.
+_media_opened: set[str] = set()
+
 # ── Doctor routing ───────────────────────────────────────────────────────────
 # `pending_doctor` was a single module global: the caller set it, /answer read
-# it. Two concurrent calls therefore shared one doctor, and the second call
-# would quietly ask about the first one's — corrupt data, no error.
+# it. Two concurrent calls therefore shared one doctor, and the second would
+# quietly ask about the first one's — corrupt data, no error. It could not fire
+# because the global itself made concurrency impossible, which is the worst
+# kind of safe: the bug is dormant, and the thing keeping it dormant is the
+# thing a batch runner removes first.
 #
-# Today that cannot happen, because the global itself makes concurrency
-# impossible. The danger is the moment someone turns this into a batch runner:
-# the global stops being a lock and starts being a data-corruption bug, silently.
+# Routing is by CallSid, which Twilio returns when the call is created.
 #
-# Routing is now by CallSid, which Twilio gives us when the call is created.
-# `pending_doctor` remains only as the fallback for the window between placing
-# a call and Twilio's webhook arriving, and for anything still setting it.
+# The global is GONE as of 2026-08-18, and removing it exposed why it had
+# survived: `register_call` had no callers anywhere. The SID map was never
+# populated, so every call in the programme's history resolved through the
+# fallback. The concurrency-safe path existed, was tested, and was dead —
+# run_twilio.py now registers the SID it gets back from Twilio.
 _doctor_by_sid: dict[str, Doctor] = {}
 _routing_lock = threading.Lock()
-pending_doctor: Optional[Doctor] = None
+
+# How long /answer will wait for register_call to catch up. Twilio has to ring
+# the far end before it fetches /answer, so this window is milliseconds of work
+# against seconds of ringing — but "cannot happen" is what the global was for,
+# and a bounded wait costs nothing on the path where it never triggers.
+_ROUTING_WAIT_S = 2.0
 
 
 def register_call(call_sid: str, doctor: Doctor) -> None:
@@ -524,15 +545,26 @@ def register_call(call_sid: str, doctor: Doctor) -> None:
         _doctor_by_sid[call_sid] = doctor
 
 
-def _doctor_for(call_sid: str) -> Optional[Doctor]:
-    """Which doctor is this CallSid about?"""
-    with _routing_lock:
-        doctor = _doctor_by_sid.pop(call_sid, None)
-    if doctor is not None:
-        return doctor
-    # Fallback: the webhook beat register_call, or a caller that still sets the
-    # global. Correct for one call at a time, which is all the global ever was.
-    return pending_doctor
+async def _doctor_for(call_sid: str) -> Optional[Doctor]:
+    """Which doctor is this CallSid about?
+
+    Waits briefly rather than falling back to a shared global: the only case
+    the fallback ever covered was the webhook overtaking register_call, and
+    waiting fixes that without letting two concurrent calls read one another's
+    doctor. Returns None if the SID is genuinely unknown, which /answer turns
+    into a hangup — a call about the wrong doctor is worse than no call.
+
+    Does NOT pop. Twilio retries webhooks, and a second /answer for the same
+    SID must resolve to the same doctor rather than falling off the end. The
+    entry is discarded in /status with the other per-call registries.
+    """
+    deadline = time.monotonic() + _ROUTING_WAIT_S
+    while True:
+        with _routing_lock:
+            doctor = _doctor_by_sid.get(call_sid)
+        if doctor is not None or time.monotonic() >= deadline:
+            return doctor
+        await asyncio.sleep(0.02)
 
 
 # ── TwiML webhook ─────────────────────────────────────────────────────────────
@@ -544,8 +576,10 @@ async def answer(request: Request):
         log.warning("Rejected unsigned /answer request")
         return _forbidden()
     csid = form.get("CallSid", "")
-    doc  = _doctor_for(csid)
+    doc  = await _doctor_for(csid)
     if not doc:
+        log.error("No doctor registered for CallSid %s after %.1fs — hanging up "
+                  "rather than calling about an unknown record", csid, _ROUTING_WAIT_S)
         return Response(_twiml_hangup(), media_type="application/xml")
 
     if settings.use_realtime:
@@ -575,12 +609,66 @@ async def status_callback(request: Request):
         return _forbidden()
     status = form.get("CallStatus", "")
     csid   = form.get("CallSid", "")
-    log.info("Call status: %s — %s", csid, status)
+    # print, not log.info: nothing configures logging for the uvicorn process,
+    # so this went nowhere and the only thing on screen was uvicorn's access
+    # line, "POST /status 200 OK" — which says a webhook arrived, not what it
+    # said. Two calls on 2026-08-13 were never picked up and the terminal gave
+    # no hint of it; the outcome had to be read back out of the Twilio API
+    # afterwards. Same defect as the swallowed API errors in realtime_worker.
+    #
+    # A call nobody answers never reaches handle_realtime, so no transcript, no
+    # artifact and no CALL ENDED block is printed. This webhook is the ONLY
+    # place the outcome surfaces.
+    _never_connected = {
+        "no-answer": "nobody picked up — it rang out",
+        "busy":      "line was busy",
+        "failed":    "the call failed to connect",
+        "canceled":  "the call was cancelled before it connected",
+    }
+    _dur = form.get("CallDuration") or "?"
+    if status in _never_connected:
+        print(f"\n  ☎️  NOT ANSWERED — {_never_connected[status]} "
+              f"(status={status}, {_dur}s)\n", flush=True)
+    elif status == "completed":
+        # "completed" only means Twilio finished the call normally — it does
+        # NOT mean the agent was ever on a live call. One on 2026-08-13 came
+        # back completed at 14s having never fetched /answer at all. The honest
+        # test is whether the Media Stream connected, which is what
+        # _media_opened records, on both paths.
+        #
+        # This asked `csid in _sessions` until 2026-08-18. Nothing writes
+        # _sessions on the realtime path, so the branch below fired on every
+        # single realtime call and told the operator that nobody had spoken to
+        # an agent that had just held a full conversation. Claiming a call
+        # failed when it succeeded is worse than saying nothing: it discredits
+        # the one line here that is supposed to be trustworthy.
+        #
+        # Note what the marker does and does not prove. It proves the call was
+        # answered and audio was flowing. It does NOT prove a person spoke —
+        # voicemail and answer-machine pickups open a media stream too — so the
+        # wording below stops at what is actually known. Whether a human said
+        # anything is a question the transcript answers, and the realtime path
+        # already prints that in its own CALL ENDED block.
+        if csid in _media_opened:
+            print(f"  ☎️  call completed ({_dur}s)", flush=True)
+        else:
+            print(f"\n  ☎️  NO MEDIA STREAM — Twilio reports completed "
+                  f"({_dur}s), but the audio stream never connected, so the "
+                  f"agent was never on this call and there is no transcript. "
+                  f"Rang out, or was answered by something that did not "
+                  f"connect the stream.\n", flush=True)
+    else:
+        print(f"  ☎️  call status: {status} ({_dur}s)", flush=True)
     if status == "completed":
         # Realtime sessions save themselves in handle_realtime's finally block.
         # _call_id_by_sid is left in place — /recording_ready fires after this
         # and needs it to name the MP3; that handler pops it.
         _pending_realtime_doctor.pop(csid, None)
+        # Read above, discarded here — a registry that is only ever added to is
+        # a leak in a batch runner, which is the stated direction for this.
+        _media_opened.discard(csid)
+        with _routing_lock:
+            _doctor_by_sid.pop(csid, None)
         sess = _sessions.pop(csid, None)
         if sess:
             await sess.save()
@@ -660,6 +748,9 @@ def _twiml_ok() -> str:
 @app.websocket("/stream/{call_sid}")
 async def media_stream(ws: WebSocket, call_sid: str):
     await ws.accept()
+    # Both paths, before either branches — the marker means "Twilio connected
+    # the media stream", and that is equally true whichever worker handles it.
+    _media_opened.add(call_sid)
 
     # ── Realtime: speech-to-speech only, no fallback ──────────────────────────
     # The old code fell back to the classic VAD→STT→LLM→TTS pipeline on any

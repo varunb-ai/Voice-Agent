@@ -21,11 +21,13 @@ Exit code 0 = all assertions passed.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import pathlib
 import re
 import sys
 import tempfile
+import time
 import types
 from unittest import mock
 
@@ -100,6 +102,17 @@ class FakeTwilio:
         self.closed = True
 
 
+def _b64_silence(ms: int = 750) -> str:
+    """A base64 μ-law payload of the given duration, for driving audio deltas.
+
+    Its CONTENT is irrelevant — the handler only needs a delta to arrive so
+    that _first_delta_sent_at is stamped and a truncation has something to
+    measure against. 750ms because that is what call-20260818-1338 truncated
+    to, and the whole point is reproducing that call.
+    """
+    return base64.b64encode(b"\xff" * int(8 * ms)).decode()
+
+
 def usage(text_in=2000, cached=1887, audio_in=400, audio_out=800):
     return {"usage": {
         "input_token_details": {
@@ -114,8 +127,13 @@ def usage(text_in=2000, cached=1887, audio_in=400, audio_out=800):
 _ARTEFACTS = pathlib.Path(tempfile.gettempdir()) / "realtime-protocol-test"
 
 
-async def run_call(script):
+async def run_call(script, out=None, connect_failures=0):
     """Run one scripted call, return (messages_sent_to_oai, session_memory).
+
+    ``out`` is an optional dict that receives the FakeTwilio under key
+    "twilio". Half of the barge-in contract is what goes to Twilio — the
+    `clear` that drains buffered audio — and that direction was unobservable
+    from the two-tuple, so nothing had ever asserted on it.
 
     Fully offline. Two things are stubbed that otherwise reach the outside
     world on every run:
@@ -128,6 +146,8 @@ async def run_call(script):
     """
     sent = []
     twilio = FakeTwilio([{"event": "start", "start": {"streamSid": "MZtest"}}])
+    if out is not None:
+        out["twilio"] = twilio
     captured = {}
 
     real_init = rw.RealtimeSession.__init__
@@ -146,8 +166,22 @@ async def run_call(script):
         def create(self, *a, **k):
             raise RuntimeError("Twilio disabled in tests")
 
-    with mock.patch.object(rw.websockets, "connect",
-                           lambda *a, **k: FakeConn(FakeOAI(script, sent))), \
+    # `connect_failures` makes the first N handshakes raise, standing in for the
+    # transient stall that killed call CAd1a20b on 2026-08-18 — the callee
+    # answered and heard seventeen seconds of silence because one bad TCP setup
+    # ended the call.
+    _attempts = {"n": 0}
+
+    def _connect(*a, **k):
+        _attempts["n"] += 1
+        if _attempts["n"] <= connect_failures:
+            raise TimeoutError("timed out during opening handshake")
+        return FakeConn(FakeOAI(script, sent))
+
+    if out is not None:
+        out["attempts"] = _attempts
+
+    with mock.patch.object(rw.websockets, "connect", _connect), \
          mock.patch.object(rw, "audio_dir", lambda: _ARTEFACTS), \
          mock.patch.object(rw, "json_dir", lambda: _ARTEFACTS), \
          mock.patch.dict("sys.modules",
@@ -210,6 +244,165 @@ def script_silent_response():
          "transcript": "Actually, he is not working now. He's retired."},
         # No transcript, no audio, status completed.
         {"type": "response.done", "response": usage(1900, 1800, audio_out=0)},
+    ]
+
+
+def script_barge_in_before_first_audio():
+    """The caller talks over a response that has not made a sound yet.
+
+    _response_active was set on the FIRST AUDIO DELTA, never on
+    response.created, which was not handled at all. Between the two there is
+    real latency — 1.19s measured on call-20260818-1112 — and for that window
+    the barge-in handler saw no active response and skipped: no
+    response.cancel, no Twilio `clear`, no truncate, no BARGE-IN line.
+
+    The response then died anyway, cancelled by OpenAI's own VAD, which is why
+    that call logged two `[cancelled]` responses with out_audio=0 and not one
+    barge-in. The visible cost was a LOST TURN: the agent was asked a question,
+    its answer was killed before it made a sound, and the dead-air guards fired
+    afterwards trying to account for the silence.
+    """
+    return HANDSHAKE + [
+        {"type": "response.created"},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Hi, this is David, calling on behalf of..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "May I know why you are calling? Is it an emergency?"},
+        # A response is created to answer that — and the caller keeps talking
+        # before a single audio delta arrives.
+        {"type": "response.created"},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "response.done",
+         "response": {**usage(1900, 1800, audio_out=0), "status": "cancelled"}},
+    ]
+
+
+def script_cut_off_then_hello():
+    """call-20260818-1338, verbatim: truncated to 750ms, caller says "Hello."
+
+    The interruption path fired correctly and made the call worse. The caller
+    heard three-quarters of a second, lost the thread, and said "Hello." The
+    agent classified that as filler and asked its question again — burning an
+    ask on a turn that had never been delivered.
+
+    "Hello" after a cut is a REPAIR SIGNAL, not filler. The same word arriving
+    cold means something else, and the distinguishing fact — that we truncated,
+    and to how many milliseconds — is not in the transcript at all. It is in
+    the process, so the recognition belongs in the process.
+    """
+    return HANDSHAKE + [
+        {"type": "response.created"},
+        {"type": "response.output_audio.delta", "delta": _b64_silence(),
+         "item_id": "item_greet"},
+        # Caller talks over it almost immediately -> our barge-in truncates.
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "response.done",
+         "response": {**usage(1900, 0, audio_out=8), "status": "cancelled"}},
+        # ...and what they say next is them checking the line is alive.
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Hello."},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
+def script_announce_then_rejected():
+    """call-20260818-1613: told the caller it was saved, then it wasn't.
+
+        16:14:19  "Thanks for checking — I'll save that and then we'll be
+                   all set."                       <- spoken to a real person
+        16:14:19  ⛔ BRANCH REJECTED: possibly the city restated
+
+    A success message emitted before the operation that decides success —
+    the same class as the lying console log fixed in 0c28baa, except this one
+    goes down the phone line. That call recovered by accident; the same shape
+    on a rejection that does not recover leaves a receptionist hanging up
+    believing a location was recorded when nothing was written.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Hi, this is David — which branch is Dr. Okafor working out of?"},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "He is working at downtown branch Los Angeles."},
+        # The agent announces the save FIRST...
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Thanks for checking — I’ll save that and then we’ll be all set."},
+        # ...and only then does the tool run, and reject: a bare city restated.
+        {"type": "response.function_call_arguments.done", "call_id": "c9",
+         "name": "save_branch",
+         "arguments": json.dumps({"branch": "Los Angeles", "city": "Los Angeles"})},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
+def script_server_side_cancel():
+    """OpenAI cancels the response itself; we never sent response.cancel.
+
+    interrupt_response defaults to true, so the server interrupts on caller
+    speech independently of this module. When it wins the race there is no
+    speech_started for us to act on before the fact, and until now nothing sent
+    Twilio a `clear` — so audio already buffered there kept playing after
+    generation had stopped.
+    """
+    return HANDSHAKE + [
+        {"type": "response.created"},
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, this is David..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "response.created"},
+        # No speech_started reaches us — the server acted on its own.
+        {"type": "response.done",
+         "response": {**usage(1900, 1800, audio_out=0), "status": "cancelled"}},
+    ]
+
+
+def script_rejected_response():
+    """A response.create the API REJECTED, which must NOT be retried.
+
+    conversation_already_has_active_response comes back as response.done with
+    status=failed having consumed no input at all — zero text tokens and zero
+    audio tokens, because it never ran. The empty-response recovery read that
+    as dead air and created another response, which collided and failed in
+    turn. On call-20260811-1640 that cascade held the line silent for 25
+    seconds while the caller said "Hello?", "What do you want?" and "How was
+    your day today?" into a call that never answered.
+
+    The distinction that makes this recoverable: a response that genuinely ran
+    and produced no audio HAS read the conversation and reports input tokens. A
+    rejected one reports none.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, this is Sarah..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "response.done",
+         "response": {**usage(0, 0, audio_in=0, audio_out=0), "status": "failed"}},
+    ]
+
+
+def script_repeats_itself():
+    """One response emitting the same sentence twice, word for word.
+
+    From call-20260813-1409: "could I just get the exact branch name or address
+    so I don't save the wrong place?" arrived as two transcript items inside a
+    single 10.65s response. Because it was one response, the re-ask gap guard
+    measured 0.0s and had no following turn to correct — the duplication has to
+    be caught where the transcript lands, not on the next turn.
+    """
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Hi, this is Sarah..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Could I get the exact branch name or address?"},
+        {"type": "response.output_audio_transcript.done",
+         "transcript": "Could I get the exact branch name or address?"},
+        {"type": "response.done", "response": usage(1900, 1800)},
     ]
 
 
@@ -414,12 +607,34 @@ async def main():
         def __init__(self): self.sent = []
         async def send(self, raw): self.sent.append(json.loads(raw))
 
+    def _wd_sess(**over):
+        """A stand-in RealtimeSession for the watchdog, built in ONE place.
+
+        These were four hand-rolled SimpleNamespaces. Adding _goodbye_retry_at
+        to the real session broke each of them in turn with an AttributeError —
+        the fixtures doing their job, four times, one round-trip each. A fake
+        that mirrors a real object has to be built where the mirroring can be
+        maintained. Resist "fixing" this class of break with getattr() in the
+        watchdog instead: a missing attribute there is a real bug and should
+        fail loudly rather than quietly read as None.
+        """
+        base = dict(done=False, _agent_quiet_since=0.0,
+                    _silence_prompts_opening=0, _silence_prompts_midcall=0,
+                    _response_active=False, turns=[], _goodbye_retry_at=None,
+                    listen_enabled=asyncio.Event())
+        base.update(over)
+        s = types.SimpleNamespace(**base)
+        s.listen_enabled.set()
+        return s
+
     _ws, _done = _WS(), asyncio.Event()
-    _sess = types.SimpleNamespace(
-        done=False, _agent_quiet_since=0.0, _silence_prompts=0,
-        _response_active=False, turns=[],
-        listen_enabled=asyncio.Event())
-    _sess.listen_enabled.set()
+    # Mirrors the real RealtimeSession fields the watchdog reads. A hand-rolled
+    # stand-in drifts from the object it stands in for — adding
+    # _goodbye_retry_at to the session broke this fixture with an
+    # AttributeError, which is the fixture doing its job. Resist "fixing" that
+    # with getattr() in the watchdog: a missing attribute there is a real bug
+    # and should fail loudly rather than read as None.
+    _sess = _wd_sess()
     async def _keep_quiet():
         """Stand in for the agent speaking and getting nothing back, forever.
 
@@ -448,14 +663,14 @@ async def main():
     check(any("not said anything" in n for n in _nudges),
           "the model is told the callee has gone quiet")
     # Capped, or a silent line becomes the agent talking to itself forever.
-    check(_sess._silence_prompts <= rw._MAX_SILENCE_PROMPTS,
-          "silence prompts are capped", _sess._silence_prompts)
+    # turns=[] means the callee has never spoken, so this is the OPENING phase.
+    check(_sess._silence_prompts_opening <= rw._MAX_SILENCE_PROMPTS,
+          "opening silence prompts are capped", _sess._silence_prompts_opening)
+    check(_sess._silence_prompts_midcall == 0,
+          "opening silence does not spend the mid-call budget",
+          _sess._silence_prompts_midcall)
     # And it must stand down the moment they speak.
-    _sess2 = types.SimpleNamespace(done=False, _agent_quiet_since=None,
-                                   _silence_prompts=0, _response_active=False,
-                                   turns=[],
-                                   listen_enabled=asyncio.Event())
-    _sess2.listen_enabled.set()
+    _sess2 = _wd_sess(_agent_quiet_since=None)
     _ws2, _done2 = _WS(), asyncio.Event()
     with mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
         _wd2 = asyncio.create_task(rw._silence_watchdog(_ws2, _sess2, _done2))
@@ -470,10 +685,7 @@ async def main():
     # a local in _oai_to_twilio and the watchdog runs in a different task, so it
     # could not see it at all.
     _ws3, _done3 = _WS(), asyncio.Event()
-    _sess3 = types.SimpleNamespace(done=False, _agent_quiet_since=0.0,
-                                   _silence_prompts=0, _response_active=True,
-                                   turns=[], listen_enabled=asyncio.Event())
-    _sess3.listen_enabled.set()
+    _sess3 = _wd_sess(_response_active=True)
     with mock.patch.object(rw, "_SILENCE_PROMPT_FIRST", 0.0), \
          mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
         _wd3 = asyncio.create_task(rw._silence_watchdog(_ws3, _sess3, _done3))
@@ -493,8 +705,561 @@ async def main():
     # The cap is for the CALL. Resetting it whenever the caller spoke meant a
     # callee who says "hello?" and nothing else could be prompted forever.
     _src = pathlib.Path("agents/voice/realtime_worker.py").read_text(encoding="utf-8")
-    check("sess._silence_prompts = 0" not in _src,
-          "silence budget is never reset mid-call, only at session init")
+    # Absence of one exact spelling is the weaker claim, and it passes by
+    # finding nothing: reformat the line, drop the spaces, reset by another
+    # route, and the check still reports success. The claim actually being made
+    # is about a CATEGORY — no assignment anywhere puts this counter back to
+    # zero except the one in __init__ — so enumerate every assignment and judge
+    # them, rather than searching for the one spelling of the mistake we
+    # happened to make once.
+    # \w* so the family is covered, not one member: the counter was split into
+    # _silence_prompts_opening and _silence_prompts_midcall, and a pattern
+    # naming only the old field would have found zero assignments and reported
+    # a population of nothing. The >= 2 guard below is what makes that loud
+    # instead of a silent pass.
+    #
+    # IF THIS TEST FAILS, CONSIDER THAT THE ASSERTION MAY BE THE THING THAT IS
+    # WRONG. It encodes a judgement — "zeroing belongs only in __init__" — that
+    # is true today and need not stay true. An earlier version asserted
+    # `len(zeroing) == 1`, and splitting the counter by phase gave __init__ two
+    # perfectly legitimate declarations and turned the test red. The count was
+    # never the claim; where the zeroing happens is. Written as a count, the
+    # next person reads a red test and "fixes" correct code.
+    _sp_lines = [l for l in _src.splitlines()
+                 if re.search(r"_silence_prompts\w*\s*(?::[^=\n]+)?\s*(?:\+=|-=|=)"
+                              r"\s*[^\n=]", l) and not l.strip().startswith("#")]
+    check(len(_sp_lines) >= 2,
+          "found the silence-budget assignments to judge",
+          f"{len(_sp_lines)} assignments")
+    _sp_zero = [l.strip() for l in _sp_lines
+                if re.search(r"=\s*0\s*$", l)]
+    # Declarations look like `self._x: int = 0` in __init__. A mid-call reset
+    # goes through the session object as `sess._x = 0`. That distinction, not a
+    # count, is the actual claim — and it survives adding a third counter.
+    check(all(l.startswith("self.") for l in _sp_zero),
+          "only __init__ declarations zero the silence budget, never a reset",
+          f"{_sp_zero}")
+    check(not any(re.search(r"\bsess\._silence_prompts\w*\s*=\s*0", l)
+                  for l in _sp_lines),
+          "no mid-call reset of the silence budget through the session")
+    _sp_vals = [re.search(r"=\s*([^\n=]+)$", l).group(1).strip().rstrip(",)")
+                for l in _sp_lines]
+    check(all(v in ("0", "1") for v in _sp_vals),
+          "silence budget is only ever initialised or incremented", f"{_sp_vals}")
+
+    # The silence clock must start when the callee STOPS HEARING us, not when
+    # response.done arrives. Generation runs faster than realtime, so the old
+    # code counted the agent's own voice as the callee's silence. Measured on
+    # call-20260811-1649: the watchdog reported 3.5s before "Are you still with
+    # me?" when the real gap was 1.41s, and 7.0s before the goodbye when the
+    # real gap was 2.45s — the call hung up on someone mid-breath. The error
+    # scales with clip length, so the longest turns were cut off hardest.
+    #
+    # A quiet_since in the FUTURE is how "audio is still playing" is
+    # represented, so the watchdog must not prompt while that is true.
+    _ws4, _done4 = _WS(), asyncio.Event()
+    _sess4 = _wd_sess(_agent_quiet_since=time.time() + 1.5)
+    with mock.patch.object(rw, "_SILENCE_PROMPT_FIRST", 0.0), \
+         mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
+        _wd4 = asyncio.create_task(rw._silence_watchdog(_ws4, _sess4, _done4))
+        await asyncio.sleep(0.9)
+        _done4.set()
+        await asyncio.wait_for(_wd4, timeout=2)
+    check(not _ws4.sent,
+          "no prompt while the agent's audio is still playing out",
+          f"{len(_ws4.sent)} sent")
+
+    # Guard the fix itself: the bare assignment is what caused it.
+    check("_agent_quiet_since = time.time()\n" not in _src,
+          "silence clock is never set to bare response.done time")
+    check("_agent_quiet_since = time.time() + _playback_remaining" in _src,
+          "silence clock is offset by the audio still to play")
+
+    # The API-error branch prints rather than logs, for consistency with the
+    # rest of the module and for flush=True.
+    #
+    # CORRECTED: this used to say the errors were invisible because "nothing
+    # configures logging for the uvicorn process". That was wrong. With no
+    # config, Python's lastResort handler prints WARNING and above to stderr,
+    # so log.error was always reaching the terminal — which is also why
+    # twilio_worker's log.warning about a missing signature header WAS visible
+    # in live output. INFO and DEBUG are the levels that vanish, and that is
+    # what actually hid the call outcome in the /status handler. The evidence
+    # for the 25s of dead air is the [failed] responses reporting in_text=0
+    # in_audio=0, not a missing error line.
+    #
+    # The assertion below is still worth keeping, and still a CATEGORY rather
+    # than one message: absence of an exact log.error string proves nothing,
+    # since rewording it would pass. Four log.error calls elsewhere in the
+    # module are legitimate, so a module-wide count would be aimed wrong; scope
+    # it to the branch.
+    _err_lines = _src.splitlines()
+    _err_start = next((i for i, l in enumerate(_err_lines)
+                       if 'event_type == "error"' in l), None)
+    check(_err_start is not None, "found the API-error branch in the module")
+    _err_indent = len(_err_lines[_err_start]) - len(_err_lines[_err_start].lstrip())
+    _err_body = []
+    for _l in _err_lines[_err_start + 1:]:
+        if _l.strip() and (len(_l) - len(_l.lstrip())) <= _err_indent:
+            break
+        _err_body.append(_l)
+    check(len(_err_body) >= 5,
+          "API-error branch body extracted, not empty",
+          f"{len(_err_body)} lines")
+    check(not any(re.search(r"\blog\.\w+\(", _l) for _l in _err_body),
+          "nothing on the API-error branch goes to the unconfigured logger")
+    check(any("print(" in _l for _l in _err_body),
+          "the API-error branch prints, so errors reach the terminal")
+
+    # Identity questions must be recognised, and a branch question must not be
+    # mistaken for one. On call-20260811-1649 "Hello, may I ask who is
+    # speaking?" was answered with "Sorry, I didn't catch that — could you say
+    # the branch name again?", which dodged the question and spent an ask from
+    # the budget doing it.
+    for _q in ("Hello, may I ask who is speaking?", "who are you",
+               "Who is this?", "where are you calling from",
+               "are you a robot", "who gave you this number"):
+        check(bool(rw._IDENTITY_ASK.search(_q)),
+              f"identity question recognised: {_q[:34]!r}")
+    for _q in ("which branch is he at", "what location does she use",
+               "who does he see on Tuesdays"):
+        check(not rw._IDENTITY_ASK.search(_q),
+              f"not mistaken for an identity question: {_q[:34]!r}")
+
+    # The re-ask gap has to be long enough to catch the observed case: two asks
+    # 3s apart, the second landing 0.14s after the agent's own audio ended.
+    check(rw._MIN_REASK_GAP_S > 3.0,
+          "re-ask gap covers the 3s badgering seen on call-20260811-1649",
+          f"{rw._MIN_REASK_GAP_S}s")
+
+    # Both new guards nudge at most once. A second copy of a directive the
+    # model already ignored is just context it pays for twice.
+    for _flag in ("_reask_nudged", "_identity_nudged"):
+        check(f"sess.{_flag} = True" in _src, f"{_flag} is one-shot")
+
+    # A transcription hint is a PROMPT: whatever is in it can come back out as
+    # transcript. The hint used to list complete caller responses under "Likely
+    # phrases", and "Yes, speaking" — the second item on that list — was
+    # transcribed four times in one call, on audio measured at 0.45-0.69 peak,
+    # i.e. a clean line. A hint may supply proper nouns the model would mangle;
+    # it must not supply whole utterances.
+    from agents.voice.templates import _US_TRANSCRIBE_HINT as _hint
+    for _phrase in ("yes, speaking", "hold on", "one moment", "let me check",
+                    "let me transfer you", "this is", "not available",
+                    "we can't share that", "he practices at"):
+        check(_phrase not in _hint.lower(),
+              f"hint does not supply the caller's line: {_phrase!r}")
+    check("likely phrases" not in _hint.lower(),
+          "hint has no complete-utterance section at all")
+    # Positive control: the proper nouns a hint legitimately exists for are
+    # still there, so gutting the hint fails rather than passing this section.
+    for _noun in ("Kaiser Permanente", "Cleveland Clinic", "campus",
+                  "medical center", "boulevard"):
+        check(_noun.lower() in _hint.lower(),
+              f"hint still primes the vocabulary it is for: {_noun!r}")
+
+    # Re-introduction: the greeting delivered a second time. The prompt has had
+    # a rule against this since templates.py:296 and it lost on turn TWO of
+    # call-20260813-1409. Detection keys off the greeting FORMULA — self-naming
+    # plus the org — not a bare mention of the org, because naming the org is
+    # the correct answer when someone genuinely asks who is calling.
+    for _t, _exp, _why in (
+        ("Sure, let me explain who I am and why I'm calling. I'm David, "
+         "calling on behalf of Definitive Healthcare.", True,
+         "the observed turn-2 failure"),
+        ("Yes — I'm an automated system from Definitive Healthcare.", False,
+         "employment claim is a different defect, not a re-introduction"),
+        ("I just need to know which branch Dr. Okafor works at.", False,
+         "the correct answer to WHY"),
+        ("We keep the Definitive Healthcare directory updated.", False,
+         "org named without self-naming"),
+        ("I'm David.", False, "name without org"),
+    ):
+        check(rw._is_reintroduction(_t, "David", "Definitive Healthcare") == _exp,
+              f"re-introduction detector: {_why}")
+
+    # The employment claim. The agent calls ON BEHALF OF the client and is not
+    # employed by them; "from {org}" is a false statement about who is on the
+    # phone, made to a medical office. It was removed from every greeting and
+    # asserted against per-template — and came back out of the model mid-call
+    # on call-20260813-1409 at 14:11:33, because those assertions check
+    # build_greeting() and nothing watched what the model actually said. Same
+    # three forms the greeting test uses, so the runtime and artifact checks
+    # cannot disagree about what the claim is.
+    for _t, _exp, _why in (
+        ("Yes — I'm an automated system from Definitive Healthcare.", True,
+         "the observed mid-call claim"),
+        ("Hi, this is David, calling on behalf of Definitive Healthcare.", False,
+         "the greeting itself must not trip it"),
+        ("I work with Definitive Healthcare on their listings.", True, "'with'"),
+        ("I am at Definitive Healthcare right now.", True, "'at'"),
+        ("We update the Definitive Healthcare directory.", False,
+         "org named without an employment claim"),
+    ):
+        check(rw._claims_employment(_t, "Definitive Healthcare") == _exp,
+              f"employment claim: {_why}")
+    # The greeting for EVERY template must survive its own runtime detector —
+    # the artifact check and the behaviour check agreeing on one example.
+    from agents.voice.templates import TEMPLATES as _EMP_ALL
+    _emp_probe = Doctor(doctor_name="Dr. Jane Okafor",
+                        hospital_name="Northside Medical Group")
+    for _name, _t2 in _EMP_ALL.items():
+        check(not rw._claims_employment(
+                  _t2.build_greeting(_emp_probe, org=settings.org_name),
+                  settings.org_name),
+              f"{_name}: greeting does not trip the employment detector")
+    # And the INSTRUCTIONS must not mandate the claim either. templates.py:411
+    # used to tell the model to say "you're an automated system from your
+    # organisation" — so the false claim on call-20260813-1409 was the model
+    # obeying the prompt, not departing from it. A runtime detector fighting
+    # its own instructions would have nudged against the script mid-call.
+    for _name, _t2 in _EMP_ALL.items():
+        _flat = " ".join(_t2.instructions.split())
+        # Narrow to the MANDATE, not the substring. "from your organisation"
+        # alone also matches the section header "# Identity — you present as a
+        # person from your organisation", which instructs nothing. An absence
+        # check aimed one word too wide fails on correct code, which is the
+        # same defect as one aimed too narrow — it just fails loudly instead of
+        # quietly.
+        check("system from your organisation" not in _flat,
+              f"{_name}: instructions do not mandate an employment claim")
+        # And the positive: the rule telling it which form to use is present.
+        # Case-insensitive — the prompt shouts it in one template and not the
+        # other, and the claim is that the rule exists, not how it is cased.
+        check("on behalf of" in _flat.lower(),
+              f"{_name}: instructions specify the on-behalf-of form")
+
+    # Hint-echo. The grounding check trusts caller turns, but a caller turn is a
+    # model's guess at the caller and the hint is a prompt to that model. Two
+    # independent signals must BOTH fail before a term is discounted — a bare
+    # one-word answer on strong audio is legitimate, and so is a quiet turn that
+    # carries surrounding words.
+    from core.models import TranscriptTurn as _TT
+    for _turns, _args, _exp, _why in (
+        ([_TT(role="caller", text="Mercy", audio_rms=0.002)],
+         {"branch": "Mercy"}, True, "bare hint word on dead air is rejected"),
+        ([_TT(role="caller", text="Northgate", audio_rms=0.05)],
+         {"branch": "Northgate"}, False,
+         "bare one-word answer on strong audio still grounds"),
+        ([_TT(role="caller", text="she's at the Mercy campus", audio_rms=0.002)],
+         {"branch": "Mercy"}, False,
+         "quiet turn with surrounding words still grounds"),
+        ([_TT(role="caller", text="Mercy", audio_rms=None)],
+         {"branch": "Mercy"}, False,
+         "unmeasured audio gets the benefit of the doubt"),
+        ([_TT(role="caller", text="hello", audio_rms=0.05)],
+         {"branch": "Northgate"}, True,
+         "a term never said at all is still rejected"),
+    ):
+        _got = bool(rw._ungrounded_terms(_args, types.SimpleNamespace(turns=_turns)))
+        check(_got == _exp, f"hint-echo: {_why}")
+
+    # ── Repeats are clauses, not only sentences ──────────────────────────────
+    # call-20260818-1613 contained a 45-character EXACT repeat and scored
+    # repeated_sentences: 0. Neither turn had an internal sentence break, so
+    # each counted as one "sentence", the two differed, and nothing was
+    # counted. The repeated part is the clause after the em-dash — and that is
+    # not an accident of this call: the prompt's own turn shape is "React, THEN
+    # say the thing", which produces `reaction — ask`, so the ask is the unit
+    # that repeats and it never sits at a sentence boundary.
+    #
+    # This metric is one of the figures used to compare calls, so a clean
+    # number on a dirty call weakened every comparison drawn from it.
+    _mkr = lambda r, x: types.SimpleNamespace(role=r, text=x)
+    _r1 = ("Hi, this is David, calling on behalf of Definitive Healthcare "
+           "about a doctor listing — which branch is Dr. Okafor working out of?")
+    _r3 = "I can hear you now — which branch is Dr. Okafor working out of?"
+    _rm = rw.conversation_metrics([_mkr("agent", _r1), _mkr("caller", "Hello?"),
+                                   _mkr("agent", _r3)])
+    check(_rm["repeated_sentences"] == 1,
+          "a repeated clause inside differing turns is caught",
+          f"{_rm['repeated_sentences']}")
+    # Punctuation is not the thing being measured: "...out of?" and
+    # "...out of." are the same thing said twice.
+    _rp = rw.conversation_metrics([
+        _mkr("agent", "So — which branch is she working out of?"),
+        _mkr("caller", "hm"),
+        _mkr("agent", "Right — which branch is she working out of.")])
+    check(_rp["repeated_sentences"] == 1,
+          "trailing punctuation does not hide a repeat",
+          f"{_rp['repeated_sentences']}")
+    # KNOWN LIMIT, deliberate: splitting is on dashes/semicolons/colons, which
+    # is the shape the prompt's "React, THEN say the thing" actually produces.
+    # A comma-led restatement is NOT caught. Splitting on commas would
+    # fragment almost every turn and manufacture false repeats, so the gap is
+    # accepted rather than closed. Asserted so it stays a decision instead of
+    # quietly becoming a surprise.
+    _rk = rw.conversation_metrics([
+        _mkr("agent", "So — which branch is she working out of?"),
+        _mkr("caller", "hm"),
+        _mkr("agent", "Right, which branch is she working out of.")])
+    check(_rk["repeated_sentences"] == 0,
+          "comma-led restatements are a known, accepted blind spot",
+          f"{_rk['repeated_sentences']}")
+    # A whole sentence said twice is ONE repetition, not one for the sentence
+    # plus one for each clause inside it. Counting clauses INSTEAD of sentences
+    # was the first attempt and it silently dropped a real repeat when a short
+    # sentence split into sub-threshold clauses.
+    _dbl = "Thanks for that — I'll get it noted down now."
+    _rd = rw.conversation_metrics([_mkr("agent", _dbl), _mkr("caller", "ok"),
+                                   _mkr("agent", _dbl)])
+    check(_rd["repeated_sentences"] == 1,
+          "a doubled sentence counts once, not once per clause",
+          f"{_rd['repeated_sentences']}")
+    # And it must not fire on ordinary distinct turns.
+    _rc = rw.conversation_metrics([
+        _mkr("agent", "Got it — which branch is she at?"),
+        _mkr("caller", "the north one"),
+        _mkr("agent", "Perfect, thanks — I'll note the north site down.")])
+    check(_rc["repeated_sentences"] == 0,
+          "distinct turns are not flagged as repeats",
+          f"{_rc['repeated_sentences']}")
+
+    # ── The measurement the guards rest on ───────────────────────────────────
+    # audio_rms is the sole input to _is_hint_echo, and it was being OVERWRITTEN
+    # rather than accumulated: set at every speech_stopped, consumed only when
+    # the transcript arrives, and transcription lags the VAD. A second segment
+    # on trailing silence between the real speech and its transcript replaced
+    # the real measurement with the silence.
+    #
+    # call-20260818-1613: the caller's "Yes, yes." recorded audio_rms=0.0025
+    # while Twilio's own caller channel shows that utterance at ~0.13 peak — a
+    # 50x under-report, erring toward calling real speech silence, which is the
+    # direction that throws away genuine answers. Two conclusions drawn from
+    # that number this week were wrong.
+    _ms = rw.RealtimeSession("CA000000000000000000000000rmsacc",
+                             Doctor(doctor_name="Dr. R"))
+    check(_ms.take_utterance_rms() == (None, 0),
+          "no segments yet -> nothing to report")
+    _ms.note_utterance_rms(0.1300)      # the caller actually speaking
+    _ms.note_utterance_rms(0.0025)      # trailing silence, segmented separately
+    _got, _segs = _ms.take_utterance_rms()
+    check(_got == 0.1300 and _segs == 2,
+          "the loudest segment survives a trailing silent one", f"{_got}, {_segs} segs")
+    check(_ms.take_utterance_rms() == (None, 0),
+          "and consuming it clears the accumulator")
+    # Order must not matter — silence can precede the speech just as easily.
+    _ms.note_utterance_rms(0.0025); _ms.note_utterance_rms(0.1300)
+    check(_ms.take_utterance_rms()[0] == 0.1300,
+          "a leading silent segment does not win either")
+    # Zero/None are not measurements and must not create a segment, or a
+    # genuinely unmeasured turn would look measured and lose its benefit of the
+    # doubt in _is_hint_echo.
+    _ms.note_utterance_rms(0.0); _ms.note_utterance_rms(None)
+    check(_ms.take_utterance_rms() == (None, 0),
+          "an unmeasurable segment stays unmeasured, not zero")
+
+    # ── The adaptive quiet threshold ─────────────────────────────────────────
+    # _LOW_AUDIO_RMS is an ABSOLUTE threshold on a quantity with no absolute
+    # meaning: line gain, handset and distance all move it, so one constant
+    # cannot be right for two calls. The threshold is therefore
+    # max(absolute floor, this caller's own median * _QUIET_FRACTION).
+    #
+    # HISTORY, because it governs how far to trust this: the fraction was first
+    # set to 0.35 to catch a "Mercy Medical Center" turn believed to be a
+    # transcription fabrication. That accusation was RETRACTED — the audio is
+    # real. It had been "measured" by slicing the LOCAL mix WAV at offsets
+    # derived from transcript timestamps, and the local mix and the Twilio
+    # recording are on different timelines (75.0s vs 68.2s for one call), so
+    # empty windows were read as silence. This guard therefore has NO confirmed
+    # positive case.
+    #
+    # Re-derived 2026-08-18 against 30 dual-channel recordings: for each, the N
+    # loudest caller-channel bursts where N is the number of transcribed caller
+    # turns, then min/median across them — how quiet a GENUINE turn gets
+    # relative to that caller's own level.
+    #     lowest 0.291   p10 0.458   median 0.766
+    #     genuine turn below median*0.35 : 2/30   <- 0.35 was unsafe
+    #     genuine turn below median*0.20 : 0/30
+    _sess_lv = types.SimpleNamespace(turns=[
+        _TT(role="caller", text=t, audio_rms=r) for t, r in [
+            ("Hello, who is this?", 0.1223),
+            ("But why are you collecting this?", 0.0954),
+            ("He's working at the Northgate campus.", 0.1532),
+            ("It is Los Angeles only.", 0.0465),
+        ]])
+    _lvl = rw._caller_speech_level(_sess_lv)
+    check(_lvl is not None,
+          "a caller speech level is derived once there are enough turns")
+    check(rw._QUIET_FRACTION <= 0.20,
+          "the fraction sits where no genuine turn in 30 calls fell below it",
+          f"{rw._QUIET_FRACTION}")
+    # The half that matters most: a real turn must never be discounted. A
+    # rejected genuine answer is the expensive failure for a directory.
+    for _txt, _rms in [("Hello, who is this?", 0.1223),
+                       ("He's working at the Northgate campus.", 0.1532),
+                       ("It is Los Angeles only.", 0.0465)]:
+        _t = _TT(role="caller", text=_txt, audio_rms=_rms)
+        _w = [w.strip(".,!?") for w in _txt.lower().split()
+              if w.strip(".,!?") not in rw._UNGROUNDED_STOPWORDS][:1]
+        check(not rw._is_hint_echo(_t, _w, _lvl),
+              f"real turn not discounted: {_txt[:34]!r}")
+    # Near-silence still is, which is what the absolute floor was always for.
+    check(rw._is_hint_echo(_TT(role="caller", text="Mercy", audio_rms=0.0008),
+                           ["mercy"], _lvl),
+          "a bare term on near-silence is still discounted")
+    # Too few turns to have a median: fall back to the absolute rule rather
+    # than computing a fraction of one sample, which is that sample and can
+    # never be below itself — a check that silently never fires.
+    _thin = types.SimpleNamespace(turns=[
+        _TT(role="caller", text="Mercy", audio_rms=0.05)])
+    check(rw._caller_speech_level(_thin) is None,
+          "no adaptive level until there are enough measured turns",
+          f"{rw._MIN_TURNS_FOR_ADAPTIVE} needed")
+    # The absolute stays a FLOOR: on a uniformly quiet call a fraction of a
+    # small number must not drive the threshold toward zero.
+    _quiet = types.SimpleNamespace(turns=[
+        _TT(role="caller", text=f"turn {i}", audio_rms=0.004) for i in range(3)])
+    check(rw._is_hint_echo(_TT(role="caller", text="Mercy", audio_rms=0.002),
+                           ["mercy"], rw._caller_speech_level(_quiet)),
+          "the absolute threshold still applies as a floor on a quiet line")
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0a3 — the agent must not repeat itself verbatim")
+    print("=" * 66)
+    _rp_sent, _rp_sess = await run_call(script_repeats_itself())
+    _rp_nudges = [c["text"] for m in _rp_sent
+                  if m.get("type") == "conversation.item.create"
+                  for c in m["item"].get("content", [])
+                  if c.get("type") == "input_text"]
+    check(any("said the same" in n for n in _rp_nudges),
+          "verbatim self-repeat is detected and the model is told",
+          f"{len(_rp_nudges)} directives sent")
+    # One-shot: a second copy of a directive the model already ignored is
+    # context it pays for twice.
+    check(sum("said the same" in n for n in _rp_nudges) == 1,
+          "the self-repeat nudge is sent at most once per call")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0a3 — barge-in inside the pre-audio window")
+    print("=" * 66)
+    _bi_out: dict = {}
+    _bi_sent, _bi_sess = await run_call(script_barge_in_before_first_audio(), out=_bi_out)
+    _bi_tw = _bi_out["twilio"].sent
+    # Both halves of the contract. The cancel goes to OpenAI; the `clear` goes
+    # to Twilio and is what actually stops audio reaching the caller's ear.
+    # Only the first was ever reachable from run_call's return value, so the
+    # half that matters on the phone had no assertion at all.
+    check(any(m.get("type") == "response.cancel" for m in _bi_sent),
+          "caller talking over a not-yet-audible response cancels it",
+          f"{sorted({m.get('type') for m in _bi_sent})}")
+    check(any(m.get("event") == "clear" for m in _bi_tw),
+          "and Twilio is told to drop the audio it has buffered",
+          f"{[m.get('event') for m in _bi_tw]}")
+    # The flag that made this possible. Set on response.created, it answers
+    # "is a response in flight"; the audio-delta point answered "is the agent
+    # audible", which is what sess.agent_speaking is for. The silence watchdog
+    # and the empty-response guard both read this and both wanted the former.
+    check(rw.RealtimeSession("CA0000000000000000000000000abc",
+                             Doctor(doctor_name="Dr. X"))._response_active is False,
+          "_response_active starts False")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0a6 — told them it was saved, then it wasn't")
+    print("=" * 66)
+    _fs_sent, _fs_sess = await run_call(script_announce_then_rejected())
+    _fs_msgs = [c["text"] for m in _fs_sent
+                if m.get("type") == "conversation.item.create"
+                for c in (m.get("item", {}).get("content") or [])
+                if c.get("type") == "input_text"]
+    _fs = [t for t in _fs_msgs if "nothing has been recorded" in t]
+    check(len(_fs) == 1,
+          "a save-claim followed by a rejection is corrected exactly once",
+          f"{len(_fs)} of {len(_fs_msgs)} injected")
+    check(_fs and "as though the call is over" in _fs[0],
+          "and the correction covers the 'we're all set' half, not just the save")
+    check(_fs_sess is not None and not _fs_sess.memory.get("resolved"),
+          "the call is still unresolved — nothing was written")
+
+    # The detector, on the real utterances. Two families: a claim about the
+    # TOOL ("I'll save that") and a claim about the CALL ("we'll be all set").
+    # The model produced both in one sentence, and the second is worse because
+    # it invites them to hang up.
+    for _want, _txt in [
+        (True,  "Thanks for checking — I’ll save that and then we’ll be all set."),
+        (True,  "Perfect, thanks for confirming — I’ll save that and we’re done."),
+        (True,  "Got it noted down."),
+        (True,  "All set — thanks for your time."),
+        (False, "Got it — which branch is she at?"),
+        (False, "Sure, take your time."),
+        (False, "I'm trying to find out which branch Dr. Okafor works at."),
+        (False, "Is that the only location they have in Los Angeles?"),
+    ]:
+        check(rw._claims_saved(_txt) == _want,
+              f"save-claim detector: {_want!s:5} for {_txt[:40]!r}")
+    # Typographic apostrophes, since that is what the model actually emits and
+    # what defeated _REPORTS_FAILURE until it was normalised.
+    check(rw._claims_saved("I’ll save that") and rw._claims_saved("I'll save that"),
+          "the detector sees both apostrophe spellings")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0a5 — repair after an interruption")
+    print("=" * 66)
+    # Barge-in working is not the same as barge-in helping. On
+    # call-20260818-1338 it fired correctly and made the call worse: truncated
+    # to 750ms, the caller heard almost nothing, said "Hello.", and the agent
+    # read that as filler and re-asked. A human cut off mid-sentence restates;
+    # it does not ask again.
+    #
+    # This is deliberately NOT a Conversation Flow rule. The fact that
+    # distinguishes a repair signal from filler — that we truncated, and to how
+    # many ms — never appears in the transcript, so the model cannot condition
+    # on it however the prose is worded. The process has it exactly.
+    _rp_sent, _rp_sess = await run_call(script_cut_off_then_hello())
+    _rp_msgs = [c["text"] for m in _rp_sent
+                if m.get("type") == "conversation.item.create"
+                for c in (m.get("item", {}).get("content") or [])
+                if c.get("type") == "input_text"]
+    _repair = [t for t in _rp_msgs if "cut off" in t]
+    check(len(_repair) == 1,
+          "a cut-off caller turn triggers exactly one repair directive",
+          f"{len(_repair)} of {len(_rp_msgs)} injected messages")
+    check(_repair and "not ask anything new" in _repair[0].lower(),
+          "the directive says restate, not re-ask")
+    check(_repair and "checking the line" in _repair[0],
+          "and names what the caller's turn actually was")
+    check(_rp_sess is not None and _rp_sess._repair_nudged,
+          "the repair is one-shot, like every other injected directive")
+    # The thresholds are the claim, so they get asserted rather than assumed.
+    # A long truncation means they heard most of it and may have interrupted on
+    # purpose — a normal move that needs no repair.
+    check(rw._CUT_SHORT_MS <= 2000,
+          "only SHORT truncations count as 'they heard nothing'",
+          f"{rw._CUT_SHORT_MS}ms")
+    check(rw._REPAIR_WINDOW_S <= 20,
+          "and the window is bounded, so an early cut cannot colour a later turn",
+          f"{rw._REPAIR_WINDOW_S}s")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0a4 — OpenAI cancels the response, not us")
+    print("=" * 66)
+    _sc_out: dict = {}
+    _sc_sent, _ = await run_call(script_server_side_cancel(), out=_sc_out)
+    check(not any(m.get("type") == "response.cancel" for m in _sc_sent),
+          "we did not cancel it — the server did")
+    check(any(m.get("event") == "clear" for m in _sc_out["twilio"].sent),
+          "a server-side cancel still drains Twilio's buffer",
+          f"{[m.get('event') for m in _sc_out['twilio'].sent]}")
+
+    # interrupt_response was never sent, so this ran on the API default and
+    # nobody had chosen it. Declared now — asserted so it stays declared, since
+    # an inherited default is exactly what made the interruption path
+    # unobservable for eight sessions.
+    _ic = rw.build_audio_config(
+        transcribe_model="whisper-1", transcribe_hint="", audio_format="pcmu",
+        noise_reduction="near_field", turn_detection="server_vad",
+        eagerness="medium", voice="cedar")
+    check("interrupt_response" in _ic["input"]["turn_detection"],
+          "turn detection declares interrupt_response rather than inheriting it",
+          f"{sorted(_ic['input']['turn_detection'])}")
+
+    print("\n" + "=" * 66)
+    print("  SCENARIO 0a2 — a REJECTED response must not be retried")
+    print("=" * 66)
+    _r_sent, _ = await run_call(script_rejected_response())
+    _r_creates = [m for m in _r_sent if m.get("type") == "response.create"]
+    check(len(_r_creates) == 1,
+          "rejected response is not mistaken for dead air",
+          f"{len(_r_creates)} response.create sent (greeting only expected)")
 
     print("\n" + "=" * 66)
     print("  SCENARIO 0b — must not hang up on someone going to check")
@@ -590,10 +1355,27 @@ async def main():
                        f"at {settings.org_name}"):
             check(_claim not in _g,
                   f"{_name}: no employment claim {_claim!r}")
-        # The hospital-confirmation question was ignored by 10 of 11 callees and
-        # the check it stood for now lives in hospital_mismatch(), so the opening
-        # no longer spends its one question on it.
-        check("?" not in _g, f"{_name}: opener ends flat, callee speaks next", _g[:52])
+        # IF THIS FAILS, THE ASSERTION MAY BE WHAT IS WRONG — it encodes a
+        # judgement about openers that has now changed once.
+        #
+        # It used to read `"?" not in _g`, banning every question because the
+        # hospital-confirmation question had been ignored by 10 of 11 callees.
+        # That over-generalised from one dead question to all questions, and
+        # what replaced it was a full stop, which hands over no turn at all. On
+        # call-20260813-1409 the callee did not know what was wanted, answered
+        # with noise, and the opener spent the next forty seconds being
+        # recovered by the silence watchdog.
+        #
+        # The real distinction is what the question is FOR. A confirmation
+        # question asks for something the callee gains nothing by answering. The
+        # actual ask gives them something concrete to respond to and advances
+        # the call in the same breath. So: no hospital confirmation, and end on
+        # a question.
+        check(_probe.hospital_name not in _g,
+              f"{_name}: opener does not spend itself confirming the hospital",
+              _g[:52])
+        check(_g.rstrip().endswith("?"),
+              f"{_name}: opener ends on the ask, handing over the turn", _g[-40:])
         check(settings.org_name not in _t.instructions,
               f"{_name}: organisation stays out of the cached instructions")
 
@@ -728,6 +1510,30 @@ async def main():
     # for help never given, as the last thing they heard.
     check("THANK THEM FOR WHAT THEY ACTUALLY DID" in tpl.instructions,
           "closing is tied to the actual outcome")
+    # Three turns from call-20260818-1112 that the prompt had no rule for.
+    # Asserted on both templates: this file already has a bug class from fixing
+    # one template and leaving the other, and a caller asking "is it an
+    # emergency?" gets the same wrong answer whichever identity block is loaded.
+    for _n3, _t3 in _ALL.items():
+        _f3 = " ".join(_t3.instructions.split())
+        # "May I know why are you calling? Is it an emergency call?" — the agent
+        # answered WHY and dropped the yes/no entirely.
+        check("EMERGENCY" in _f3 and "nothing urgent" in _f3,
+              f"{_n3}: prompt answers the is-this-an-emergency question")
+        # It opened that same turn with "It's just me, calling on behalf of..."
+        # — a phrase that identifies nobody, from a stranger on their phone.
+        check("it's just me" in _f3.lower(),
+              f"{_n3}: prompt bans the identifies-nobody non-answer")
+        # "Need anything?" — an open offer, answered with nothing.
+        check("They OFFER to help" in _f3,
+              f"{_n3}: prompt takes an offer of help instead of returning it")
+        # "Can you share those details with me?" — answered by reciting what was
+        # on the record, to someone unverified.
+        check("collect this information, not" in _f3,
+              f"{_n3}: prompt refuses to read the record back to the caller")
+        # And the rejection-handling rule that lost the branch.
+        check("RE-READ WHAT THEY ACTUALLY SAID" in _f3,
+              f"{_n3}: prompt re-reads the transcript before re-asking")
     check("Never claim to have noted, saved, or recorded a location you were" in flat,
           "cannot claim to have saved a location it never got")
     # Directives are injected as role:"user" input_text items — the standard
@@ -750,8 +1556,18 @@ async def main():
     # found by reading the source rather than by remembering to add them here.
     _worker_src = pathlib.Path("agents/voice/realtime_worker.py").read_text(
         encoding="utf-8")
-    _injected = set(re.findall(r'"\(system: ([a-z]{4,}[a-z ]{6,})', _worker_src))
-    check(len(_injected) >= 4,
+    # The first word may be short. '[a-z]{4,}' silently skipped every directive
+    # opening with a three-letter word, which was both of the ones beginning
+    # "you ..." — including the ask-budget directive that ENDS the call. The
+    # test reported 5 paths while the module had 7, so the point of deriving
+    # them from source (catch a new path the day it lands) was defeated by the
+    # pattern used to derive them.
+    _injected = set(re.findall(r'"\(system: ([a-z][a-z ]{9,})', _worker_src))
+    _declared = _worker_src.count('"(system: ')
+    check(len(_injected) == _declared,
+          "every injected directive is found, none skipped by the pattern",
+          f"{len(_injected)} found vs {_declared} in source")
+    check(len(_injected) >= 7,
           "found the module's injected directives to check against",
           f"{len(_injected)} paths")
     for _phrase in _injected:
@@ -825,8 +1641,15 @@ async def main():
     probe = Doctor(doctor_name="Dr. Jane Okafor",
                    hospital_name="Northside Medical Group")
     disclosed = TEMPLATES["forage_ai_disclosed"]
-    check("automated assistant" in disclosed.build_greeting(probe),
-          "forage_ai_disclosed announces automation upfront")
+    # The claim is that automation is DISCLOSED, not that one particular phrase
+    # is used. Asserting on "automated assistant" pinned the wording, and the
+    # wording is now banned outright — the agent must not describe itself in
+    # assistant register anywhere. Check the disclosure, not the phrasing.
+    _dg = disclosed.build_greeting(probe)
+    check("automated" in _dg.lower(),
+          "forage_ai_disclosed announces automation upfront", _dg[:56])
+    check("automated assistant" not in _dg.lower(),
+          "forage_ai_disclosed discloses without the assistant register", _dg[:56])
     check("automated" not in tpl.build_greeting(probe).lower(),
           "Template 1 does not announce automation upfront")
 
@@ -892,8 +1715,12 @@ async def main():
         check(rw._is_location_ask(text) == expected,
               f"location-ask detector: {expected!s:5} for {text[:44]!r}")
     # Every compiled pattern in the module, not just one. A patch script has now
-    # written 0x08 into a regex twice; the first time only _LOCATION_ASK was
-    # guarded, and the second landed in a pattern the guard did not cover.
+    # written 0x08 into a regex twice; the first time only the location-ask
+    # pattern was guarded, and the second landed in a pattern the guard did not
+    # cover. (That pattern, _LOCATION_ASK, was itself deleted on 2026-08-18 —
+    # dead since _is_location_ask was inverted away from a phrasing whitelist.
+    # Named here as history only; this loop finds patterns by type, so it never
+    # needed the name and does not age when one is removed.)
     import re as _re
     for _name, _val in vars(rw).items():
         if isinstance(_val, _re.Pattern):
@@ -952,6 +1779,110 @@ async def main():
 
     check("TOOL RESULTS ARE INTERNAL" in tpl.instructions,
           "prompt forbids reading tool results aloud")
+
+    # The loop above enumerates ONE source of rejections: tools.py. That is not
+    # the population. realtime_worker builds four more inline at the tool-call
+    # site — the grounding block, the wrong-organisation block, and both
+    # escalation blocks — and no assertion had ever looked at them. So they
+    # stayed fluent English imperatives while tools.py was tightened around
+    # them, and on call-20260818-1112 the agent read one to a caller, lightly
+    # paraphrased: "Sorry, I can't use that unless you've actually said the
+    # place name" — to someone who had just said a branch name. The guard
+    # existed, worked, and was aimed at half the code.
+    #
+    # So: find every rejection, prove the search found them, judge each one.
+    # Parsed rather than text-searched — a dict value is a dict value however
+    # the line wraps and whether or not it is an f-string.
+    import ast as _ast, pathlib as _pl
+    _inline_errs: list[str] = []
+    for _node in _ast.walk(_ast.parse(_pl.Path(rw.__file__).read_text(encoding="utf-8"))):
+        if not isinstance(_node, _ast.Dict):
+            continue
+        for _k, _v in zip(_node.keys, _node.values):
+            if not (isinstance(_k, _ast.Constant) and _k.value == "error"):
+                continue
+            if isinstance(_v, _ast.Constant):
+                _inline_errs.append(str(_v.value))
+            elif isinstance(_v, _ast.JoinedStr):
+                # Keep the authored literal segments. The interpolated parts are
+                # runtime values (a mismatch description, a reason) — not a
+                # register this file chose, and not something it can assert on.
+                _inline_errs.append("".join(
+                    _p.value for _p in _v.values if isinstance(_p, _ast.Constant)))
+    # Lower bound, so it ages without edits when a fifth guard is added, but
+    # fails loudly if the walk stops finding them — the key renamed, the dicts
+    # moved behind a helper. A judging loop over an empty list passes.
+    check(len(_inline_errs) >= 4,
+          "found realtime_worker's inline rejections before judging them",
+          f"{len(_inline_errs)} found")
+    for _err in _inline_errs:
+        check(_err.startswith(("REJECTED", "NOT SAVED", "NOT ESCALATED")),
+              "inline rejection is machine-shaped", _err[:44])
+        for _phrase in _SPEAKABLE:
+            check(_phrase not in _err.lower(),
+                  f"inline rejection has no speakable imperative ({_phrase!r})",
+                  _err[:56])
+    # The grounding rejection specifically must send the model back to the
+    # transcript BEFORE it asks again. Telling it to ask is what lost
+    # call-20260818-1112: the caller had said "office Abadan branch", the model
+    # tried to save "Northside Branch" off its own record, and the call
+    # escalated as unresolved with the answer sitting in the turns.
+    check(any("RE-READ" in _e for _e in _inline_errs),
+          "a rejection sends the model back to what the caller actually said")
+
+    # /status decides, in one line, whether this call ever connected — and it
+    # is the only line printed for a call that produced no transcript, so it is
+    # the one place an operator has to be able to trust. It asked
+    # `csid in _sessions` until 2026-08-18. Nothing writes _sessions on the
+    # realtime path, so it was False for every realtime call and each one was
+    # reported "NO CONVERSATION — nobody spoke to it", including 86-second
+    # conversations that resolved.
+    #
+    # The invariant is not the registry's name. It is that whatever registry
+    # that test consults must be marked on the COMMON path — unconditionally in
+    # media_stream, not inside one branch of it — because that is what makes it
+    # true of both call paths. Asserted structurally: a name equality would
+    # pass again the moment someone swaps in another single-path registry.
+    import agents.voice.twilio_worker as _tw
+    _tw_ast = _ast.parse(_pl.Path(_tw.__file__).read_text(encoding="utf-8"))
+    _fn = {n.name: n for n in _ast.walk(_tw_ast)
+           if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))}
+    check({"status_callback", "media_stream"} <= set(_fn),
+          "found both handlers before asserting about them",
+          f"have {sorted(set(_fn) & {'status_callback', 'media_stream'})}")
+
+    # Every `<call sid> in <registry>` test in the status handler. Keyed on the
+    # SID because that is what a per-call registry is keyed by; it excludes the
+    # handler's other membership test, `status in _never_connected`, which is a
+    # lookup table of Twilio status strings and nothing to do with this. If the
+    # SID variable is ever renamed out of that shape the set goes empty and the
+    # population check below fails loudly rather than judging nothing.
+    _probed = {c.comparators[0].id
+               for c in _ast.walk(_fn["status_callback"])
+               if isinstance(c, _ast.Compare)
+               and any(isinstance(o, _ast.In) for o in c.ops)
+               and isinstance(c.comparators[0], _ast.Name)
+               and isinstance(c.left, _ast.Name)
+               and "sid" in c.left.id.lower()}
+    check(len(_probed) >= 1,
+          "found the connectivity probe in /status", f"{sorted(_probed)}")
+
+    # Names mutated by a top-level statement of media_stream — i.e. reached
+    # whichever worker handles the call. Nested writes do not count; that is
+    # precisely the bug.
+    _common: set[str] = set()
+    for _stmt in _fn["media_stream"].body:
+        if not isinstance(_stmt, _ast.Expr) or not isinstance(_stmt.value, _ast.Call):
+            continue
+        _f = _stmt.value.func
+        if isinstance(_f, _ast.Attribute) and isinstance(_f.value, _ast.Name):
+            if _f.attr in ("add", "update", "__setitem__"):
+                _common.add(_f.value.id)
+    for _reg in _probed:
+        check(_reg in _common,
+              f"/status probes {_reg!r}, which media_stream marks on the "
+              f"common path (both call paths reach it)",
+              f"unconditionally marked: {sorted(_common)}")
 
     # A caller repeating themselves is telling you that is all they have. On a
     # live call they gave a street and a state twice, 36 seconds apart, and
@@ -1034,8 +1965,36 @@ async def main():
     _only_greeting = [_mk("agent", "One. Two. Three.")]
     check(rw.conversation_metrics(_only_greeting)["piled_turns"] == 0,
           "the greeting is exempt from the pile-up count")
-    check("ONE MOVE PER TURN" in tpl.instructions,
-          "prompt requires one move per turn")
+    # The prompt and the METRIC must agree on what a pile-up is. They did not.
+    # Pacing said "ONE MOVE PER TURN — answer, or ask, or acknowledge, one of
+    # them, then stop", while Shape Of A Turn marked the bare acknowledgement
+    # ("Got it.") as Wrong and gave three worked examples of reaction-plus-ask.
+    # Two sections classifying the same utterance oppositely is not a style
+    # preference the model can satisfy; it is an arbitration it has to perform
+    # on every turn, and examples beat prose, so Shape won inconsistently.
+    # call-20260818-1112 measured 50% stapling — that is the arbitration, not
+    # disobedience.
+    #
+    # piled_turns has ALWAYS counted >=3 sentences, so the measurement always
+    # permitted reaction-plus-ask. The prompt rule was the outlier, and it was
+    # also redundant: ONE ASK PER TURN already forbids the real hazard, in
+    # countable terms, without colliding with anything.
+    _flat_pace = " ".join(tpl.instructions.split())
+    check("ONE ASK PER TURN" in _flat_pace,
+          "the countable rule survives — one ASK per turn")
+    check("ONE MOVE PER TURN" not in _flat_pace,
+          "the rule that contradicted it is gone")
+    # A bare reaction is Wrong and reaction-plus-ask is Right. Assert the prompt
+    # still says so, since that is the half that had examples and won.
+    check('Wrong: "Got it."' in _flat_pace,
+          "a bare acknowledgement is still marked Wrong")
+    # And the prompt's threshold must match the metric's: three or more.
+    check("Three or more" in _flat_pace or "three or more" in _flat_pace,
+          "prompt names the same pile-up threshold the metric counts (>=3)")
+    check(rw.conversation_metrics(
+              [_mk("agent", "Greeting."), _mk("agent", "Got it. Which branch is she at?")]
+          )["piled_turns"] == 0,
+          "reaction-plus-ask is not a pile-up by the metric either")
     check("NEVER ABOUT IT" in tpl.instructions,
           "thinking-narration judged by a test, not a phrase list")
 
@@ -1172,6 +2131,330 @@ async def main():
         check(got == blocked,
               f"escalate {reason!r}: {'blocked' if blocked else 'allowed'} "
               f"given {sess_.turns[0].text[:34]!r}")
+
+    # ── The inverse: an answer the caller GAVE, thrown away ──────────────────
+    # Every guard above blocks a false positive — recording something that did
+    # not happen. call-20260818-1112 failed the other way and nothing caught
+    # it: the caller said "office Abadan branch" on turn two, save_branch was
+    # called with "Northside Branch" (reshaped from the hospital name in the
+    # model's own context), grounding correctly rejected it, the ask budget
+    # correctly ran out, and the call escalated
+    # reason="caller engaged but never provided a location".
+    #
+    # Every component behaved and the recorded reason is false. For a
+    # data-collection product that is the expensive direction: a wrong row can
+    # be found, a discarded answer looks identical to a receptionist who would
+    # not say.
+    import types as _ty2
+
+    def _cs(*texts, rms=0.05):
+        s = _ty2.SimpleNamespace()
+        s.turns = [_ty2.SimpleNamespace(role="caller", text=t, audio_rms=rms)
+                   for t in texts]
+        s.doctor = Doctor(doctor_name="Dr. Jane Okafor",
+                        hospital_name="Northside Medical Group")
+        s.org_name, s.agent_name = "Definitive Healthcare", "David"
+        return s
+
+    _R = "caller engaged but never provided a location"
+    for _want, _label, _s in [
+        # The call itself, verbatim.
+        (True,  "the call that lost an answer", _cs(
+            "Hello, David. May I know why are you calling? Is it an emergency call?",
+            "office Abadan branch, Need anything?",
+            "But I wanted to know other than the branch details, do you know "
+            "anything about the doctors?",
+            "So can you share those details with me?")),
+        (True,  "street address",        _cs("She's over on Lombard Street, I believe.")),
+        (True,  "named campus",          _cs("That'd be the Northgate campus.")),
+        (True,  "suburb and clinic",     _cs("Try the Jubilee Hills clinic.")),
+        (True,  "turn-initial name",     _cs("Abadan branch is where she is.")),
+        # Capitalisation is a CONJUNCT, not a requirement — a transcript that
+        # came back caseless must not silently disable the detector.
+        (True,  "caseless transcript",   _cs("she's at the northgate campus")),
+        # False positives here are the expensive kind: they gate an escalation,
+        # so one that fires on ordinary talk strands the agent on a call it
+        # cannot end. These are the utterances that broke the first version.
+        (False, "pure deflection",       _cs("Hello?", "Who is this?", "I can't help with that.")),
+        (False, "flat refusal",          _cs("We don't give out that information.", "Sorry, no.")),
+        (False, "generic word only",     _cs("She works at the branch.", "Just the main office.")),
+        (False, "our other office",      _cs("She might be at our other office, I'm not sure.")),
+        (False, "which location",        _cs("Which location did you want? I don't know.")),
+        (False, "the office is closed",  _cs("The office is closed today, sorry.")),
+        (False, "sentence-initial adj",  _cs("Closed. The branch is closed right now.")),
+        # Our own record echoed back is not an answer FROM the call — it is the
+        # exact material the fabrication was reshaped from.
+        (False, "hospital on record",    _cs("This is Northside Medical Group hospital, how can I help?")),
+        (False, "doctor's own name",     _cs("Okafor? At the clinic here, I think.")),
+        (False, "the agent's persona",   _cs("Hi David, the office is closed.")),
+        (False, "nothing transcribed",   _cs()),
+        # Must clear the same hint-echo bar a real save has to clear.
+        (False, "bare term, dead air",   _cs("Northgate", rms=0.001)),
+    ]:
+        check(bool(rw._discarded_location(_R, _s)) == _want,
+              f"discarded-answer detector: {_want!s:5} for {_label}",
+              rw._candidate_location(_s)[:52])
+
+    # The reason gate. Reasons describing the CALL are the agent's own
+    # observation; a place name in the transcript says nothing about whether
+    # they are true, and blocking them would strand the agent.
+    _gs = _cs("She's at the Northgate campus.")
+    for _reason, _want in [
+        ("caller engaged but never provided a location", True),
+        ("caller does not know", True),
+        ("could not obtain the location", True),
+        ("wrong number", False), ("voicemail", False),
+        ("declined to share", False), ("no response", False),
+    ]:
+        check(bool(rw._discarded_location(_reason, _gs)) == _want,
+              f"reason gate: {_reason!r} "
+              f"{'checked' if _want else 'exempt'}")
+
+    # One-shot. A guard that can refuse forever is a call that cannot be ended,
+    # and this detector is conservative rather than infallible. The session flag
+    # is what bounds it — assert it exists and starts False, so the call site's
+    # `not sess._discard_blocked` cannot silently become a permanent block.
+    check(rw.RealtimeSession.__init__.__code__.co_consts is not None
+          and "_discard_blocked" in rw.RealtimeSession(
+              "CA00000000000000000000000000block",
+              Doctor(doctor_name="Dr. X", hospital_name="Y")).__dict__,
+          "session carries the one-shot flag that bounds the block")
+    check(rw.RealtimeSession(
+              "CA00000000000000000000000000block2",
+              Doctor(doctor_name="Dr. X", hospital_name="Y"))._discard_blocked is False,
+          "the discarded-answer block starts unfired")
+
+    print("\n" + "=" * 66)
+    print("  OpenAI handshake — a transient stall must not cost the call")
+    print("=" * 66)
+    # Call CAd1a20b, 2026-08-18: the callee picked up, the OpenAI handshake
+    # stalled past the websockets default of 10s, and the call ended having
+    # played nothing. A probe from the same machine minutes later connected in
+    # 1.7s — so one bad TCP setup cost a live call with a real person on it.
+    # There was no retry and the timeout was whatever the library chose.
+    _hs_out: dict = {}
+    _hs_sent, _hs_sess = await run_call(script_happy_path(), out=_hs_out,
+                                        connect_failures=1)
+    check(_hs_out["attempts"]["n"] == 2,
+          "a failed handshake is retried once", f"{_hs_out['attempts']['n']} attempts")
+    check(_hs_sess is not None and _hs_sess.memory.get("resolved"),
+          "and the call still completes normally after the retry")
+    # Two attempts, not unlimited: the callee is listening to silence the whole
+    # time, so the budget is bounded by their patience, not by optimism.
+    _hs_out2: dict = {}
+    try:
+        await run_call(script_happy_path(), out=_hs_out2, connect_failures=2)
+        _gave_up = False
+    except Exception:
+        _gave_up = True
+    check(_gave_up and _hs_out2["attempts"]["n"] == 2,
+          "two failures gives up rather than holding a silent line open",
+          f"{_hs_out2['attempts']['n']} attempts")
+    check(rw._OAI_CONNECT_TIMEOUT_S < 10.0,
+          "per-attempt timeout is tighter than the library default",
+          f"{rw._OAI_CONNECT_TIMEOUT_S}s")
+
+    print("\n" + "=" * 66)
+    print("  Doctor routing — by CallSid, with no shared global")
+    print("=" * 66)
+    # `pending_doctor` was one module global that /answer read. Two calls in
+    # flight would share it and the second would ask about the first one's
+    # doctor — corrupt data, no error. It never fired because the global itself
+    # made concurrency impossible, which is the worst kind of safe: the thing
+    # keeping the bug dormant is the first thing a batch runner removes.
+    #
+    # Removing it surfaced why it had survived: register_call had NO CALLERS.
+    # The SID map was never populated, so every call in the programme's history
+    # resolved through the fallback. The safe path existed, was tested, and was
+    # dead code.
+    check(not hasattr(_tw, "pending_doctor"),
+          "the shared pending_doctor global is gone")
+    # The population that must route by SID: whatever places a call has to
+    # register it, or /answer resolves nothing and hangs up.
+    _rt_src = _pl.Path(_pl.Path(rw.__file__).parent.parent.parent / "run_twilio.py").read_text(encoding="utf-8")
+    check("register_call(" in _rt_src,
+          "run_twilio binds the CallSid it gets back from Twilio")
+
+    _tw._doctor_by_sid.clear()
+    _dA = Doctor(doctor_name="Dr. A", hospital_name="Hospital A")
+    _dB = Doctor(doctor_name="Dr. B", hospital_name="Hospital B")
+    _tw.register_call("CA_aaa", _dA)
+    _tw.register_call("CA_bbb", _dB)
+    check((await _tw._doctor_for("CA_aaa")).doctor_name == "Dr. A"
+          and (await _tw._doctor_for("CA_bbb")).doctor_name == "Dr. B",
+          "two calls in flight resolve to their own doctors")
+    # Twilio retries webhooks. A second /answer for the same SID must resolve
+    # to the same doctor, so the lookup must not consume the entry.
+    check((await _tw._doctor_for("CA_aaa")).doctor_name == "Dr. A",
+          "a retried webhook still resolves — the lookup does not pop")
+    # An unknown SID waits, then gives up. Hanging up beats calling a hospital
+    # about a record we cannot identify.
+    _t0 = time.monotonic()
+    _unknown = await _tw._doctor_for("CA_never_registered")
+    _waited = time.monotonic() - _t0
+    check(_unknown is None, "an unregistered CallSid resolves to nothing")
+    check(_waited >= _tw._ROUTING_WAIT_S * 0.5,
+          "and it waited for a late registration before giving up",
+          f"{_waited:.2f}s")
+    _tw._doctor_by_sid.clear()
+
+    print("\n" + "=" * 66)
+    print("  response.create — one door, three policies")
+    print("=" * 66)
+    # Six call sites, each with its own guard conditions. Two shipped without
+    # checking _response_active and BOTH caused dead air on live calls
+    # (97ff46d, then the empty-response re-request on 2026-08-11). That is one
+    # missing abstraction, not two bugs — the seventh site would have been
+    # another coin-flip.
+    #
+    # The invariant is not "the helper exists". It is that the helper is the
+    # ONLY door: a new site that sends response.create directly gets none of
+    # the guards and fails exactly the way the previous two did. Enforced
+    # structurally, so it holds for code nobody has written yet.
+    _rw_tree = _ast.parse(_pl.Path(rw.__file__).read_text(encoding="utf-8"))
+    _senders = set()
+    for _fn_node in _ast.walk(_rw_tree):
+        if not isinstance(_fn_node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        for _c in _ast.walk(_fn_node):
+            if isinstance(_c, _ast.Constant) and _c.value == "response.create":
+                _senders.add(_fn_node.name)
+    check(_senders == {"_create_response"},
+          "response.create is sent from exactly one function",
+          f"sent from {sorted(_senders)}")
+
+    # And every site actually goes through it. A lower bound: sites get added,
+    # and an equality here would fail on correct code.
+    _calls = [n for n in _ast.walk(_rw_tree)
+              if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+              and n.func.id == "_create_response"]
+    check(len(_calls) >= 6, "all six known sites route through the helper",
+          f"{len(_calls)} call sites")
+    # Every call names itself. A guard that silently does nothing looks exactly
+    # like a guard that works — this module has been bitten by that three times,
+    # so refusals are logged and the log needs to say which site was refused.
+    check(all(any(k.arg == "why" for k in c.keywords) for c in _calls),
+          "every site passes `why`, so a refusal names itself in the log")
+
+    # The policy matrix. THE SITES DO NOT SHARE ONE POLICY: the goodbye and its
+    # retry fire *because* the call is done, so a helper that refused on
+    # sess.done would silently kill them — the exact silent no-op it exists to
+    # prevent, at the two sites hardest to test.
+    class _FakeWS:
+        def __init__(self): self.sent = []
+        async def send(self, raw): self.sent.append(json.loads(raw))
+
+    async def _policy(active, done, **kw):
+        _s = rw.RealtimeSession("CA000000000000000000000000polic",
+                                Doctor(doctor_name="Dr. P"))
+        _s._response_active, _s.done = active, done
+        _ws = _FakeWS()
+        ok = await rw._create_response(_ws, _s, why="test", **kw)
+        return ok, len(_ws.sent)
+
+    for _active, _done, _kw, _want, _label in [
+        (False, False, {},                          True,  "idle call: allowed"),
+        (True,  False, {},                          False, "response in flight: refused"),
+        (False, True,  {},                          False, "call closing: refused"),
+        (False, True,  {"allow_when_done": True},   True,  "goodbye: allowed though done"),
+        (True,  True,  {"allow_when_done": True,
+                        "allow_when_active": True}, True,  "goodbye from tool handler: allowed"),
+        (True,  True,  {"allow_when_done": True},   False, "done-override alone does not cover in-flight"),
+    ]:
+        _ok, _n = await _policy(_active, _done, **_kw)
+        check(_ok is _want and _n == (1 if _want else 0),
+              f"policy: {_label}", f"sent={_n}")
+
+    # The matrix above tests the HELPER. It does not test the WIRING, and that
+    # is the half that matters: setting the closing site's overrides to False
+    # left every policy check passing while the goodbye was silently dropped —
+    # the same guard-aimed-at-half-the-code shape as the rejection messages and
+    # the /status probe. So assert the behaviour end to end.
+    #
+    # A resolved call owes the caller a spoken goodbye. In the happy path the
+    # tool fires with no audio in that response, so the goodbye has to be
+    # requested explicitly — greeting + goodbye = 2. Naive overrides on the
+    # closing site drop it to 1 and hang up in silence, which is the bug
+    # 6f0930a exists to prevent.
+    _hp_sent, _ = await run_call(script_happy_path())
+    _hp_creates = [m for m in _hp_sent if m.get("type") == "response.create"]
+    check(len(_hp_creates) >= 2,
+          "a resolved call still requests its spoken goodbye",
+          f"{len(_hp_creates)} response.create on the happy path")
+
+    print("\n" + "=" * 66)
+    print("  WRITE-BACK — a resolved call must reach the Doctor record")
+    print("=" * 66)
+    # The programme exists to enrich a client directory. Until 2026-08-18 a
+    # resolved call wrote a CallRecord and never touched the Doctor that
+    # started it: Source.VOICE was assigned nowhere in the repo, and the
+    # enrichment stopped at the call log. Invisible at N=1, because the branch
+    # is read out of the call artifact by hand; structural the moment this
+    # becomes the batch job it is meant to be.
+    def _sess_for(doctor, *, branch=None, city=None, resolved=False):
+        s = rw.RealtimeSession("CA0000000000000000000000000wb01", doctor)
+        if branch:
+            s.memory.update(branch=branch, resolved=True)
+        if city:
+            s.memory.update(city=city)
+        return s
+
+    # The case the CLI actually produces. run_twilio.py takes --doctor,
+    # --hospital and --to; there is no --specialization, so a PERFECT call
+    # still leaves the record failing is_complete(). It must not be recorded
+    # as COMPLETE (the record contradicts that) nor silently downgraded with
+    # no reason attached.
+    _d_cli = Doctor(doctor_name="Dr. Jane Okafor", hospital_name="Northside Medical Group")
+    _r_cli = _sess_for(_d_cli, branch="Abadan Branch")._enrich_doctor("Abadan Branch", True)
+    check(_d_cli.source is rw.Source.VOICE, "resolved call sets Source.VOICE")
+    check(_d_cli.branch == "Abadan Branch", "resolved call writes the branch onto the Doctor")
+    check(_d_cli.status is rw.DoctorStatus.PARTIALLY_VERIFIED,
+          "no specialization -> PARTIALLY_VERIFIED, not COMPLETE", _d_cli.status.value)
+    check(_r_cli["missing_for_complete"] == ["specialization"],
+          "and the reason is named, not left as a bare False",
+          f"{_r_cli['missing_for_complete']}")
+    check(_d_cli.enriched_at is not None and _d_cli.enriched_at.tzinfo is not None,
+          "enriched_at is set and timezone-aware")
+
+    # A record that IS otherwise usable. VERIFIED means "confirmed by >=1 extra
+    # source", which is exactly what a successful call establishes.
+    _d_full = Doctor(doctor_name="Dr. A", hospital_name="H", specialization="Cardiology")
+    _sess_for(_d_full, branch="Northgate Campus", city="Atlanta")._enrich_doctor(
+        "Northgate Campus", True)
+    check(_d_full.status is rw.DoctorStatus.VERIFIED,
+          "complete record + confirmed branch -> VERIFIED", _d_full.status.value)
+    check(_d_full.city == "Atlanta", "city is carried across when the call captured one")
+
+    # An unresolved call. The record still has no branch, which is all this
+    # says — the reason lives in the call artifact, not the directory row.
+    _d_no = Doctor(doctor_name="Dr. B", hospital_name="H")
+    _sess_for(_d_no)._enrich_doctor(None, False)
+    check(_d_no.status is rw.DoctorStatus.MISSING_BRANCH,
+          "unresolved call -> MISSING_BRANCH", _d_no.status.value)
+    check(_d_no.source is rw.Source.WEBSITE,
+          "an unresolved call does NOT claim voice as the source",
+          _d_no.source.value)
+
+    # Upsert, not append. Re-calling the same doctor must update the row.
+    # Keyed on (doctor_name, hospital_name): the same doctor at two hospitals
+    # is two rows, and nothing else in the record is stable enough to key on.
+    _wb_dir = _ARTEFACTS / "writeback"
+    _wb_dir.mkdir(parents=True, exist_ok=True)
+    (_wb_dir / "doctors.json").unlink(missing_ok=True)
+    with mock.patch.object(rw, "json_dir", lambda: _wb_dir):
+        _s = _sess_for(Doctor(doctor_name="Dr. C", hospital_name="H1"))
+        _s._write_doctor_directory({"doctor_name": "Dr. C", "hospital_name": "H1",
+                                    "branch": "First"})
+        _s._write_doctor_directory({"doctor_name": "Dr. C", "hospital_name": "H1",
+                                    "branch": "Second"})
+        _s._write_doctor_directory({"doctor_name": "Dr. C", "hospital_name": "H2",
+                                    "branch": "Other hospital"})
+        _rows = json.loads((_wb_dir / "doctors.json").read_text())
+    check(len(_rows) == 2, "same doctor+hospital upserts; a different hospital appends",
+          f"{len(_rows)} rows")
+    check(next(r["branch"] for r in _rows
+               if r["hospital_name"] == "H1") == "Second",
+          "the re-call overwrote the earlier row rather than duplicating it")
 
     print("\n" + "=" * 66)
     print("  GROUNDING — never save a location the caller did not say")

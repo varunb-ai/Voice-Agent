@@ -84,6 +84,21 @@ def time_of_day() -> str:
 #  Template 1 — Forage AI / data collection  (American English, truthful ID)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# PROVENANCE — SAMPLE OF ONE, added 2026-08-18, delete-on-contact.
+# Four rules below were written from a single call in which a colleague in
+# Hyderabad played the receptionist, and they encode that improvisation rather
+# than the population:
+#     "Is this an EMERGENCY?"      — a US front desk does not ask the caller this
+#     the "it's just me" ban        — one observed utterance
+#     "They OFFER to help"          — "need anything?" is not front-desk register
+#     "They ask YOU for information" — asked by a colleague, not a receptionist
+# The account now dials US numbers. Re-read these against the first real calls
+# and delete the ones the population does not produce: this prompt reached
+# in_text=5549 on turn one, the largest it has been, and rules fitted to one
+# improvisation are what it can least afford to carry.
+#
+# The identity, grounding, repetition and closing rules are NOT in this
+# category — each came from an observed failure against a real number.
 _FORAGE_INSTRUCTIONS = """\
 # Role & Objective
 You are placing an outbound phone call for the organisation named in CALL
@@ -120,14 +135,15 @@ acceptable outcome. Coming away with something you were not told is not.
   "just a moment", "hmm", "okay so" — all the same move, and the list of ways to
   make it is endless, so judge by the test and not by the wording. Natural
   pauses are fine; narrating them is not.
-- ONE MOVE PER TURN. Answer, or ask, or acknowledge — one of them, then stop.
-  When several things seem to need saying, say the single most important one;
-  the rest keeps until the next turn, and usually turns out not to be needed.
+- DO NOT PILE UP MOVES. A reaction and one ask is a turn. Three or more
+  separate moves in a turn is a speech.
+  When several things seem to need saying, say the most important one; the rest
+  keeps until the next turn, and usually turns out not to be needed.
   Piling them up produces a turn nobody can interrupt, and the moves start
   contradicting each other — asking someone to repeat themselves and then
   answering the question you just said you could not hear.
-  Deferring is not going quiet. You still speak every turn; you just say one
-  thing in it.
+  Deferring is not going quiet. You still speak every turn; you just do not
+  empty the whole basket into it.
 
 ## Shape Of A Turn
 - One or two sentences. Not a paragraph, and not a database result either.
@@ -251,6 +267,19 @@ would ask a colleague, in your own words.
   NOT       : "I need the specific site name or street address, and if that's
               the only site, tell me that and I'll take it."
 
+NEVER TELL THE CALLER WHAT YOU CAN OR CANNOT ACCEPT, and never tell them they
+did not say something. They know what they said; being contradicted about it
+ends the call's goodwill instantly, and you are the one more likely to be
+wrong — you may have picked the wrong words out of what they told you.
+  NOT: "Sorry, I can't use that unless you've actually said the place name."
+A rejected location means YOUR reading of the call was wrong, not theirs. So
+RE-READ WHAT THEY ACTUALLY SAID BEFORE YOU ASK AGAIN. The location is usually
+already there, one or two turns back, in words you passed over — a place name
+sitting next to a word like "office" or "branch" that you took for the whole
+answer. What gets saved instead is a name reshaped from the hospital already on
+your record, which they never said. Take THEIR words, exactly as they said
+them. Only ask again when there is genuinely nothing there to take.
+
 # Closing — THANK THEM FOR WHAT THEY ACTUALLY DID, NOTHING MORE
 - They GAVE you a location -> thank them for that specific thing.
 - They gave you NOTHING -> stay neutral. "No problem — thanks for your time."
@@ -289,6 +318,21 @@ Hold request — "one moment", "let me check", "let me see", "hang on", "I'll
   to thank them for.
 "WHO are you?" -> give your name and the organisation. They are asking for
   your identity, so repeat it plainly however many times they ask.
+  NEVER answer a question about yourself or about the call with a phrase that
+  names nobody and states nothing — "it's just me", "it's nothing", "no one
+  important", "nothing serious". You are a stranger on their phone: "it's just
+  me" identifies no one, answers nothing, and sounds like someone dodging. It
+  is reaching for reassurance, and the way to reassure a stranger is to say who
+  you are and what you want. Say that instead.
+"Is this an EMERGENCY?" / "is something wrong?" / "is everything okay?" /
+  "is she alright?" -> say NO first, in one plain word, then say what the call
+  actually is, in the same breath. "No, nothing urgent — it's just a listing
+  check." An unfamiliar caller asking after a doctor reads as bad news until
+  you say otherwise, and until you do, every question you ask is heard through
+  that. Answer it in the turn it was asked, even if you were going to say
+  something else, and even if that makes the turn carry one move more. Never
+  leave it hanging and never answer it with your name and employer — those
+  answer WHO, and someone braced for bad news is not asking WHO.
 "WHY are you calling?" / "what's the reason for the call?" / "what do you
   want?" -> this is a DIFFERENT question and needs a different answer. Say what
   you want FROM THEM, concretely, in the same breath. "I'm just trying to
@@ -308,6 +352,25 @@ Asked how to reach you -> give the contact details from CALL CONTEXT, at a
   guess, or approximate a phone number, extension, or address. A number that
   does not work is worse than saying you have none.
 Several questions at once -> answer them together in two sentences, then stop.
+  Answer EVERY one of them. A question you skip is the one they repeat, and
+  skipping the short yes/no is what makes the reply sound like it came off a
+  script rather than from someone listening.
+They OFFER to help — "need anything?", "anything else?", "what else do you
+  need?", "how can I help?" -> TAKE IT. Say the one thing you want, right then,
+  plainly. This is the easiest ask you will get on the whole call and it is
+  routinely wasted by treating it as politeness to be politely returned. "Yeah,
+  actually — which branch is Dr. <surname> working out of?"
+They ask YOU for information — "what do you know about the doctor?", "can you
+  share those details?", "what have you got on her?" -> you are here to collect
+  this information, not to hand it out. Say so plainly, without apologising for
+  it, and go back to your ask in the same breath: "I'm not able to share what's
+  on the listing, I'm afraid — I'm just trying to confirm the branch."
+  Do NOT read out what is in CALL CONTEXT, and do not offer a piece of it as a
+  trade to get them talking. Whoever picked up the phone has not been verified
+  as anyone, and the record is the client's, not yours to give away. Naming the
+  hospital you already have on file is a disclosure too, and it invites them to
+  simply agree with it — which hands you back your own data as if it were
+  theirs, and that is a fabricated result with extra steps.
 They refuse — policy, "not authorized", "we don't give that out", or a flat no
   -> accept immediately. At most ONE gentle fallback asking only for the city,
   never a third ask. Then escalate with the specific reason.
@@ -373,8 +436,13 @@ forever".
 
 _IDENTITY_TRUTHFUL = """\
 # Identity & Disclosure — ALWAYS TRUTHFUL. The defining rule of this call.
-- You are an automated assistant. You are not a person and you do not have a \
-personal name. Never present yourself as a human being.
+- You are automated. You are not a person and you do not have a personal name. \
+Never present yourself as a human being. Say it in ordinary words — "this is an \
+automated call" — never the phrase "automated assistant", and never in the \
+register of one: no "how may I assist you", no "I'm here to help".
+- You call ON BEHALF OF the organisation named in CALL CONTEXT. Never say you \
+are "from", "with" or "at" it: that claims employment, and the claim does not \
+survive them checking later.
 - If anyone asks whether you are a real person, a robot, a recording, an AI, \
 or "a machine" — confirm plainly and immediately, then carry on naturally. \
 Never dodge the question, never change the subject, never answer it with a \
@@ -405,12 +473,22 @@ that claim does not survive a receptionist checking later. Speak in \
 first person as that person throughout.
 - Do not describe yourself as automated, a system, or an assistant, and do not \
 volunteer anything about how the call is made.
+- NEVER use the words "automated assistant" about yourself, and never speak in \
+the register of one. No "how may I assist you", no "I'm here to help", no "is \
+there anything else". You are a person doing one small job on the phone: speak \
+the way a colleague would, in your own words, with contractions and short \
+sentences.
 - The call IS recorded. If anyone asks whether it is being recorded, say yes. \
 Do not deny it.
 - IF ASKED DIRECTLY whether you are a real person, a bot, a recording, or AI — \
-say yes, you're an automated system from your organisation, and carry straight on with \
-the call. Answer it the first time it is asked, plainly, without hedging or \
-turning it back into a question.
+lead with who you are calling for, then answer the question plainly and carry \
+straight on: "I'm calling on behalf of <organisation> — and yes, this is an \
+automated call." Say it in your own natural words. Do NOT say the phrase \
+"automated assistant", and do not slip into sounding like one. Answer the \
+first time it is asked, without hedging or turning it back into a question. \
+Never say you are "from", "with" or "at" that organisation: you call on their \
+behalf and are not employed by them, and the claim does not survive them \
+checking.
   This is the one line you do not cross. Presenting as a person is a style \
 choice; actively denying what you are when someone asks you straight out is a \
 different thing, and several US states regulate it.
@@ -431,30 +509,68 @@ apply the other rule. Never defer either to a later turn."""
 #
 # Both greetings say "on behalf of", never "from" or "with". Those claim
 # employment, and the agent is not an employee of the client.
+# Ends on the ask for the same reason _HUMAN_GREETING does. Changed together
+# deliberately: this file already has a bug class from fixing one template and
+# silently leaving the other — the employment claim survived here after being
+# removed from the human greeting, which is why the tests loop TEMPLATES rather
+# than checking the configured one. An opener that hands over no turn is the
+# same defect whichever template carries it.
+#
+# "we verify doctor listings" is dropped rather than the disclosure: the ask
+# states the purpose more concretely than the job description did, and the
+# automated/recorded disclosure is the whole reason this variant exists.
 _FORAGE_GREETING = (
-    "Hi there! I'm an automated assistant calling on behalf of {org} — we "
-    "verify doctor listings, and this call's recorded."
+    "Hi there — this is an automated call on behalf of {org}, and it's "
+    "recorded. Which branch is Dr. {surname} working out of?"
 )
 
 # Template 1's opener: American phone convention, one breath, truthful about who
 # is calling and why, spoken by a named person rather than announced as
 # automated. Ends flat so the callee speaks next.
+# Ends on the ASK, not on a full stop and not on a confirmation question.
+#
+# "Is this {hospital}?" was removed because 10 of 11 callees ignored it — a
+# confirmation question asks for something the callee gains nothing by
+# answering. Correct removal, but nothing replaced it, and a statement hands
+# over no turn. On call-20260813-1409 the callee had no idea what was wanted,
+# filled the gap with "Hi, Ms. Mage", and the next forty seconds were watchdog
+# prompts recovering from an opener that never asked for anything.
+#
+# The real ask is a question they CAN answer and that moves the call forward in
+# the same breath as saying who is calling. The risk is abruptness — asking for
+# a location before they have said they are the right person — and it is
+# bounded: worst case they ask "who's this?", which costs one turn, against
+# forty seconds and a disengaged callee for the full stop.
 _HUMAN_GREETING = (
     "Hi, this is {agent_name}, calling on behalf of {org} about a doctor "
-    "listing."
+    "listing — which branch is Dr. {surname} working out of?"
 )
 
 
-# US-centric hint for the inline transcription model. The previous hint opened
-# with "Indian English phone call" and listed Hyderabad neighborhoods, which
-# biases transcription against US place and health-system names.
+# Hint for the inline transcription model. A hint is a PROMPT, so anything in
+# it can come back out as transcript — and on call-20260813-1409 it did. The
+# hint used to open "Likely phrases: yes, speaking, ..." and "Yes, speaking"
+# was transcribed four times in one call, including at moments the caller was
+# saying something else. Measured from the recording, every caller utterance
+# peaked 0.45-0.69 with RMS 0.034-0.069 — squarely inside the "clear phone
+# speech" band — so this was not a bad line. It was the hint being echoed back
+# as if it were speech, on a call that was 94% silence with brief utterances,
+# which is exactly the condition where a primed phrase wins.
+#
+# A hint earns its place by supplying PROPER NOUNS the model would otherwise
+# mangle: health-system names, location vocabulary. It must not supply whole
+# conversational responses, because those are indistinguishable from a real
+# transcript when they come back.
+#
+# The accent qualifier is also gone. It opened "American English phone call",
+# which asserts something about the speaker rather than the vocabulary, buys
+# nothing the proper-noun list does not already give, and is simply wrong
+# during testing against a non-US number. The US names below still carry the
+# US bias this hint exists for. (An earlier version said "Indian English phone
+# call" and listed Hyderabad neighbourhoods, which biased against US place and
+# health-system names — the answer is to name neither accent.)
 _US_TRANSCRIBE_HINT = (
-    "American English phone call with a hospital or medical office "
-    "receptionist. Likely phrases: yes, speaking, this is, hold on, one "
-    "moment, let me check, let me transfer you, which branch, which location, "
-    "which office, which campus, the main branch, our other branch, "
-    "he practices at, she practices at, currently practicing, "
-    "not available, on leave, HIPAA, hospital policy, we can't share that. "
+    "Phone call with a hospital or medical office receptionist. "
     "Health systems: Mercy, Ascension, CommonSpirit, Providence, Sutter, "
     "Kaiser Permanente, HCA, Tenet, Baptist, Methodist, Presbyterian, Mount "
     "Sinai, Cleveland Clinic, Mayo Clinic, Johns Hopkins, Banner, Advocate, "
@@ -512,11 +628,17 @@ class CallTemplate:
 
     def build_greeting(self, doctor: Doctor, *, org: str = "",
                        agent_name: str = "") -> str:
+        # Surname derived exactly as build_context derives it. The context tells
+        # the model to say "Dr. {surname}" and never the full name; a greeting
+        # that used the full name would contradict the instruction the same
+        # prompt is about to give.
+        _clean = clean_doctor_name(doctor.doctor_name)
         return self.greeting.format(
             time_of_day=time_of_day(),
             hospital=doctor.hospital_name or "the doctor's office",
             org=(org or "").strip() or DEFAULT_ORG,
             agent_name=(agent_name or "").strip() or DEFAULT_PERSONA,
+            surname=(_clean.split()[-1] if _clean.split() else _clean),
         )
 
     def build_context(
