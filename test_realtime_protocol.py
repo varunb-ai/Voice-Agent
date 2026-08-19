@@ -621,6 +621,14 @@ async def main():
         base = dict(done=False, _agent_quiet_since=0.0,
                     _silence_prompts_opening=0, _silence_prompts_midcall=0,
                     _response_active=False, turns=[], _goodbye_retry_at=None,
+                    # backchannel state — the caller is not speaking by default
+                    _hold_until=0.0, _claimed_done_at=0.0,
+                    _playback_ends_at=0.0,
+                    _claimed_done_nudged=False, memory={},
+                    _caller_speaking_since=None, agent_speaking=False,
+                    _backchannel_done_this_utterance=False,
+                    _last_backchannel_at=0.0, _last_backchannel_clip=None,
+                    _backchannels_sent=0, stream_sid="MZtest",
                     listen_enabled=asyncio.Event())
         base.update(over)
         s = types.SimpleNamespace(**base)
@@ -1049,6 +1057,516 @@ async def main():
     check(_ms.take_utterance_rms() == (None, 0),
           "an unmeasurable segment stays unmeasured, not zero")
 
+    # ── The worked examples must not teach the bare demand ───────────────────
+    # On call-20260819-1716 the agent's second turn was
+    #   "Hi Priya, this is David calling on behalf of Definitive Healthcare
+    #    — which branch is Dr. Okafor working out of?"
+    # which is an order with an introduction in front of it. The model was not
+    # disobeying: Shape Of A Turn carried
+    #       Right: "Got it — which branch is she at?"
+    # — the same structure, marked Right — while the prose twenty lines earlier
+    # says "You are asking a favour of someone at work: 'do you know...'".
+    # Prose against a worked example is the ONE MOVE PER TURN contradiction
+    # again, and the example wins every time.
+    #
+    # The old annotation also mis-diagnosed it: "no reaction — an
+    # interrogation" blames the missing opener, when the problem is the ask.
+    # A reaction in front of a demand is still a demand.
+    from agents.voice.templates import TEMPLATES as _ALL6
+    for _n6, _t6 in _ALL6.items():
+        _f6 = " ".join(_t6.instructions.split())
+        check('Right: "Got it — do you know which branch she\'s at?"' in _f6,
+              f"{_n6}: the Right example softens the ask, not just the opener")
+        check('Wrong: "Got it — which branch is she at?"' in _f6,
+              f"{_n6}: and the cushioned demand is explicitly marked Wrong")
+        # The prose rule it has to agree with.
+        check("asking a favour of someone at work" in _f6,
+              f"{_n6}: the prose rule it now matches is still present")
+
+    import pathlib as _plb
+    # ── The utterance must be cut by OpenAI's clock, not ours ────────────────
+    # ROOT CAUSE, found 2026-08-19. The utterance was sliced from
+    # len(_caller_pcm) at the moment speech_started ARRIVED. That event is
+    # generated in the US and reaches India up to a second late, by which time
+    # a short utterance is already fully buffered — so the slice held only the
+    # silence after it.
+    #
+    # The signature is exact and appeared twice: audio_rms 0.000244140625,
+    # which is what a buffer of mu-law 0xFF decodes to. On call-20260819-2006
+    # that was recorded for a turn whose Twilio caller channel measures 0.2425.
+    # Two "fixes" before this one patched around it.
+    _bpms = rw._wire_bytes_per_ms()
+    _silence = b"\xff" * int(4000 * _bpms)        # 4s of mu-law silence
+    _loud = bytes([0x00, 0x80] * int(2000 * _bpms // 2))   # 2s of loud audio
+    class _S:  # minimal session: only _caller_pcm is read
+        def __init__(self, chunks): self._caller_pcm = chunks
+    # Speech at 1000-3000ms, then silence. The old code, marking the position
+    # late, would have taken the tail.
+    _sess_sl = _S([_silence[:int(1000*_bpms)], _loud, _silence])
+    _cut = rw._utterance_slice(_sess_sl, 1000, 3000, fallback_chunk_pos=2)
+    _rms_cut = rw._loudest_window_rms(rw._wire_to_pcm16(_cut))
+    _tail = b"".join(_sess_sl._caller_pcm[2:])
+    _rms_tail = rw._loudest_window_rms(rw._wire_to_pcm16(_tail))
+    check(_rms_cut > 10 * max(_rms_tail, 1e-9),
+          "OpenAI's timestamps cut the SPEECH, not the silence after it",
+          f"timestamped {_rms_cut:.4f} vs arrival-time {_rms_tail:.6f}")
+    # Missing or nonsensical timestamps fall back rather than measuring nothing.
+    check(rw._utterance_slice(_sess_sl, None, None, 0) == b"".join(_sess_sl._caller_pcm),
+          "no timestamps -> fall back to the chunk position")
+    check(rw._utterance_slice(_sess_sl, 99_000, 99_500, 0) == b"".join(_sess_sl._caller_pcm),
+          "out-of-range timestamps fall back rather than slicing nothing")
+
+    # ── The quarantine needs TWO signals, never audio alone ──────────────────
+    # A guard that DISCARDS a caller's words must not rest on one number that
+    # has been wrong twice. The words must also name a health system straight
+    # out of our own hint.
+    _hint2 = tpl.transcribe_hint
+    check(len(rw._hint_proper_nouns(_hint2)) >= 15,
+          "the hint's proper nouns are derived from its capitalisation",
+          f"{len(rw._hint_proper_nouns(_hint2))} found")
+    for _want, _t9 in [
+        # both fabrications from call-20260819-2006 / -1323
+        (True,  "Hello, I need to schedule an appointment at the Mayo"),
+        (True,  "Mercy Hospital"),
+        (True,  "across from the Northwell campus"),
+        # real answers, including quiet ones, must never qualify
+        (False, "It's the Mission Bay clinic, 1825 Fourth Street"),
+        (False, "Northside Medical Group, this is Varun"),
+        (False, "She works at the Abadan branch"),
+        (False, "Okay, she is in San Francisco."),
+        (False, "Yes."),
+    ]:
+        check(rw._reads_as_hint_vocabulary(_t9, _hint2) == _want,
+              f"hint-vocabulary signal: {_want!s:5} for {_t9[:40]!r}")
+    # The narrow form is load-bearing: requiring EVERY content word to come
+    # from the hint missed the Mayo case, where only one word did.
+    check(rw._reads_as_hint_vocabulary(
+              "Hello, I need to schedule an appointment at the Mayo", _hint2),
+          "a fabrication wrapped in ordinary English is still caught")
+    # And the drop site must consult both, so a bad rms alone cannot discard.
+    _ct_src = re.search(r"async def _handle_caller_transcript.*?(?=\nasync def |\ndef )",
+                        _plb.Path(rw.__file__).read_text(encoding="utf-8"), re.S)
+    check(_ct_src and "_audio_carried_nothing" in _ct_src.group(0)
+          and "_reads_as_hint_vocabulary" in _ct_src.group(0),
+          "the drop requires both signals together")
+
+    # ── A silent drop must leave a trace ─────────────────────────────────────
+    # Two turns were dropped on call-20260819-2006 and the artifact recorded
+    # nothing — the only evidence was a terminal that happened to still be open.
+    check("suppressed_echoes" in _plb.Path(rw.__file__).read_text(encoding="utf-8")
+          .split("\"grounding\":")[1][:600],
+          "dropped turns are written into the call artifact")
+
+    # ── Pre-warming the OpenAI session while the phone rings ─────────────────
+    # call-20260819-1915: 6.4 SECONDS between the callee pressing answer and
+    # hearing a word, all of it before the media stream opened. ~2.2s of that
+    # was the OpenAI handshake and session.update — work that needs NOTHING
+    # call-specific and was only being started once someone had already picked
+    # up, while the phone had been ringing for seconds doing nothing.
+    rw._PREWARMED.clear()
+    check(rw.take_prewarmed("CA_never_warmed") is None,
+          "claiming a session that was never warmed returns nothing")
+
+    class _FakeConn:
+        def __init__(self): self.closed = False
+        async def __aexit__(self, *a): self.closed = True
+
+    _c1 = _FakeConn()
+    rw._PREWARMED["CA_ready"] = (_c1, "ws-handle", time.time())
+    _claim = rw.take_prewarmed("CA_ready")
+    check(_claim is not None and _claim[0] is _c1 and _claim[1] == "ws-handle",
+          "a warmed session is handed to the call that placed it")
+    check(rw.take_prewarmed("CA_ready") is None,
+          "and it is claimed exactly once — never handed to a second call")
+
+    # A call nobody answered must not leave its socket for a LATER call: that
+    # call would get a connection idle for minutes.
+    _c2 = _FakeConn()
+    rw._PREWARMED["CA_stale"] = (_c2, "ws", time.time() - rw._PREWARM_TTL_S - 10)
+    check(rw.take_prewarmed("CA_stale") is None,
+          "a stale session is refused rather than reused",
+          f"TTL {rw._PREWARM_TTL_S}s")
+    await asyncio.sleep(0)   # let the close task run
+    check(_c2.closed, "and the stale socket is closed, not leaked")
+    rw._PREWARMED.clear()
+
+    # FAILING IS FREE. If OpenAI is unreachable when the call is placed, the
+    # call must still work — it just pays the handshake on answer, exactly as
+    # before. prewarm_realtime therefore cannot raise.
+    with mock.patch.object(rw, "_open_realtime_session",
+                           side_effect=RuntimeError("openai down")):
+        await rw.prewarm_realtime("CA_fails")   # must not raise
+    check("CA_fails" not in rw._PREWARMED,
+          "a failed pre-warm leaves nothing behind for the call to claim")
+    check(rw.take_prewarmed("CA_fails") is None,
+          "so handle_realtime falls back to connecting on answer")
+
+    # The extraction must not have produced a second copy of the session
+    # config — two places to get the cached-prefix rule subtly wrong.
+    import pathlib as _plb
+    _rw_src2 = _plb.Path(rw.__file__).read_text(encoding="utf-8")
+    check(_rw_src2.count('"type": "session.update"') == 1,
+          "session.update is built in exactly one place",
+          f"{_rw_src2.count(chr(34) + 'type' + chr(34) + ': ' + chr(34) + 'session.update' + chr(34))} found")
+    # And the placing side has to actually trigger it, or the whole thing is
+    # dead code that quietly never runs.
+    import agents.voice.twilio_worker as _tw2
+    _tw_src2 = _plb.Path(_tw2.__file__).read_text(encoding="utf-8")
+    check("prewarm_realtime" in _tw_src2 and "run_coroutine_threadsafe" in _tw_src2,
+          "register_call schedules the pre-warm onto the server's loop")
+
+    # ── "Hang on" is not always a hold ───────────────────────────────────────
+    # call-20260819-1915: the caller said "Hang on, are you a real person or is
+    # this a recording?" and is_hold_request returned True — the console
+    # printed "Caller is going to check" while she was challenging the agent.
+    #
+    # Harmless until _HOLD_GRACE_S existed. Not harmless after: a hold silences
+    # the watchdog for 45s, so "hang on, who is this?" followed by waiting
+    # would be met with 45 seconds of nothing. A regression the hold fix
+    # introduced, surfacing on the very next call.
+    #
+    # The discriminator is WHO is being asked to act. A hold says the CALLER
+    # will ("let me check"); a challenge asks the AGENT ("are you real?").
+    # A second-person test alone is NOT enough — "can you please give me a
+    # minute? I just need to check" is a question, says "you", and is the most
+    # cooperative sentence on the call that scenario 0b was built from.
+    for _want, _t7 in [
+        (False, "Hang on, are you a real person or is this a recording?"),
+        (False, "Hang on — who did you say you were?"),
+        (False, "Hold on, what do you want exactly?"),
+        (True,  "can you please give me a minute? I just need to check"),
+        (True,  "Ok, alright. Give me a minute, let me pull that up."),
+        (True,  "Hang on a second, let me check."),
+        (True,  "Can you hold on a moment?"),
+        (True,  "Let me just look that up for you."),
+        (True,  "One moment."),
+        (True,  "Bear with me."),
+    ]:
+        check(rw.is_hold_request(_t7) == _want,
+              f"hold vs challenge: {_want!s:5} for {_t7[:44]!r}")
+
+    # ── "Is this about a patient?" must be answered ──────────────────────────
+    # Asked on call-20260819-1847 and again on -1915, half-answered both times:
+    # "No, nothing urgent — it's just a listing check" addresses only the
+    # second half. At a medical office that question decides whether they pull
+    # a record or route to clinical staff; leaving it inferred is the ambiguity
+    # a front desk is trained not to accept.
+    #
+    # The prompt already says "Answer EVERY one of them" and it did not hold
+    # twice running — so the process asks, the same way it does for the
+    # identity question.
+    for _want, _t8 in [
+        (True,  "Is it about a patient or something urgent?"),
+        (True,  "Is this about a patient, or something urgent?"),
+        (True,  "Is this about one of our patients?"),
+        (False, "Which branch do you need?"),
+        (False, "She is not seeing patients today."),
+        (False, "Are you a real person?"),
+    ]:
+        check(rw._asks_about_patient(_t8) == _want,
+              f"patient question: {_want!s:5} for {_t8[:40]!r}")
+    check(rw.RealtimeSession("CA00000000000000000000000pat01",
+                             Doctor(doctor_name="Dr. P"))._patient_nudged is False,
+          "the patient nudge starts unfired, and is one-shot")
+
+    # ── The caller gave more than we recorded ────────────────────────────────
+    # call-20260819-1847: she said "it's the Mission Bay clinic, 1825 Fourth
+    # Street" and the agent saved just "Mission Bay Clinic". Nothing blocked
+    # the fuller value — grounding accepts it — the model simply left it out,
+    # despite the prompt saying "Several: pass them all, comma-separated".
+    #
+    # Mirror image of the SAME morning's failure, where it invented a street
+    # number: one question asked in opposite directions. _ungrounded_terms asks
+    # whether we recorded too MUCH; this asks whether we recorded too LITTLE.
+    _mk_c = lambda t: types.SimpleNamespace(role="caller", text=t, audio_rms=0.18)
+    _addr1847 = types.SimpleNamespace(turns=[
+        _mk_c("Okay, she's in San Francisco."),
+        _mk_c("Right, it's the Mission Bay clinic, 1825 Fourth Street, I think so."),
+    ])
+    check(rw._address_offered(_addr1847) == "1825 Fourth Street",
+          "a street address in the transcript is recognised",
+          repr(rw._address_offered(_addr1847)))
+    check(bool(rw._address_dropped(
+              {"branch": "Mission Bay Clinic", "city": "San Francisco"}, _addr1847)),
+          "saving only the site name, when a street address was given, is caught")
+    check(not rw._address_dropped(
+              {"branch": "Mission Bay Clinic, 1825 Fourth Street"}, _addr1847),
+          "and saving both is accepted")
+    # The house NUMBER is the key, not the street words: "Fourth Street" may
+    # legitimately be absent from a value that names the site, but the number
+    # is either recorded or it is lost.
+    check(not rw._address_dropped({"branch": "Clinic at 1825"}, _addr1847),
+          "the number alone is enough to count as recorded")
+    # Must not fire when no address was ever offered — that is 32 of the 36
+    # calls in the history.
+    _no_addr = types.SimpleNamespace(turns=[
+        _mk_c("She's at the Northgate campus."),
+        _mk_c("Just the main office, I think.")])
+    check(rw._address_offered(_no_addr) is None,
+          "no address offered -> the guard cannot fire")
+    check(not rw._address_dropped({"branch": "Northgate Campus"}, _no_addr),
+          "and a save with no address in play is untouched")
+    # A bare number is not an address. "give me a minute", "one of two sites",
+    # a year — all contain digits and none is a street.
+    for _t in ["Give me a minute, I need to check.",
+               "We have 3 sites in the area.",
+               "She joined us in 2019."]:
+        check(rw._address_offered(types.SimpleNamespace(turns=[_mk_c(_t)])) is None,
+              f"not an address: {_t[:34]!r}")
+    # ONE-SHOT is load-bearing: the value being saved is CORRECT, just thinner
+    # than what they said, so this must never be able to stop a call finishing.
+    # A true-but-thin record beats no record.
+    _as = rw.RealtimeSession("CA000000000000000000000000addr1",
+                             Doctor(doctor_name="Dr. A"))
+    check(_as._address_nudged is False, "the address nudge starts unfired")
+    # And the rejection stays unspeakable, like every other one.
+    _ar = (f"NOT SAVED — a street address was given and this value omits it "
+           f"| THEY SAID: '1825 Fourth Street' | RETRY: save_branch with both, "
+           f"comma-separated | ALREADY SUPPLIED, nothing further needed from them")
+    for _ph in ("ask them", "could you", "tell me", "please provide", "you should"):
+        check(_ph not in _ar.lower(),
+              f"address rejection has no speakable imperative ({_ph!r})")
+
+    # ── Digits must match exactly ────────────────────────────────────────────
+    # The word rule in _ungrounded_terms is deliberately lenient — one content
+    # word matching is enough, because transcription is imperfect and a real
+    # answer beats a blocked one. Right for words. Exactly wrong for numbers.
+    #
+    # call-20260819-1716: the caller said "1825 4th Street". The agent saved
+    # "Mission Bay Clinic, 1855 Fourth Street" and grounding PASSED it, because
+    # "bay" appeared and one word was enough. A four-digit house number nobody
+    # said was written into the client directory, and the record was marked
+    # "verified against caller transcript".
+    #
+    # Worst failure category available: not empty, not obviously wrong, but
+    # PLAUSIBLE. No reviewer catches it and someone sent to 1855 Fourth Street
+    # finds the wrong building.
+    _hf = lambda t: types.SimpleNamespace(role="caller", text=t, audio_rms=0.15)
+    _addr_sess = types.SimpleNamespace(turns=[
+        _hf("Okay, she is in San Francisco."),
+        _hf("Examination Bay Clinic, 1825 4th Street"),
+    ])
+    for _want, _label, _args in [
+        (True,  "the real call: 1825 heard, 1855 saved",
+         {"branch": "Mission Bay Clinic, 1855 Fourth Street", "city": "San Francisco"}),
+        (True,  "a digit dropped",  {"branch": "Bay Clinic, 182 Fourth Street"}),
+        (True,  "a digit appended", {"branch": "Bay Clinic, 18250 Fourth Street"}),
+        (False, "the number as spoken survives",
+         {"branch": "Mission Bay Clinic, 1825 Fourth Street", "city": "San Francisco"}),
+        (False, "a value with no digits is unaffected",
+         {"branch": "Mission Bay Clinic", "city": "San Francisco"}),
+    ]:
+        check(bool(rw._ungrounded_terms(_args, _addr_sess)) == _want,
+              f"digit grounding: {'blocked' if _want else 'allowed'} — {_label}")
+    # The word tolerance must survive: this is a narrowing for numbers only.
+    # "mission" was never said either, and that is still forgiven, because a
+    # misheard street NAME is recoverable in a way a street NUMBER is not.
+    check(not rw._ungrounded_terms({"branch": "Mission Bay Clinic"}, _addr_sess),
+          "a misheard word is still forgiven — only digits are strict")
+    # And the rejection has to stay unspeakable, like every other one.
+    _dv = rw._ungrounded_terms(
+        {"branch": "Mission Bay Clinic, 1855 Fourth Street"}, _addr_sess)
+    for _ph in ("ask them", "could you", "tell me", "please provide"):
+        check(_ph not in _dv.lower(),
+              f"digit rejection has no speakable imperative ({_ph!r})")
+
+    # ── The watchdog must not break a hold ───────────────────────────────────
+    # call-20260819-1619. The caller said "give me a minute I just need to
+    # check", the agent correctly answered "No rush." — and 7s later the
+    # silence watchdog fired and made it ask again. Twice in one call, while
+    # the caller was still looking:
+    #
+    #   16:20:08 AGENT  "is there a specific site name or street address?"
+    #   16:20:18 AGENT  "could you share the exact site name, or the street
+    #                    address for that location?"        <- nobody spoke
+    #   16:20:26 caller "Yeah, give me a minute."           <- still looking
+    #
+    # The prompt already says "THE HOLD LASTS UNTIL THEY COME BACK WITH AN
+    # ANSWER. Not one turn — the whole time." The model obeyed it. The
+    # watchdog, which had no idea a hold was in progress, overrode it — a rule
+    # the code enforces beating a rule the prompt requests, in the wrong
+    # direction.
+    import pathlib as _plb
+    check(rw._HOLD_GRACE_S >= 30,
+          "a hold stands the watchdog down long enough to actually look "
+          "something up", f"{rw._HOLD_GRACE_S}s")
+    check(rw._HOLD_GRACE_S < 120,
+          "but is bounded, so a caller who never returns still gets checked on")
+    _wd_body = re.search(r"async def _silence_watchdog.*?(?=\nasync def |\ndef )",
+                         _plb.Path(rw.__file__).read_text(encoding="utf-8"), re.S)
+    # BEHAVIOURAL, not a source grep. Asserting that "_hold_until" appears in
+    # the watchdog passed even with the check disabled as
+    # `if False and time.time() < sess._hold_until` — the string was still
+    # there. A guard aimed at the text instead of the behaviour, which is the
+    # failure this suite keeps rediscovering. So: run the watchdog with a hold
+    # in progress and require that it says nothing.
+    _hs = _wd_sess(_hold_until=time.time() + 30)
+    _hws, _hdone = _WS(), asyncio.Event()
+    with mock.patch.object(rw, "_SILENCE_PROMPT_FIRST", 0.0),          mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
+        _hwd = asyncio.create_task(rw._silence_watchdog(_hws, _hs, _hdone))
+        await asyncio.sleep(1.4)
+        _hdone.set()
+        await asyncio.wait_for(_hwd, timeout=2)
+    check(not _hws.sent,
+          "the watchdog stays silent while the caller is on hold",
+          f"{len(_hws.sent)} messages sent during a hold")
+    # And it must resume once the hold expires, or a caller who never comes
+    # back would leave the line dead forever.
+    _es = _wd_sess(_hold_until=time.time() - 1)
+    _ews, _edone = _WS(), asyncio.Event()
+    with mock.patch.object(rw, "_SILENCE_PROMPT_FIRST", 0.0),          mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
+        _ewd = asyncio.create_task(rw._silence_watchdog(_ews, _es, _edone))
+        await asyncio.sleep(1.4)
+        _edone.set()
+        await asyncio.wait_for(_ewd, timeout=2)
+    check(bool(_ews.sent),
+          "and resumes once the hold has expired", f"{len(_ews.sent)} messages")
+    # The utterances from that call must be recognised as holds at all.
+    for _t in ["Okay, give me a minute I just need to check and I'll tell you.",
+               "Yeah, give me a minute.",
+               "Can you wait for a minute? I need to check."]:
+        check(rw.is_hold_request(_t), f"hold recognised: {_t[:38]!r}")
+    check(not rw.is_hold_request("He's working at the Northgate campus."),
+          "an answer is not a hold")
+
+    # ── Claimed done, saved nothing ──────────────────────────────────────────
+    # Same call, and the expensive half. The caller gave "It's actually at 100
+    # Main Street" — a valid location — and the agent said "Thanks for the
+    # address, that's all I needed" and stopped. save_branch was never called;
+    # resolved=False, branch=None. A resolvable call, answered, thrown away.
+    #
+    # The false-save guard cannot see this: it fires when save_branch is
+    # REJECTED, and here it was never invoked. Both look identical to the
+    # caller — told the job is done — but only one reached a guard.
+    check(rw._claims_saved("Thanks for the address — that's all I needed."),
+          "the completion claim from that call is detected")
+    for _t, _want in [("I have everything I need, thanks.", True),
+                      ("That's all I need — thanks for your time.", True),
+                      ("Thanks — which branch is that?", False),
+                      ("Sorry, I need one more detail.", False)]:
+        check(rw._claims_saved(_t) == _want,
+              f"completion claim: {_want!s:5} for {_t[:38]!r}")
+    # It is DEFERRED, not fired on the transcript: the tool call for that same
+    # response has not landed yet, so "never called" is not knowable there —
+    # and firing early also fires on the rejected save, which is a different
+    # failure with its own correction.
+    _ht_body = re.search(r"async def _handle_agent_transcript.*?(?=\nasync def |\ndef )",
+                         _plb.Path(rw.__file__).read_text(encoding="utf-8"), re.S)
+    check(_ht_body and "_claimed_done_at = time.time()" in _ht_body.group(0),
+          "the transcript handler only records the claim, it does not correct it")
+    check(_wd_body and "_claimed_done_nudged" in _wd_body.group(0),
+          "the watchdog makes the correction, once the state has settled")
+    check("sess._claimed_done_at = 0.0" in _plb.Path(rw.__file__).read_text(encoding="utf-8"),
+          "a rejected save cancels it — one correction per call, not two")
+
+    # ── Backchannels ─────────────────────────────────────────────────────────
+    # A human listener is not silent while you talk. The agent was, and on this
+    # rig the callee then waits 1.9-3.1s with no evidence anyone is there.
+    #
+    # The audio is pre-rendered and pushed straight into the Twilio stream. It
+    # deliberately does NOT go through the model: a response.create mid-
+    # utterance collides with turn detection, gets cancelled by the caller's
+    # own speech, and costs a response — exactly what barge-in exists to stop.
+    from agents.voice import backchannel as _bc
+    _v = settings.realtime_voice
+    check(_bc.pick("no-such-voice-exists") is None,
+          "no clips for a voice -> feature is simply off, not an error")
+    if _bc.available(_v):
+        _a = _bc.pick(_v)
+        _b = _bc.pick(_v, exclude=_a)
+        check(isinstance(_a, str) and len(_a) > 100,
+              f"a clip for {_v!r} is returned base64-encoded for Twilio")
+        check(_a != _b or _bc.available(_v) == 1,
+              "the same clip is not repeated back to back",
+              f"{_bc.available(_v)} clips")
+        import base64 as _b64
+        _raw = _b64.b64decode(_a)
+        check(800 <= len(_raw) <= 9600,
+              "a backchannel is 0.1-1.2s of 8kHz mu-law — longer is a turn, "
+              "and talking over someone for that long is worse than silence",
+              f"{len(_raw)/8000:.2f}s")
+    else:
+        check(True, f"no backchannel clips installed for {_v!r} — feature idle")
+    # It must never become a turn. The whole point is that it is a noise: if it
+    # entered the transcript it would inflate agent_turns, trip the repetition
+    # detector, and be visible to the grounding guards.
+    import pathlib as _plb
+    _bc_src = (_plb.Path(rw.__file__).parent / "backchannel.py").read_text(encoding="utf-8")
+    check("add_turn" not in _bc_src and "sess.turns" not in _bc_src,
+          "the backchannel module cannot record a turn")
+    _wd_src = re.search(r"async def _silence_watchdog.*?(?=\nasync def |\ndef )",
+                        _plb.Path(rw.__file__).read_text(encoding="utf-8"), re.S)
+    check(_wd_src and "add_turn" not in _wd_src.group(0),
+          "and the watchdog that sends it does not record one either")
+    # Guard rails on when it may fire.
+    check(rw._BACKCHANNEL_AFTER_S >= 2.0,
+          "it waits until the caller is genuinely mid-utterance",
+          f"{rw._BACKCHANNEL_AFTER_S}s")
+    check(rw._BACKCHANNEL_COOLDOWN_S > rw._BACKCHANNEL_AFTER_S,
+          "and cannot fire twice in quick succession — that is a tic",
+          f"cooldown {rw._BACKCHANNEL_COOLDOWN_S}s")
+    # OFF by default and gated in the watchdog, not merely by absent clips.
+    # It has never run on a phone line, and there is a specific untested
+    # interaction: a callee on speakerphone may have their mic pick the
+    # backchannel back up, and with realtime_echo_gate="pass" nothing would
+    # suppress it — the agent could transcribe its own noise as caller speech.
+    # Off so the next call tests ONE new thing rather than two.
+    check(settings.realtime_backchannels is False,
+          "backchannels default OFF — untested on a live line")
+    check(_wd_src and "settings.realtime_backchannels" in _wd_src.group(0),
+          "and the watchdog checks the flag, so clips alone cannot enable it")
+
+    # ── Hint regurgitation, quarantined at ingestion ─────────────────────────
+    # The transcription hint is sent to the transcriber as `prompt`, so anything
+    # in it can come back as transcript. Proven beyond argument on
+    # call-20260819-1324, where the ENTIRE hint arrived as a caller turn.
+    #
+    # The architectural bug was not the hint. Every guard in realtime_worker
+    # reads sess.turns as ground truth, and _is_hint_echo was only consulted
+    # inside save_branch grounding — so a fabricated turn that triggered no
+    # save entered the transcript unexamined. On 1324 that fed a 'Northwell'
+    # the caller never said to _discarded_location, which blocked a LEGITIMATE
+    # escalation and left the agent unable to end the call. Checking at one
+    # consumer could never hold; it has to be quarantined at ingestion.
+    _hint = tpl.transcribe_hint
+
+    # (a) Verbatim run -> truncate. Not drop: on 1324 a caller genuinely said
+    #     "We are having only one branch..." and the hint was APPENDED to it.
+    _echo_turn = (
+        "We are having only one branch, that is the downtown branch in Los Angeles. "
+        "Phone call with a hospital or medical office receptionist. Health systems: "
+        "Mercy, Ascension, CommonSpirit, Providence, Sutter, Kaiser Permanente, HCA, "
+        "Tenet, Baptist, Methodist, Presbyterian, Mount Sinai, Cleveland Clinic, "
+        "Mayo Clinic, Johns Hopkins, Banner, Advocate, Trinity Health, Northwell, "
+        "NewYork-Presbyterian, Cedars-Sinai. Location words: campus, clinic, medical "
+        "center, satellite office, north, south, east, west, downtown, midtown, "
+        "uptown, suite, boulevard, avenue, parkway, drive, street.")
+    _kept = rw._strip_hint_run(_echo_turn, _hint)
+    check(_kept == "We are having only one branch, that is the downtown branch in Los Angeles.",
+          "the recited hint is truncated and the caller's real words survive",
+          _kept[:60])
+    check("Ascension" not in _kept and "Cedars" not in _kept,
+          "no fragment of the recited list is left behind")
+    check(rw._strip_hint_run("She's at the Northgate campus.", _hint)
+          == "She's at the Northgate campus.",
+          "ordinary speech that merely uses hint vocabulary is untouched")
+
+    # (b) Words on silence did not come from the caller. This catches the
+    #     fabrication whose wording is too ordinary for a vocabulary test:
+    #     1324's "Sure, our clinic is located on 123 Main Street, across from
+    #     the Northwell campus" arrived at audio_rms 0.000259.
+    _lvl2 = 0.135
+    for _want, _label, _rms, _lv in [
+        (True,  "1323 'Mercy Hospital' (rms 0.0114, no level yet)", 0.011417, None),
+        (True,  "1324 silent 'Northwell campus'",                   0.000259, _lvl2),
+        (True,  "1324 'Hello, how can'",                            0.005624, _lvl2),
+        (False, "real: downtown branch",                            0.134868, _lvl2),
+        (False, "real: quiet but audible",                          0.095400, _lvl2),
+        (False, "unmeasured gets the benefit of the doubt",         None,     _lvl2),
+    ]:
+        check(rw._audio_carried_nothing(_rms, _lv) == _want,
+              f"unevidenced-turn rule: {_want!s:5} for {_label}")
+
     # ── The adaptive quiet threshold ─────────────────────────────────────────
     # _LOW_AUDIO_RMS is an ABSOLUTE threshold on a quantity with no absolute
     # meaning: line gain, handset and distance all move it, so one constant
@@ -1423,6 +1941,34 @@ async def main():
           "greeting is one or two sentences, not a paragraph")
     check(len(greeting.split()) <= 24,
           f"greeting stays short ({len(greeting.split())} words)")
+    # The opener ASKS, it does not instruct. A bare wh-question ("which branch
+    # is Dr. X working out of?") presupposes an answer and offers no way out,
+    # and it arrives before the callee has said anything — on
+    # call-20260819-1619 they replied "Hello David, good evening. How can I
+    # help you?", resetting the exchange back to a normal opening, which is
+    # what people do when someone skips one.
+    #
+    # This also contradicted the prompt's own rule — "You are asking a favour
+    # of someone at work: 'do you know...'" — with a worked Right example using
+    # exactly that form. Every other ask in the file is softened; the one
+    # sentence the callee hears first was not.
+    for _n5, _t5 in _ALL.items():
+        _g5 = _t5.build_greeting(
+            Doctor(doctor_name="Dr. Jane Okafor",
+                   hospital_name="Northside Medical Group"))
+        _low5 = _g5.lower()
+        check(any(s in _low5 for s in ("do you know", "any chance",
+                                       "would you know", "i'm hoping",
+                                       "could you tell")),
+              f"{_n5}: the opener softens its ask rather than instructing",
+              _g5[-46:])
+    # Length is the reason the softener had to be paid for elsewhere, not a
+    # nicety: the greeting is already 6.5-7.5s of speech on live calls before
+    # the callee can speak at all. If this budget ever needs raising, shorten
+    # something rather than extending the opener.
+    check(len(greeting.split()) <= 24,
+          "and it is paid for in the same breath, not by running longer",
+          f"{len(greeting.split())} words")
     # "this is <name>" is the US convention and stays. The "<name> with <company>"
     # half was dropped deliberately: it is the natural phrasing, and it is a
     # false employment claim. Accuracy wins over idiom on the identity line.
@@ -2364,6 +2910,37 @@ async def main():
         _ok, _n = await _policy(_active, _done, **_kw)
         check(_ok is _want and _n == (1 if _want else 0),
               f"policy: {_label}", f"sent={_n}")
+
+    # ── Do not stack a reply on top of audio still playing ───────────────────
+    # STILL PLAYING is not STILL GENERATING, and _response_active only knows
+    # the second. OpenAI produces a reply far faster than realtime — a 6.25s
+    # turn arrives in about a second — and every delta is forwarded to Twilio
+    # immediately, so the rest sits in Twilio's queue long after OpenAI calls
+    # the response done.
+    #
+    # Creating the next one then does not talk OVER the caller; it APPENDS, and
+    # they hear an unbroken monologue with no gap to speak into. Measured on
+    # call-20260819-2006: 21.3s of audio generated, 15.6s actually reaching the
+    # callee, and a transcript showing three identical questions inside one
+    # 50-word turn. She hung up at 36s.
+    async def _play_policy(playing_s, **kw):
+        _s = rw.RealtimeSession("CA0000000000000000000000playbk",
+                                Doctor(doctor_name="Dr. Q"))
+        _s._playback_ends_at = time.monotonic() + playing_s
+        _ws2 = _FakeWS()
+        ok = await rw._create_response(_ws2, _s, why="test", **kw)
+        return ok, len(_ws2.sent)
+    _ok, _n = await _play_policy(3.0)
+    check(_ok is False and _n == 0,
+          "a reply is not created while audio is still playing out")
+    _ok, _n = await _play_policy(-1.0)
+    check(_ok is True and _n == 1,
+          "and is created once the queue has drained")
+    # The closing sites are exempt: a goodbye that waits for the queue is a
+    # goodbye that arrives after the line is being torn down.
+    _ok, _n = await _play_policy(3.0, allow_when_done=True)
+    check(_ok is True and _n == 1,
+          "the goodbye is still allowed while audio plays out")
 
     # The matrix above tests the HELPER. It does not test the WIRING, and that
     # is the half that matters: setting the closing site's overrides to False

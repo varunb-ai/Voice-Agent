@@ -150,10 +150,15 @@ acceptable outcome. Coming away with something you were not told is not.
   There is no word count to hit: a warm reply that runs a few words long is
   right, a clipped one that lands like a form is wrong.
 - React, THEN say the thing, folded into ONE sentence. The reaction opens the
-  sentence; it is never the whole turn.
-      Right: "Got it — which branch is she at?"
+  sentence; it is never the whole turn. And the ask itself stays a REQUEST —
+  a reaction in front of a bare demand is still a demand.
+      Right: "Got it — do you know which branch she's at?"
       Wrong: "Got it."            (reacted, told them nothing, they wait)
-      Wrong: "Which branch is she at?"   (no reaction — an interrogation)
+      Wrong: "Which branch is she at?"   (no reaction, and an order)
+      Wrong: "Got it — which branch is she at?"
+             (reacted, but the ask is still an instruction. A cushion in
+             front of an order does not make it a question you are asking
+             someone; it makes it a politely introduced one.)
 - Answering them and asking in the same breath is how a person hands the
   conversation back, and it is usually right. Ending a turn with nothing for
   them to respond to is worse: they cannot tell a pause from a dropped line,
@@ -519,9 +524,18 @@ apply the other rule. Never defer either to a later turn."""
 # "we verify doctor listings" is dropped rather than the disclosure: the ask
 # states the purpose more concretely than the job description did, and the
 # automated/recorded disclosure is the whole reason this variant exists.
+# Softened in step with _HUMAN_GREETING, and changed in the SAME commit
+# deliberately. This file has a documented bug class from fixing one template
+# and silently leaving the other — the employment claim survived here after
+# being removed from the human greeting — which is why the tests loop TEMPLATES
+# rather than checking the configured one. An opener that instructs instead of
+# asking is the same defect whichever template carries it.
+#
+# Runs longer than the human variant because the disclosure is not optional.
+# That is inherent, not slack: the words that can be cut have been.
 _FORAGE_GREETING = (
     "Hi there — this is an automated call on behalf of {org}, and it's "
-    "recorded. Which branch is Dr. {surname} working out of?"
+    "recorded. Do you know which branch Dr. {surname} works out of?"
 )
 
 # Template 1's opener: American phone convention, one breath, truthful about who
@@ -541,9 +555,42 @@ _FORAGE_GREETING = (
 # a location before they have said they are the right person — and it is
 # bounded: worst case they ask "who's this?", which costs one turn, against
 # forty seconds and a disengaged callee for the full stop.
+#
+# "DO YOU KNOW" is doing real work, added 2026-08-19. The opener used to end
+# "— which branch is Dr. X working out of?", a bare wh-question, and it landed
+# as an instruction rather than a request. Three things stacked: a bare
+# interrogative presupposes they will answer and offers no way out; it arrives
+# before the callee has said anything at all, so nothing has been exchanged and
+# they are already being told to do something; and the em-dash pivot makes the
+# self-introduction read as preamble to an order rather than as a greeting. On
+# call-20260819-1619 the callee answered it with "Hello David, good evening.
+# How can I help you?" — resetting the exchange back to a normal opening, which
+# is what people do when someone skips one.
+#
+# It also contradicted this file's own rule, twenty lines up: "You are asking a
+# favour of someone at work: 'do you know...', 'any chance you could tell
+# me...'", with the worked example Right: "Do you know which branch she's
+# working out of these days?". Every other ask in the prompt is softened; the
+# one sentence the callee hears first was not.
+#
+# KNOWN TRADE-OFF: "do you know" invites a yes/no, and someone could answer
+# "yes" and stop. That is the likely reason the bare form was chosen. Accepted,
+# because the prompt's own Right example accepts it and because a one-turn
+# clarification is cheaper than opening on a demand — the same trade already
+# made when "Is this {hospital}?" was removed. If callees start answering "yes"
+# and stopping, that is the signal to revisit, not a surprise.
+# Paid for in the same breath rather than lengthened. The softener costs three
+# words, and the opener is ALREADY 6.5-7.5s of speech before the callee can say
+# anything — measured on live calls — so it had to come back from somewhere:
+#   "is working out of" -> "works out of"   (-1)
+#   the em-dash          -> a comma          (-1, and it is the softer pivot
+#                                             anyway; the dash was part of what
+#                                             made the introduction read as
+#                                             preamble to an instruction)
+# Net 24 words, the same length as the version that landed as an order.
 _HUMAN_GREETING = (
     "Hi, this is {agent_name}, calling on behalf of {org} about a doctor "
-    "listing — which branch is Dr. {surname} working out of?"
+    "listing, do you know which branch Dr. {surname} works out of?"
 )
 
 

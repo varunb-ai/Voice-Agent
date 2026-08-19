@@ -539,10 +539,35 @@ _routing_lock = threading.Lock()
 _ROUTING_WAIT_S = 2.0
 
 
+# The server's event loop, captured at startup. run_twilio.py places the call
+# from a threading.Timer, so register_call runs on a DIFFERENT thread from
+# uvicorn — scheduling the pre-warm needs the loop explicitly rather than
+# asyncio.get_event_loop(), which would find no loop on that thread.
+_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+@app.on_event("startup")
+async def _capture_loop() -> None:
+    global _LOOP
+    _LOOP = asyncio.get_running_loop()
+
+
 def register_call(call_sid: str, doctor: Doctor) -> None:
-    """Bind a placed call to its doctor. Safe under concurrency."""
+    """Bind a placed call to its doctor, and start warming a session.
+
+    The pre-warm rides along here because this is the moment the call is
+    placed — the phone is about to ring, and those seconds are otherwise dead.
+    See realtime_worker.prewarm_realtime for what it buys and why failing is
+    free.
+    """
     with _routing_lock:
         _doctor_by_sid[call_sid] = doctor
+    if _LOOP is not None and settings.use_realtime:
+        from agents.voice.realtime_worker import prewarm_realtime
+        # Fire and forget, onto the server's loop from this thread. Never
+        # awaited: the call must not wait on it, and prewarm_realtime cannot
+        # raise.
+        asyncio.run_coroutine_threadsafe(prewarm_realtime(call_sid), _LOOP)
 
 
 async def _doctor_for(call_sid: str) -> Optional[Doctor]:

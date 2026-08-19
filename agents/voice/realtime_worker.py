@@ -49,6 +49,7 @@ from agents.voice.memory import CallMemory
 from agents.voice.templates import get_template
 from agents.voice.tools import run_tool, TOOL_SCHEMAS
 from agents.voice.audio_utils import resample, _mulaw_decode, _mulaw_encode
+from agents.voice import backchannel
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +128,60 @@ def _wire_to_pcm16(raw: bytes) -> np.ndarray:
 def _wire_samples(raw: bytes) -> int:
     """Number of audio samples in a chunk. μ-law is 1 byte/sample, PCM16 is 2."""
     return len(raw) if _passthrough_enabled() else len(raw) // 2
+
+
+def _wire_bytes_per_ms() -> float:
+    """Bytes of recording buffer per millisecond of audio."""
+    return _wire_sample_rate() / 1000.0 * (1 if _passthrough_enabled() else 2)
+
+
+def _utterance_slice(sess: "RealtimeSession",
+                     start_ms: Optional[int],
+                     end_ms: Optional[int],
+                     fallback_chunk_pos: int) -> bytes:
+    """The caller audio for one utterance, cut by OpenAI's own timestamps.
+
+    THIS IS THE FIX FOR THE MEASUREMENT, and the bug it replaces was subtle.
+
+    The old code marked the start as `len(sess._caller_pcm)` at the moment
+    `input_audio_buffer.speech_started` ARRIVED. But that event is generated on
+    a US server and travels to India — half a second to a second — and by the
+    time it lands, the caller's audio is already sitting in our buffer. For a
+    SHORT utterance the whole thing is buffered before the marker is set, so
+    the slice contains only the silence that follows.
+
+    The signature is unmistakable and appeared twice: audio_rms exactly
+    0.000244140625, which is what a buffer of mu-law 0xFF — digital silence —
+    decodes to. On call-20260819-2006 that number was recorded for a turn where
+    the caller channel of the Twilio recording measures 0.2425, and on
+    call-20260819-1847 for a "Yes, yes." Varun confirmed he said.
+
+    Both times a guard then acted on it: the quarantine dropped the turn as
+    "audio carried nothing" while the caller was audibly speaking. Right answer
+    once, wrong answer once, right reason never.
+
+    OpenAI already tells us where the speech was. `speech_started` carries
+    `audio_start_ms` and `speech_stopped` carries `audio_end_ms`, both indexed
+    into the very buffer we have been feeding it. Using those removes the
+    arrival-time guess entirely.
+
+    CAVEAT worth knowing: this assumes our buffer and OpenAI's input buffer
+    hold the same audio. True while REALTIME_ECHO_GATE is "pass", because we
+    append every frame and forward every frame. Under "energy" or "drop" the
+    two diverge and the byte offsets would drift — so it falls back to the
+    chunk position if the timestamps are missing or land out of range.
+    """
+    if start_ms is None or end_ms is None or end_ms <= start_ms:
+        return b"".join(sess._caller_pcm[fallback_chunk_pos:])
+    buf = b"".join(sess._caller_pcm)
+    bpms = _wire_bytes_per_ms()
+    lo = int(start_ms * bpms)
+    hi = int(end_ms * bpms)
+    # Out of range means the buffers have drifted; the fallback is wrong too,
+    # but it is wrong in the direction of measuring MORE audio rather than none.
+    if lo >= len(buf) or hi <= lo:
+        return b"".join(sess._caller_pcm[fallback_chunk_pos:])
+    return buf[lo:min(hi, len(buf))]
 
 
 def _loudest_window_rms(arr: np.ndarray, window_s: float = 0.3) -> float:
@@ -210,6 +265,17 @@ _REPAIR_WINDOW_S = 12.0
 # truncation on call-20260818-1338 was 750ms and the caller plainly had not
 # followed it.
 _CUT_SHORT_MS = 1500
+
+# ── Backchannels ─────────────────────────────────────────────────────────────
+# How long the caller must be mid-utterance before a listener would make a
+# noise. Under ~2s a person is still just listening; past it, silence starts to
+# read as absence. Deliberately conservative: a badly-timed "mm-hm" is worse
+# than none, and this fires on elapsed speech rather than on a detected pause
+# because the pause is not observable from the events we get.
+_BACKCHANNEL_AFTER_S = 2.8
+# At most one per caller utterance, and never twice inside this window — two in
+# quick succession is a tic, not listening.
+_BACKCHANNEL_COOLDOWN_S = 9.0
 
 # Shortest gap allowed between two location asks. On call-20260811-1649 the
 # agent asked at 16:49:31, the caller said "Yes, speaking" while it was still
@@ -354,6 +420,8 @@ _CLAIMS_SAVED = re.compile(
     r"|i('| a)m saving (that|it)"
     r"|we'?(ll be|re) all set|we'?re (done|all done|set|good)"
     r"|that'?s (everything|us|it) (done|sorted)?"
+    r"|that'?s all i (need|needed)|that'?s (what|all) i needed"
+    r"|i have (everything|what) i need"
     r"|all (set|sorted|done))\b", re.I)
 
 
@@ -511,6 +579,14 @@ _HOLD_REQUEST = re.compile(
     r"|bear with me|one sec))\b", re.I)
 
 
+# The caller announcing that THEY will go and do something. This is what
+# distinguishes "hang on, let me check" from "hang on, who are you?" — the
+# first promises an answer, the second demands one.
+_CALLER_WILL_ACT = re.compile(
+    r"(?:\b(?:i|we)\b|let me|lemme)[^.?!]{0,24}"
+    r"\b(?:check|look|see|find|ask|grab|pull|get|confirm)\b", re.I)
+
+
 def is_hold_request(text: str) -> bool:
     """Is the caller asking for time to go and find the answer?
 
@@ -519,8 +595,69 @@ def is_hold_request(text: str) -> bool:
     please give me a minute? I just need to check" — the most cooperative thing
     said on that call. The agent thanked them and hung up while they were on
     their way to look it up.
+
+    "HANG ON" IS NOT ALWAYS A HOLD. On call-20260819-1915 the caller said
+    "Hang on, are you a real person or is this a recording?" and this returned
+    True. She was challenging the agent, not going to look anything up, and the
+    console duly printed "Caller is going to check".
+
+    That was harmless before _HOLD_GRACE_S existed. It is not harmless now:
+    a hold silences the watchdog for 45 seconds, so a caller who says "hang on,
+    who is this?" and then waits for an answer would be met with 45 seconds of
+    nothing. A regression introduced by the hold fix itself, on the very next
+    call.
+
+    The discriminator is who is being asked to do something. A hold says the
+    CALLER will act — "let me check", "give me a minute". A challenge asks the
+    AGENT — "are you a real person?", "who did you say you were?". So a turn
+    that puts a question to the agent is not a hold, unless it is the ordinary
+    "can you hold on a moment?" form, which asks the agent to WAIT rather than
+    to answer.
     """
-    return bool(_HOLD_REQUEST.search(text or ""))
+    t = _norm_quotes(text or "")
+    if not _HOLD_REQUEST.search(t):
+        return False
+    # The caller saying THEY will go and do something settles it, whatever
+    # else is in the turn. "can you please give me a minute? I just need to
+    # check" is a question, addresses the agent as "you", and is the most
+    # cooperative sentence on that call — a second-person test alone rejects
+    # it, which is the mistake this replaced.
+    if _CALLER_WILL_ACT.search(t):
+        return True
+    # "can you hold on a moment?" asks the agent to WAIT, not to answer.
+    if re.search(r"(?:can|could|would)\s+you\s+(?:just\s+|please\s+)*"
+                 r"(?:wait|hold|hang on)", t, re.I):
+        return True
+    # Otherwise a question put to the agent wants an answer, not time.
+    if "?" in t and (_IDENTITY_ASK.search(t)
+                     or re.search(r"\b(you|your|you'?re)\b", t, re.I)):
+        return False
+    return True
+
+
+# "Is this about a patient?" — asked twice in two calls, half-answered both
+# times. On call-20260819-1847 and again on -1915 the caller asked "is this
+# about a patient, or something urgent?" and the agent answered only the second
+# half: "No, nothing urgent — it's just a listing check."
+#
+# At a medical office that omission is not a nicety. Whether a call concerns a
+# patient decides whether they pull a record, route to clinical staff, or start
+# thinking about PHI. Leaving it to be inferred from "listing check" is exactly
+# the ambiguity a front desk is trained not to accept.
+#
+# The prompt already says "Several questions at once -> Answer EVERY one of
+# them", and it did not hold twice running. So the process asks instead: this
+# question is predictable and high-frequency for a medical cold call, the same
+# way _IDENTITY_ASK is, and gets the same treatment.
+_PATIENT_ASK = re.compile(
+    r"\b(?:is|it'?s|this is|are you)\b[^?]{0,40}\babout\s+(?:a\s+|any\s+)?"
+    r"patient\b|\bpatient(?:'?s)?\s+(?:related|matter|issue|record)\b"
+    r"|\babout\s+(?:one of\s+)?(?:our|my|a)\s+patients?\b", re.I)
+
+
+def _asks_about_patient(text: str) -> bool:
+    """Did the caller ask whether this concerns a patient?"""
+    return bool(_PATIENT_ASK.search(_norm_quotes(text or "")))
 
 
 def _content_words(text: str) -> set:
@@ -924,8 +1061,77 @@ async def _create_response(oai_ws, sess: "RealtimeSession", *, why: str,
     if sess.done and not allow_when_done:
         log.info("[Realtime] response.create skipped (%s): call is closing", why)
         return False
+    # STILL PLAYING is not the same as STILL GENERATING, and _response_active
+    # only knows the second. OpenAI produces a reply far faster than realtime —
+    # a 6.25s turn arrives in about a second — and we forward every delta to
+    # Twilio immediately, so the rest sits in Twilio's queue long after OpenAI
+    # calls the response done.
+    #
+    # Creating the next one then does not talk over the caller; it APPENDS.
+    # They hear one unbroken monologue with no gap to speak into. On
+    # call-20260819-2006 that surfaced as three identical questions inside a
+    # single 50-word turn, and the callee hung up.
+    #
+    # The closing sites are exempt: a goodbye that waits for the queue to drain
+    # is a goodbye that arrives after the line is already being torn down.
+    _left = sess._playback_ends_at - time.monotonic()
+    if _left > 0 and not allow_when_done:
+        log.info("[Realtime] response.create skipped (%s): %.1fs of audio is "
+                 "still playing out to the caller", why, _left)
+        return False
     await oai_ws.send(json.dumps({"type": "response.create"}))
     return True
+
+
+# ── The caller gave more than we recorded ────────────────────────────────────
+# call-20260819-1847: she said "it's the Mission Bay clinic, 1825 Fourth
+# Street" and the agent saved just "Mission Bay Clinic". Nothing blocked the
+# fuller value — grounding accepts "Mission Bay Clinic, 1825 Fourth Street" —
+# the model simply left it out, despite the prompt saying "Several: pass them
+# all, comma-separated".
+#
+# The mirror image of the same morning's failure, where it INVENTED a street
+# number. Both are one question asked in opposite directions: does the record
+# match what the caller said? _ungrounded_terms asks whether we recorded too
+# MUCH. This asks whether we recorded too LITTLE.
+#
+# A street number is the most specific thing a receptionist can give and the
+# hardest to recover afterwards — "Mission Bay Clinic" may be one of several
+# sites; 1825 Fourth Street is not.
+_STREET_SUFFIX = (r"street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|"
+                  r"lane|ln|way|parkway|pkwy|court|ct|place|pl|terrace|"
+                  r"circle|cir|highway|hwy|suite|ste|floor")
+
+# A house number followed within a few words by a street-type word. BOTH parts
+# are required: a bare number is a suite count, a year, a number of branches,
+# or noise.
+_STREET_ADDRESS = re.compile(
+    r"\b(\d{1,6})\s+((?:[A-Za-z0-9'\-\.]+\s+){0,3}?(?:" + _STREET_SUFFIX + r"))\b",
+    re.I)
+
+
+def _address_offered(sess: "RealtimeSession") -> Optional[str]:
+    """A street address the caller gave, or None. The latest one wins."""
+    found = None
+    for t in sess.turns:
+        if t.role != "caller" or t.text.strip() == "[...]":
+            continue
+        for m in _STREET_ADDRESS.finditer(t.text):
+            found = f"{m.group(1)} {' '.join(m.group(2).split())}"
+    return found
+
+
+def _address_dropped(args: dict, sess: "RealtimeSession") -> Optional[str]:
+    """The caller gave a street address and this save leaves it out."""
+    addr = _address_offered(sess)
+    if not addr:
+        return None
+    saved = " ".join(str(args.get(f) or "") for f in ("branch", "city")).lower()
+    number = addr.split()[0]
+    # Keyed on the NUMBER, not the words: "Fourth Street" can legitimately be
+    # absent from a value that already names the site, but the house number is
+    # either recorded or it is lost.
+    return None if number in saved else addr
 
 
 def _echo_gate_allows(raw: bytes) -> bool:
@@ -1146,11 +1352,41 @@ def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
         if not value:
             continue
         terms = [w.strip(".,!?-—'\"") for w in value.lower().split()]
+
+        # ── DIGITS MUST MATCH EXACTLY ───────────────────────────────────────
+        # The word rule below is deliberately lenient: one content word
+        # matching is enough, because transcription is imperfect and a real
+        # answer is worth more than a blocked one. That tolerance is right for
+        # words and exactly wrong for numbers.
+        #
+        # call-20260819-1716: the caller said "1825 4th Street". The agent
+        # saved "Mission Bay Clinic, 1855 Fourth Street" and grounding PASSED
+        # it — because "bay" appeared, and one word was enough. A four-digit
+        # house number nobody said went into the client directory.
+        #
+        # That is the worst failure this whole system exists to prevent. Not an
+        # empty row and not an obviously wrong one, but a PLAUSIBLE one: no
+        # reviewer spots it, and someone sent to 1855 Fourth Street finds the
+        # wrong building. A misheard street name is recoverable; a misheard
+        # street number is a wrong address that looks right.
+        #
+        # So numbers get no tolerance at all. Every digit run in the value must
+        # appear verbatim in what the caller actually said.
+        _said_nums = set(re.findall(r"\d+", heard))
+        _value_nums = set(re.findall(r"\d+", value))
+        _invented = sorted(_value_nums - _said_nums)
+        if _invented:
+            missing.append(
+                f"{field}={value!r} (number{'s' if len(_invented) > 1 else ''} "
+                f"{', '.join(_invented)} not in what the caller said)")
+            continue
+
         content = [w for w in terms if w and w not in _UNGROUNDED_STOPWORDS]
         if not content:
             continue
         # One content word appearing is enough — transcription is imperfect and
-        # we would rather let a real answer through than block it.
+        # we would rather let a real answer through than block it. See the digit
+        # rule above for where this tolerance had to stop.
         if not any(w in heard for w in content):
             missing.append(f"{field}={value!r}")
             continue
@@ -1233,6 +1469,127 @@ def _caller_speech_level(sess: "RealtimeSession") -> Optional[float]:
     if len(vals) < _MIN_TURNS_FOR_ADAPTIVE:
         return None
     return float(median(vals))
+
+
+# ── Hint regurgitation: our own prompt coming back as "speech" ───────────────
+#
+# The transcription hint is sent to the transcriber as `prompt`. It is not a
+# vocabulary filter — it is text prepended to that model's context, so anything
+# in it can come back out as transcript. Proven beyond argument on
+# call-20260819-1324, where the ENTIRE hint arrived as a caller turn, verbatim:
+#
+#   "We are having only one branch, that is the downtown branch in Los
+#    Angeles. Phone call with a hospital or medical office receptionist.
+#    Health systems: Mercy, Ascension, CommonSpirit, ..."
+#
+# and on call-20260819-1323, where "Mercy Hospital" — the first health system
+# in the hint — arrived at audio_rms 0.011 on a call where the callee never
+# spoke at all, and the agent answered it.
+#
+# THE ARCHITECTURAL POINT. Every guard in this file reads `sess.turns` as
+# ground truth. _is_hint_echo was only ever consulted inside save_branch
+# grounding, so a fabricated turn that did not trigger a save entered the
+# transcript unexamined — steering the conversation, and on call-20260819-1324
+# feeding _discarded_location a 'Northwell' the caller never said, which
+# blocked a legitimate escalation and left the agent unable to end the call.
+#
+# So the check belongs at INGESTION, not at one consumer. Quarantine here and
+# every downstream guard is correct by construction.
+
+# A verbatim run this long from the hint cannot be coincidence. Six words of
+# ordinary speech overlapping the hint is possible; six CONSECUTIVE ones in the
+# hint's own order is the prompt being read back.
+_HINT_RUN_WORDS = 6
+
+
+# Section headings in the hint, capitalised but carrying no identity.
+_HINT_HEADINGS = frozenset({"phone", "health", "location", "call", "systems", "words"})
+
+
+def _hint_proper_nouns(hint: str) -> frozenset:
+    """The named health systems in the hint — the words it can put in a mouth.
+
+    Derived from CAPITALISATION rather than a hardcoded list, because the hint
+    is written that way: the health systems are proper nouns ("Mercy",
+    "Kaiser", "Mayo", "Northwell") while the location words are deliberately
+    lowercase ("campus", "clinic", "medical center"). So the capitalised set is
+    exactly the part a caller would not volunteer by accident, and it tracks
+    the hint automatically if the hint is ever edited.
+    """
+    caps = {w.lower() for w in re.findall(r"\b[A-Z][A-Za-z]{2,}\b", hint or "")}
+    return frozenset(caps - _UNGROUNDED_STOPWORDS - _HINT_HEADINGS)
+
+
+def _reads_as_hint_vocabulary(text: str, hint: str) -> bool:
+    """Does `text` name a health system straight out of our own hint?
+
+    The SECOND signal the quarantine requires, and it has to be the narrow one.
+    Requiring every content word to come from the hint was too strict: the
+    fabrication on call-20260819-2006 was "Hello, I need to schedule an
+    appointment at the Mayo", where "schedule" and "appointment" are ordinary
+    English and only "Mayo" came from us.
+
+    A named system appearing on silent audio is the transcriber reading its
+    own prompt. A caller genuinely saying "Mercy" is audible when they do —
+    which is why this is paired with the audio test and never used alone.
+    """
+    if not text or not hint:
+        return False
+    said = {w for w in re.findall(r"[a-z]+", text.lower())}
+    return bool(said & _hint_proper_nouns(hint))
+
+
+def _strip_hint_run(text: str, hint: str) -> str:
+    """Truncate `text` at the first verbatim run of >= _HINT_RUN_WORDS hint words.
+
+    Truncate rather than excise: once the transcriber starts reciting the
+    prompt it does not come back to the caller mid-sentence, so everything from
+    the first run onward is prompt. Cutting a window out of the middle left
+    the rest of the recited list in place on call-20260819-1324.
+
+    Truncate rather than drop the turn, because the two get mixed: on that call
+    the caller genuinely said "We are having only one branch, that is the
+    downtown branch in Los Angeles" and the transcriber appended the whole hint
+    to it. Dropping the turn would have discarded a real answer.
+    """
+    if not text or not hint:
+        return text
+    hw = [w for w in re.findall(r"[a-z]+", hint.lower())]
+    if len(hw) < _HINT_RUN_WORDS:
+        return text
+    runs = {tuple(hw[i:i + _HINT_RUN_WORDS])
+            for i in range(len(hw) - _HINT_RUN_WORDS + 1)}
+    words = re.findall(r"\S+", text)
+    keys = [re.sub(r"[^a-z]", "", w.lower()) for w in words]
+    for i in range(len(words) - _HINT_RUN_WORDS + 1):
+        window = tuple(k for k in keys[i:i + _HINT_RUN_WORDS] if k)
+        if len(window) == _HINT_RUN_WORDS and window in runs:
+            return " ".join(words[:i]).strip()
+    return text
+
+
+def _audio_carried_nothing(rms: Optional[float],
+                           speech_level: Optional[float]) -> bool:
+    """Did the audio under this transcript carry any signal at all?
+
+    If not, the words did not come from the caller — there was nothing there to
+    transcribe. This is the rule that catches a fabrication whose wording is
+    ordinary enough to pass a vocabulary test: on call-20260819-1324, "Sure,
+    our clinic is located on 123 Main Street, across from the Northwell campus"
+    arrived at audio_rms 0.000259, which is digital silence, and fed a
+    'Northwell' to _discarded_location that blocked a legitimate escalation.
+
+    Calibrated in the same place as the hint-echo threshold: across 30 calls
+    with dual-channel recordings, no genuine caller turn measured below
+    median * _QUIET_FRACTION. An unmeasured turn (None) is given the benefit of
+    the doubt, as everywhere else in this file.
+    """
+    if rms is None:
+        return False
+    quiet_below = _LOW_AUDIO_RMS
+    if speech_level is not None:
+        quiet_below = max(quiet_below, speech_level * _QUIET_FRACTION)
+    return rms < quiet_below
 
 
 def _is_hint_echo(turn, content_words: list, speech_level: Optional[float] = None) -> bool:
@@ -1365,8 +1722,42 @@ class RealtimeSession:
         self._truncated_heard_ms: int = 0
         # One-shot, like every other injected directive here.
         self._repair_nudged: bool = False
+        # The transcription hint that was sent for this call. Held so an
+        # arriving transcript can be compared against the prompt that may have
+        # produced it — see _strip_hint_run.
+        self.transcribe_hint: str = ""
+        # Turns suppressed as hint regurgitation, recorded in the artifact so a
+        # silent drop is never invisible.
+        self.suppressed_echoes: list = []
         # Told the caller the branch was saved when the tool then rejected it.
         self._false_save_nudged: bool = False
+        # When the agent said the job was done while memory was still
+        # empty. Checked by the watchdog once any tool call has landed.
+        self._claimed_done_at: float = 0.0
+        self._claimed_done_nudged: bool = False
+        # Rejected one save for omitting a street address the caller gave.
+        self._address_nudged: bool = False
+        # Told to answer the "is this about a patient?" half explicitly.
+        self._patient_nudged: bool = False
+        # OpenAI's audio_start_ms for the utterance in progress. Its own index
+        # into the buffer we feed it, which is the only reliable way to cut an
+        # utterance out — see _utterance_slice.
+        self._speech_start_ms: Optional[int] = None
+        # When the audio already handed to Twilio finishes playing, in
+        # time.monotonic() terms. 0.0 means nothing is queued.
+        self._playback_ends_at: float = 0.0
+        # Backchannels. When the caller's current utterance began (None if they
+        # are not speaking), whether we already made a noise during it, and the
+        # last clip used so the same one is not repeated.
+        # While the caller is away checking, the silence watchdog must not
+        # prompt. Set when they ask for a moment, cleared when they come back
+        # with something substantive. See _HOLD_GRACE_S.
+        self._hold_until: float = 0.0
+        self._caller_speaking_since: Optional[float] = None
+        self._backchannel_done_this_utterance: bool = False
+        self._last_backchannel_at: float = 0.0
+        self._last_backchannel_clip: Optional[str] = None
+        self._backchannels_sent: int = 0
         # Answered-identity nudge, also one-shot for the same reason.
         self._identity_nudged: bool = False
         # Said the same sentence twice in a row, one-shot for the same reason.
@@ -1777,6 +2168,12 @@ class RealtimeSession:
             # what they actually said — filter on this before treating a batch
             # of results as clean.
             "grounding":      self.memory.get("grounding"),
+            # Turns the quarantine discarded. Recorded because a SILENT DROP
+            # is invisible: on call-20260819-2006 two turns were dropped and
+            # the artifact said nothing, so the only evidence was a terminal
+            # someone happened to still have open. A guard that removes a
+            # caller's words has to leave a trace of what it removed.
+            "suppressed_echoes": self.suppressed_echoes or None,
             # Countable conversational failures. Prose rules against these have
             # been ignored across three prompt versions; measuring them makes
             # the next edit evaluable instead of impressionistic.
@@ -1953,6 +2350,147 @@ class RealtimeSession:
 
 # ── Main handler ──────────────────────────────────────────────────────────────
 
+# ── Pre-warming ──────────────────────────────────────────────────────────────
+# Measured on call-20260819-1915: 6.4 SECONDS between the callee pressing
+# answer and hearing a word. All of it before the media stream opened —
+#
+#     /answer webhook  -> ngrok -> India -> TwiML back      ~1.0s
+#     media WebSocket  -> ngrok -> India                    ~1.0s
+#     OpenAI handshake FROM India                           ~1.7s
+#     session.update round trip                             ~0.5s
+#     response.create -> first audio                        ~1.1s
+#
+# The middle two are ours, and they only start once someone has already picked
+# up — the phone rings for seconds while we do nothing with the time.
+#
+# The connect and the session configuration need NOTHING call-specific: the
+# instructions are the template's static text, and the audio block comes from
+# settings. Only the context item (doctor, hospital, greeting) is per-call, and
+# that is sent after the stream opens. So the whole handshake can happen while
+# the phone is still ringing.
+#
+# Failure is free: if pre-warming does not finish, or the callee never answers,
+# handle_realtime connects the old way. Nothing depends on it succeeding.
+_PREWARMED: dict[str, tuple] = {}
+
+# A session held longer than this was almost certainly for a call nobody
+# answered. Closed rather than handed to a later call, which would give that
+# call a socket that has been idle for minutes.
+_PREWARM_TTL_S = 150.0
+
+
+async def _open_realtime_session(template) -> tuple:
+    """Connect to OpenAI and apply session.update. Returns (conn, ws).
+
+    Extracted so the pre-warm and the connect-on-answer path cannot drift —
+    a second copy of this would be one more place for the audio config or the
+    cached-prefix rule to be got subtly wrong.
+    """
+    headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+    model   = settings.realtime_model
+    ws_obj = None
+    conn = None
+    for _attempt in (1, 2):
+        try:
+            conn = websockets.connect(REALTIME_URL.format(model=model),
+                                      additional_headers=headers,
+                                      open_timeout=_OAI_CONNECT_TIMEOUT_S)
+            ws_obj = await conn.__aenter__()
+            break
+        except Exception as e:
+            log.warning("[Realtime] OpenAI handshake attempt %d/2 failed: %s: %s",
+                        _attempt, type(e).__name__, e)
+            if _attempt == 2:
+                raise
+    if ws_obj is None or conn is None:
+        raise RuntimeError("realtime handshake returned no socket")
+    try:
+        raw = await asyncio.wait_for(ws_obj.recv(), timeout=10.0)
+        first = json.loads(raw)
+        if first.get("type") == "error":
+            err = first.get("error", {})
+            raise RuntimeError(f"{model} rejected the connection: {err.get('message')}")
+        # ONE session.update, everything in it. Splitting it churned the cached
+        # prefix. `instructions` is the template's STATIC text — no doctor, no
+        # hospital, no time of day; those go in the per-call conversation item.
+        await ws_obj.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "type":         "realtime",
+                "instructions": template.instructions,
+                "tools":        _realtime_tools(),
+                "audio": build_audio_config(
+                    transcribe_model=settings.realtime_transcribe_model,
+                    transcribe_hint=template.transcribe_hint,
+                    audio_format=settings.realtime_audio_format,
+                    noise_reduction=settings.realtime_noise_reduction,
+                    turn_detection=settings.realtime_turn_detection,
+                    eagerness=settings.realtime_vad_eagerness,
+                    voice=settings.realtime_voice,
+                    silence_ms=settings.realtime_silence_ms,
+                ),
+                "max_output_tokens": settings.realtime_max_response_tokens,
+            },
+        }))
+        for _ in range(10):
+            sc = json.loads(await asyncio.wait_for(ws_obj.recv(), timeout=10.0))
+            ev = sc.get("type", "")
+            if ev == "error":
+                err = sc.get("error", {})
+                raise RuntimeError(
+                    f"session.update rejected: {err.get('code')} {err.get('message')}")
+            if ev == "session.updated":
+                break
+        return conn, ws_obj
+    except Exception:
+        # Close the socket we opened — the old code leaked it on the timeout path.
+        await conn.__aexit__(None, None, None)
+        raise
+
+
+async def prewarm_realtime(call_sid: str) -> None:
+    """Open and configure a session while the phone rings. Never raises."""
+    try:
+        _sweep_prewarmed()
+        conn, ws = await _open_realtime_session(get_template(settings.call_template))
+        _PREWARMED[call_sid] = (conn, ws, time.time())
+        print(f"[Realtime] Pre-warmed a session while the phone rings — the "
+              f"greeting will not wait on a handshake", flush=True)
+    except Exception as e:
+        # Deliberately swallowed. The call still works; it just pays the
+        # handshake on answer, exactly as it did before.
+        log.warning("[Realtime] pre-warm failed (%s: %s) — connecting on answer "
+                    "instead", type(e).__name__, e)
+
+
+def _sweep_prewarmed() -> None:
+    """Close sessions whose call was never answered."""
+    now = time.time()
+    for sid in [s for s, (_, _, t) in _PREWARMED.items() if now - t > _PREWARM_TTL_S]:
+        conn, _ws, _ = _PREWARMED.pop(sid)
+        asyncio.create_task(_close_quietly(conn))
+        log.info("[Realtime] discarded a stale pre-warmed session for %s", sid)
+
+
+async def _close_quietly(conn) -> None:
+    try:
+        await conn.__aexit__(None, None, None)
+    except Exception:
+        pass
+
+
+def take_prewarmed(call_sid: str) -> Optional[tuple]:
+    """Claim the pre-warmed session for this call, if one is ready and fresh."""
+    entry = _PREWARMED.pop(call_sid, None)
+    if entry is None:
+        return None
+    conn, ws, made_at = entry
+    if time.time() - made_at > _PREWARM_TTL_S:
+        asyncio.create_task(_close_quietly(conn))
+        return None
+    return conn, ws
+
+
 async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -> None:
     """Bridge Twilio WebSocket ↔ OpenAI Realtime API for a single call."""
     sess     = RealtimeSession(call_sid, doctor)
@@ -1977,6 +2515,7 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
     # is judging against exactly what the callee was told.
     sess.agent_name = persona
     sess.org_name   = settings.org_name
+    sess.transcribe_hint = template.transcribe_hint
     greeting = template.build_greeting(doctor, org=settings.org_name,
                                        agent_name=persona)
     context  = template.build_context(
@@ -1992,101 +2531,25 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
     from agents.voice import twilio_worker
     twilio_worker._call_id_by_sid[call_sid] = sess.call_id
 
-    headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
-    model   = settings.realtime_model
-
-    # One model, named in config. The old fallback list meant the cost breakdown
-    # could describe a different model than the one that actually served the call.
-    # The callee has already picked up by the time we get here, so every second
-    # spent connecting is dead air on a live line. On 2026-08-18 this handshake
-    # stalled past the websockets default (10s) and the call died having played
-    # nothing at all — the callee answered, heard seventeen seconds of silence,
-    # and was hung up on. A probe from the same machine minutes later connected
-    # in 1.7s, so the stall was transient, which is precisely the failure a
-    # retry is for.
-    #
-    # Budget: two attempts at _OAI_CONNECT_TIMEOUT_S. Shorter than the default
-    # so a stall is caught while the callee is still listening, and retried
-    # once rather than surrendering the call to one bad TCP setup.
-    ws_obj = None
-    for _attempt in (1, 2):
-        try:
-            # Both the constructor and the handshake are inside the try: the
-            # library raises from __aenter__, but building the connector can
-            # fail too (bad URL, bad header), and a retry that only covers one
-            # of the two is the same half-a-guard this module keeps relearning.
-            conn = websockets.connect(REALTIME_URL.format(model=model),
-                                      additional_headers=headers,
-                                      open_timeout=_OAI_CONNECT_TIMEOUT_S)
-            ws_obj = await conn.__aenter__()
-            break
-        except Exception as e:
-            log.warning("[Realtime] OpenAI handshake attempt %d/2 failed: %s: %s",
-                        _attempt, type(e).__name__, e)
-            print(f"[Realtime] Handshake attempt {_attempt}/2 failed "
-                  f"({type(e).__name__}) — {'retrying' if _attempt == 1 else 'giving up'}",
-                  flush=True)
-            if _attempt == 2:
-                # Re-raised so media_stream closes the Twilio socket and the
-                # call ends now, rather than holding a silent line open.
-                raise
-    if ws_obj is None:      # unreachable: the loop above breaks or re-raises
-        raise RuntimeError("realtime handshake returned no socket")
-    try:
-        raw   = await asyncio.wait_for(ws_obj.recv(), timeout=10.0)
-        first = json.loads(raw)
-        if first.get("type") == "error":
-            err = first.get("error", {})
-            raise RuntimeError(f"{model} rejected the connection: {err.get('message')}")
-        print(f"[Realtime] Connected: {model}", flush=True)
-    except Exception:
-        # Close the socket we opened — the old code leaked it on the timeout path.
-        await conn.__aexit__(None, None, None)
-        raise
+    # Claim the session pre-warmed while the phone was ringing, or connect
+    # now. See prewarm_realtime: the handshake and session.update need nothing
+    # call-specific, so they can happen before anyone answers — and on
+    # call-20260819-1915 they were 2.2s of the 6.4s the callee spent listening
+    # to silence.
+    _pre = take_prewarmed(call_sid)
+    if _pre is not None:
+        conn, ws_obj = _pre
+        print(f"[Realtime] Connected: {settings.realtime_model} (pre-warmed)", flush=True)
+    else:
+        conn, ws_obj = await _open_realtime_session(template)
+        print(f"[Realtime] Connected: {settings.realtime_model}", flush=True)
+    print(f"[Realtime] Session configured — template={template.name} "
+          f"voice={settings.realtime_voice}", flush=True)
 
     oai_ws_ctx = conn
 
     try:
         oai_ws = ws_obj
-
-        # ── 2. Configure session — ONE message, everything in it ──────
-        # Splitting this across two session.update calls churned the cached
-        # prefix. `instructions` is the template's STATIC text: no doctor, no
-        # hospital, no time of day. Those go in the conversation item at step 4.
-        await oai_ws.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "type":         "realtime",
-                "instructions": template.instructions,
-                "tools":        _realtime_tools(),
-                "audio": build_audio_config(
-                    transcribe_model=settings.realtime_transcribe_model,
-                    transcribe_hint=template.transcribe_hint,
-                    audio_format=settings.realtime_audio_format,
-                    noise_reduction=settings.realtime_noise_reduction,
-                    turn_detection=settings.realtime_turn_detection,
-                    eagerness=settings.realtime_vad_eagerness,
-                    voice=settings.realtime_voice,
-                    silence_ms=settings.realtime_silence_ms,
-                ),
-                "max_output_tokens": settings.realtime_max_response_tokens,
-            },
-        }))
-
-        # ── 2b. Drain messages until session.updated or error ─────────
-        for _ in range(10):
-            session_confirmed = await asyncio.wait_for(oai_ws.recv(), timeout=10.0)
-            sc = json.loads(session_confirmed)
-            ev = sc.get("type", "")
-            if ev == "error":
-                err = sc.get("error", {})
-                raise RuntimeError(f"session.update rejected: {err.get('code')} {err.get('message')}")
-            if ev == "session.updated":
-                print(f"[Realtime] Session configured — template={template.name} "
-                      f"voice={settings.realtime_voice}", flush=True)
-                break
-        else:
-            print("[Realtime] session.updated not received — continuing anyway", flush=True)
 
         # ── 3. Wait for Twilio stream to start ────────────────────────
         print("[Realtime] Waiting for Twilio stream start...", flush=True)
@@ -2178,7 +2641,7 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor) -
                                 name="twilio->oai"),
             asyncio.create_task(_oai_to_twilio(oai_ws, twilio_ws, sess, done_event),
                                 name="oai->twilio"),
-            asyncio.create_task(_silence_watchdog(oai_ws, sess, done_event),
+            asyncio.create_task(_silence_watchdog(oai_ws, sess, done_event, twilio_ws),
                                 name="silence-watchdog"),
         ]
         try:
@@ -2292,11 +2755,24 @@ async def _twilio_to_oai(
 # seconds of dead air on a cold call is the point at which people hang up.
 _SILENCE_PROMPT_FIRST = 3.5
 _SILENCE_PROMPT_AFTER = 7.0
+
+# How long the silence watchdog stands down after the caller asks for a moment.
+# On call-20260819-1619 the caller said "give me a minute I just need to check",
+# the agent correctly answered "No rush." — and the watchdog then fired 7s later
+# and made it ask again, twice in one call, while the caller was still looking.
+# The prompt already says "THE HOLD LASTS UNTIL THEY COME BACK WITH AN ANSWER.
+# Not one turn — the whole time." The model obeyed it; the watchdog, which had
+# no idea a hold was in progress, overrode it.
+#
+# Long enough to actually look something up. Bounded so a caller who never
+# returns still eventually gets a "still there?" instead of silence forever.
+_HOLD_GRACE_S = 45.0
 _MAX_SILENCE_PROMPTS = 2
 
 
 async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
-                            done_event: asyncio.Event) -> None:
+                            done_event: asyncio.Event,
+                            twilio_ws=None) -> None:
     """Speak again if the callee never does.
 
     Both greetings end on a statement now, which is the right shape — it hands
@@ -2311,6 +2787,69 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
     """
     while not done_event.is_set():
         await asyncio.sleep(0.5)
+
+        # ── Backchannel ────────────────────────────────────────────────────
+        # Owned here because it is the only thing that runs BETWEEN events: no
+        # OpenAI event arrives while the caller is mid-utterance, so the event
+        # loop cannot notice that they have been talking for three seconds.
+        #
+        # Injected straight into the Twilio stream — no response.create, so it
+        # cannot collide with turn detection, cannot be cancelled by the
+        # caller's own speech, and costs nothing. It is a noise, not a turn:
+        # nothing downstream records it.
+        _spk = sess._caller_speaking_since
+        if (settings.realtime_backchannels
+                and _spk is not None and not sess.done
+                and not sess.agent_speaking
+                and not sess._backchannel_done_this_utterance
+                and sess.listen_enabled.is_set()
+                and sess.stream_sid and twilio_ws is not None
+                and time.time() - _spk >= _BACKCHANNEL_AFTER_S
+                and time.time() - sess._last_backchannel_at >= _BACKCHANNEL_COOLDOWN_S):
+            _payload = backchannel.pick(settings.realtime_voice,
+                                        exclude=sess._last_backchannel_clip)
+            # None means no clips are installed for this voice; the feature is
+            # simply off, which is the behaviour that already existed.
+            if _payload:
+                sess._backchannel_done_this_utterance = True
+                sess._last_backchannel_at = time.time()
+                sess._last_backchannel_clip = _payload
+                sess._backchannels_sent += 1
+                try:
+                    await twilio_ws.send_text(json.dumps({
+                        "event": "media", "streamSid": sess.stream_sid,
+                        "media": {"payload": _payload},
+                    }))
+                    print(f"[Realtime] 👂 backchannel while they talk "
+                          f"({time.time() - _spk:.1f}s in)", flush=True)
+                except Exception as e:
+                    log.warning("[Realtime] backchannel send failed: %s", e)
+
+        # Deferred completion-claim check. Waits for any tool call belonging
+        # to that response to land, so this only fires when save_branch was
+        # never called at all — not when it was called and rejected, which has
+        # its own correction at the tool site.
+        if (sess._claimed_done_at and not sess._claimed_done_nudged
+                and not sess.done
+                and time.time() - sess._claimed_done_at >= 1.5):
+            sess._claimed_done_at = 0.0
+            if not sess.memory.get("branch") and not sess.memory.get("escalated"):
+                sess._claimed_done_nudged = True
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                      f"⚠️  CLAIMED DONE, NOTHING SAVED — telling the agent to "
+                      f"actually record it", flush=True)
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": (
+                                 "(system: you told them you were finished, but "
+                                 "nothing has been recorded — save_branch was "
+                                 "never called. If they gave you a location, "
+                                 "call save_branch NOW with their exact words. "
+                                 "If they did not, do not imply the call is "
+                                 "over: ask for it.)")}]},
+                }))
+
         # Deferred goodbye retry. Owned here, not by the response.done handler
         # that schedules it, because this is a separate task: the event pump
         # keeps reading while we wait, so `_response_active` reflects any
@@ -2331,6 +2870,12 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                       "already in flight", flush=True)
         quiet_since = sess._agent_quiet_since
         if sess.done or quiet_since is None or not sess.listen_enabled.is_set():
+            continue
+        # They asked for a moment. Silence is them doing what they said they
+        # would do, not a dropped line — prompting here is the badgering the
+        # prompt's hold rules exist to prevent, and the watchdog was the one
+        # doing it. See _HOLD_GRACE_S.
+        if time.time() < sess._hold_until:
             continue
         # Nothing has been said yet, so the greeting is the only thing they have
         # heard and there is nothing for them to be thinking about.
@@ -2491,6 +3036,25 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
             }
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
                   f"🚫 HALLUCINATED BRANCH BLOCKED: {args}", flush=True)
+        elif (_dropped := _address_dropped(args, sess)) and not sess._address_nudged:
+            # ONE-SHOT. The value being saved is CORRECT, only less complete
+            # than what they said, so this must never be able to stop the call
+            # finishing — a true-but-thin record beats no record at all.
+            #
+            # The rejection points at the transcript rather than at the caller:
+            # they already supplied it, and a wording that sends the agent back
+            # to ask again is how call-20260818-1112 lost an answer that was
+            # already on the call.
+            sess._address_nudged = True
+            sess.memory.update(address_offered=_dropped)
+            result = {"ok": False, "error": (
+                f"NOT SAVED — a street address was given and this value omits "
+                f"it | THEY SAID: {_dropped!r} | RETRY: save_branch with both, "
+                f"comma-separated | ALREADY SUPPLIED, nothing further needed "
+                f"from them")}
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                  f"📍 ADDRESS DROPPED — they gave {_dropped!r}; asking for it "
+                  f"to be saved too", flush=True)
         elif (mismatch := hospital_mismatch(sess)):
             # Every word can be genuinely quoted from the caller and
             # the record still be wrong, because the call reached
@@ -2731,6 +3295,65 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
     the safest of the large handlers to move.
     """
     text = msg.get("transcript", "").strip()
+
+    # ── Quarantine hint regurgitation BEFORE it becomes a turn ──────────────
+    # Everything downstream reads sess.turns as ground truth, so a fabricated
+    # turn does not just mislead the model — it feeds the grounding guards.
+    # On call-20260819-1324 a silent turn containing "Northwell campus" (all
+    # hint vocabulary, audio_rms 0.000259) made _discarded_location block a
+    # legitimate escalation, and the agent could not end the call.
+    _hint = getattr(sess, "transcribe_hint", "") or ""
+    if text and _hint:
+        _cleaned = _strip_hint_run(text, _hint)
+        if _cleaned != text:
+            sess.suppressed_echoes.append(
+                {"kind": "verbatim hint run", "raw": text, "kept": _cleaned})
+            print(f"[Realtime] 🚱 HINT ECHO stripped from caller turn — the "
+                  f"transcriber returned the prompt as speech", flush=True)
+            text = _cleaned
+    # Words on silence did not come from the caller. Rather than drop them
+    # quietly — which leaves the agent apparently ignoring someone — treat it
+    # as what it actually is: we did not hear them. The existing faint-line
+    # nudge already says the right thing.
+    # TWO SIGNALS, NEVER AUDIO ALONE.
+    #
+    # This used to drop on the audio measurement by itself, and that
+    # measurement has now been observed wrong twice — 0.000244 (mu-law digital
+    # silence) recorded for turns where the Twilio caller channel measures
+    # 0.24. _utterance_slice fixes the cause, but a guard that DISCARDS a
+    # caller's words must not rest on a single number that has been wrong
+    # before: the cost of being wrong is throwing away a real answer, which is
+    # the expensive direction for a directory.
+    #
+    # So the words must ALSO look like the transcription hint coming back —
+    # every distinctive word drawn from the vocabulary we handed the
+    # transcriber. Both fabrications on call-20260819-2006 clear that bar
+    # ("Mayo", "appointment"); a quietly-spoken real branch name does not.
+    #
+    # A hallucinated "Yes." on true silence now survives. That is the trade:
+    # it enters the transcript but corrupts nothing, because every location
+    # still has to clear grounding. Dropping a real answer corrupts the result.
+    _rms_now = sess._pending_utterance_rms
+    if (text and _audio_carried_nothing(_rms_now, _caller_speech_level(sess))
+            and _reads_as_hint_vocabulary(text, _hint)):
+        sess.suppressed_echoes.append(
+            {"kind": "hint vocabulary on silent audio", "raw": text,
+             "audio_rms": _rms_now})
+        print(f"[Realtime] 🚱 UNEVIDENCED TURN dropped: {text[:52]!r} "
+              f"— audio carried nothing (rms={_rms_now})", flush=True)
+        sess.take_utterance_rms()
+        if not sess._low_audio_warned:
+            sess._low_audio_warned = True
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": (
+                             "(system: nothing audible came through just then. "
+                             "Do not respond to anything you think you heard. "
+                             "Ask them to say it again.)")}]},
+            }))
+        return
+
     # The faint-line decision belongs here, not at speech_stopped.
     # Words that arrived are proof the line carried them, whatever
     # the RMS says; nothing arriving on a quiet slice is the only
@@ -2810,6 +3433,29 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         # that" is not available — that is exactly the dodge that
         # happened on call-20260811-1649, and it cost an ask from
         # the budget on top of sounding evasive.
+        # Same shape as the identity nudge below, and for the same reason: a
+        # predictable, high-frequency question that the prompt's general rule
+        # ("Answer EVERY one of them") failed to cover on two calls running.
+        # At a medical office "is this about a patient" decides whether they
+        # pull a record or route to clinical staff — it cannot be left to be
+        # inferred from "listing check".
+        if (_asks_about_patient(text) and not sess.done
+                and not sess._patient_nudged):
+            sess._patient_nudged = True
+            print(f"[Realtime] Caller asked if this concerns a patient — "
+                  f"telling the agent to say NO explicitly", flush=True)
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": (
+                             "(system: they asked whether this is about a "
+                             "patient. Say plainly that it is NOT — no patient "
+                             "is involved — before anything else. Answering "
+                             "only the 'urgent' half leaves them guessing, and "
+                             "at a medical office that question decides how "
+                             "they handle the call.)")}]},
+            }))
+
         if (_IDENTITY_ASK.search(text) and not sess.done
                 and not sess._identity_nudged):
             sess._identity_nudged = True
@@ -2860,6 +3506,8 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
                              "exactly as they said it, then close.)")}]},
             }))
         if is_hold_request(text) and not sess.done:
+            # Stand the watchdog down for the whole hold, not just this turn.
+            sess._hold_until = time.time() + _HOLD_GRACE_S
             if sess._give_up_sent or sess._location_asks:
                 print(f"[Realtime] Caller is going to check — "
                       f"give-up cancelled, ask count reset "
@@ -2996,6 +3644,21 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                              "say nothing and wait.)")}]},
             }))
         sess.add_turn("agent", text)
+
+        # ── Claimed it was done, and saved nothing ──────────────────────────
+        # call-20260819-1619: the caller said "It's actually at 100 Main
+        # Street" — a street address, a perfectly valid location — and the
+        # agent replied "Thanks for the address, that's all I needed" and
+        # stopped. save_branch was never called. resolved=False, branch=None.
+        # A resolvable call, answered, and thrown away.
+        #
+        # DEFERRED to the watchdog rather than decided here. The tool call for
+        # this same response has not arrived yet, so "it was never called" is
+        # not knowable at this point — firing now also fires on the rejected
+        # save, which is a different failure with its own correction.
+        if (_claims_saved(text) and not sess.memory.get("branch")
+                and not sess.memory.get("escalated") and not sess.done):
+            sess._claimed_done_at = time.time()
 
         # Enforce the exit condition the prompt never had.
         #
@@ -3193,7 +3856,13 @@ async def _oai_to_twilio(
             if event_type == "input_audio_buffer.speech_started":
                 sess._agent_quiet_since = None    # they are talking; stand down
                 _caller_speaking = True
-                _speech_start_pcm_pos = len(sess._caller_pcm)  # mark start of this utterance
+                sess._caller_speaking_since = time.time()
+                sess._backchannel_done_this_utterance = False
+                _speech_start_pcm_pos = len(sess._caller_pcm)  # fallback only
+                # OpenAI's own offset into the buffer we feed it. The chunk
+                # position above is where the EVENT ARRIVED, which is up to a
+                # second late from India — see _utterance_slice.
+                sess._speech_start_ms = msg.get("audio_start_ms")
                 if sess.done:
                     continue  # don't interrupt the closing farewell
                 if sess._response_active and not _barge_in_pending:
@@ -3251,6 +3920,7 @@ async def _oai_to_twilio(
             elif event_type == "input_audio_buffer.speech_stopped":
                 if _caller_speaking and sess.listen_enabled.is_set():
                     _caller_speaking = False
+                    sess._caller_speaking_since = None
                     # Placeholder — filled in by the session's own inline
                     # transcription when conversation.item.input_audio_
                     # transcription.completed arrives. Nothing else fills it:
@@ -3294,7 +3964,9 @@ async def _oai_to_twilio(
                     # RMS cannot decide this. Whether the words came through is
                     # the only evidence that matters, and that is not known until
                     # the transcript arrives. So measure here, decide there.
-                    utterance = b"".join(sess._caller_pcm[_speech_start_pcm_pos:])
+                    utterance = _utterance_slice(
+                        sess, sess._speech_start_ms, msg.get("audio_end_ms"),
+                        _speech_start_pcm_pos)
                     if utterance:
                         arr = _wire_to_pcm16(utterance)
                         rms = _loudest_window_rms(arr)
@@ -3550,6 +4222,17 @@ async def _oai_to_twilio(
                 _audio_seconds = _samples_this_response / _wire_sample_rate()
                 if _first_delta_sent_at is not None:
                     _playback_ends_at = _first_delta_sent_at + _audio_seconds
+                    # Kept on the session so _create_response can see it. We
+                    # hand Twilio audio as fast as OpenAI produces it, and
+                    # OpenAI produces far faster than realtime — a 6.25s reply
+                    # arrives in about a second. Everything after that sits in
+                    # Twilio's queue. Creating another response before the
+                    # queue drains does not talk OVER the caller; it appends,
+                    # so they hear one unbroken monologue with no gap to speak
+                    # into. On call-20260819-2006 that came out as three
+                    # identical questions in a single 50-word turn, and she
+                    # hung up.
+                    sess._playback_ends_at = _playback_ends_at
                     _echo_cooldown = max(0.3, _playback_ends_at + 0.25 - time.monotonic())
                     # How much of this clip the callee has STILL not heard. The
                     # echo gate already reasons in these terms; the silence

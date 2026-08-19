@@ -1,0 +1,178 @@
+{
+  "call_id": "call-20260819-1619-fcf3",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": null,
+  "resolved": false,
+  "doctor_record": {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": null,
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "specialization",
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260819-1619-fcf3"
+  },
+  "duration_seconds": 100,
+  "cost_usd": 0.143993,
+  "template": "forage_data_collection",
+  "grounding": "verified against caller transcript",
+  "conversation": {
+    "location_asks": 7,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 18,
+    "agent_turns": 9,
+    "caller_turns": 8,
+    "caller_questions": 2,
+    "question_turns": 4,
+    "stapled_questions": 0,
+    "staple_rate": 0.0,
+    "back_to_back_asks": 2,
+    "repeated_sentences": 0
+  },
+  "ask_budget": {
+    "limit": 4,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 8,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 700,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 14,
+    "input_audio": 5127,
+    "input_audio_cached": 4416,
+    "output_audio": 635,
+    "input_text": 66008,
+    "input_text_cached": 65216,
+    "output_text": 920,
+    "cache_hit_rate": 0.9789
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Definitive Healthcare about a doctor listing \u2014 which branch is Dr. Okafor working out of?",
+      "timestamp": "16:19:08",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Hello David, good evening. How can I help you?",
+      "timestamp": "16:19:20",
+      "audio_rms": 0.14051896333694458
+    },
+    {
+      "role": "agent",
+      "text": "Good evening \u2014 I\u2019m just trying to find out which branch Dr. Okafor is working out of.",
+      "timestamp": "16:19:22",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Can you repeat the question again?",
+      "timestamp": "16:19:32",
+      "audio_rms": 0.12710946798324585
+    },
+    {
+      "role": "agent",
+      "text": "Sorry, I didn't quite catch that \u2014 I'm trying to find out which branch Dr. Okafor works at.",
+      "timestamp": "16:19:33",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay, give me a minute I just need to check and I'll tell you.",
+      "timestamp": "16:19:44",
+      "audio_rms": 0.16581940650939941
+    },
+    {
+      "role": "agent",
+      "text": "No rush.",
+      "timestamp": "16:19:45",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, thanks for understanding.",
+      "timestamp": "16:19:51",
+      "audio_rms": 0.06936327368021011
+    },
+    {
+      "role": "agent",
+      "text": "All good.",
+      "timestamp": "16:19:52",
+      "audio_rms": null
+    },
+    {
+      "role": "agent",
+      "text": "Got it, thanks for checking \u2014 which branch is that?",
+      "timestamp": "16:19:59",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, he's working at city center branch in San Francisco.",
+      "timestamp": "16:20:06",
+      "audio_rms": 0.16930614411830902
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that \u2014 is there a specific site name or street address for that City Center Branch?",
+      "timestamp": "16:20:08",
+      "audio_rms": null
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 could you share the exact site name, or the street address for that location?",
+      "timestamp": "16:20:18",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, give me a minute.",
+      "timestamp": "16:20:26",
+      "audio_rms": 0.036378972232341766
+    },
+    {
+      "role": "caller",
+      "text": "It's actually at 100 Main Street.",
+      "timestamp": "16:20:34",
+      "audio_rms": 0.14774906635284424
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for the address \u2014 that\u2019s all I needed.",
+      "timestamp": "16:20:35",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Thank you.",
+      "timestamp": "16:20:40",
+      "audio_rms": 0.05755181610584259
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260819-1619-fcf3.wav",
+  "recorded_at": "2026-08-19T16:19:03.137456"
+}
