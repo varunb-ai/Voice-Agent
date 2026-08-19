@@ -697,6 +697,35 @@ def script_vetting_then_invitation():
     ]
 
 
+def script_failed_response():
+    """A response that FAILS, carrying its reason in status_details.
+
+    call-20260819-2216 had seven of these and four stretches of 8-11 seconds
+    where nobody on the call made a sound; the failures and the dead air line
+    up one for one. The reason was in every event and nothing read it, so the
+    cause was guessed at twice — first blamed on the tunnel, which Twilio's own
+    recording then disproved by showing every agent block reaching the line
+    within 0.4s of generation.
+    """
+    fail: dict = dict(usage())
+    fail["status"] = "failed"
+    fail["status_details"] = {
+        "type": "failed",
+        "error": {"type": "invalid_request_error",
+                  "code": "conversation_already_has_active_response",
+                  "message": "Conversation already has an active response"},
+    }
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done", "transcript": "Hi, this is David..."},
+        {"type": "response.done", "response": usage(1900, 0)},
+        {"type": "input_audio_buffer.speech_started"},
+        {"type": "input_audio_buffer.speech_stopped"},
+        {"type": "conversation.item.input_audio_transcription.completed",
+         "transcript": "Sorry, who is this?"},
+        {"type": "response.done", "response": fail},
+    ]
+
+
 def script_invalid_branch():
     """A bare city must be rejected by save_branch and the call must continue."""
     return HANDSHAKE + [
@@ -2461,6 +2490,28 @@ async def main():
           f"({_v_sess.dropped_second_items})")
 
     # ── Repeats must survive into the artifact ───────────────────────────────
+    # ── A failure must say why ───────────────────────────────────────────────
+    print("\n" + "=" * 66)
+    print("  SCENARIO 6d — a failed response records its reason")
+    print("=" * 66)
+    _fr_sent, _fr_sess = await run_call(script_failed_response())
+    check(len(_fr_sess.response_failures) == 1,
+          f"the failure is recorded ({len(_fr_sess.response_failures)})",
+          "seven of these produced four stretches of 8-11s dead air and the "
+          "reason was in the event the whole time")
+    if _fr_sess.response_failures:
+        _fr = _fr_sess.response_failures[0]
+        check(_fr["status"] == "failed", f"status kept ({_fr['status']!r})")
+        check("active response" in _fr["reason"],
+              f"the REASON is kept, not just the status ({_fr['reason'][:44]!r})",
+              "'a response failed' is not diagnosable; 'the conversation "
+              "already had one' is")
+    # A completed response must not be recorded as a failure — otherwise the
+    # count is noise and the end-of-call line cries wolf on every call.
+    _ok_sent, _ok_sess = await run_call(script_happy_path())
+    check(not _ok_sess.response_failures,
+          f"a clean call records no failures ({_ok_sess.response_failures})")
+
     # ── A question back is not a refusal ─────────────────────────────────────
     print("\n" + "=" * 66)
     print("  SCENARIO 6c — the caller screens the call, and gets hung up on")

@@ -1905,6 +1905,10 @@ class RealtimeSession:
         # What those dropped items would have said, for the artifact. A guard
         # that fires invisibly cannot be reviewed after the call.
         self.dropped_second_items: list[str] = []
+        # Why responses failed. Seven failed on call-20260819-2216 and the
+        # reason was in every event, unread — so the dead air they caused was
+        # diagnosed by guesswork twice before anyone read the field.
+        self.response_failures: list[dict] = []
         # Backchannels. When the caller's current utterance began (None if they
         # are not speaking), whether we already made a noise during it, and the
         # last clip used so the same one is not repeated.
@@ -2371,6 +2375,8 @@ class RealtimeSession:
             # Second-spoken-item audio withheld before it reached the caller.
             # Non-null here means the model tried to talk over itself.
             "dropped_second_items": self.dropped_second_items or None,
+            # Why any response failed. Non-null means dead air with a cause.
+            "response_failures": self.response_failures or None,
             # Measured caller-stops → agent-speaks gaps, in seconds. The median
             # is the number to compare across calls; the max is the one the
             # callee remembers.
@@ -2544,6 +2550,14 @@ class RealtimeSession:
         if self.dropped_second_items:
             print(f"    2nd items muted      {len(self.dropped_second_items)}"
                   f"   (would have talked over itself)", flush=True)
+        if self.response_failures:
+            print(f"    responses failed     {len(self.response_failures)}"
+                  f"   <- each one is dead air on the line", flush=True)
+            _seen_why: dict = {}
+            for _f in self.response_failures:
+                _seen_why[_f["reason"]] = _seen_why.get(_f["reason"], 0) + 1
+            for _why, _n in sorted(_seen_why.items(), key=lambda kv: -kv[1]):
+                print(f"        {_n}x  {_why[:88]}", flush=True)
         if self.reply_latencies:
             _vad = settings.realtime_silence_ms / 1000.0
             print(f"    reply gap            "
@@ -4513,6 +4527,30 @@ async def _oai_to_twilio(
                 # hung up on a goodbye nobody heard.
                 _resp_status = ((msg.get("response") or {}).get("status")
                                 or "completed")
+                # WHY it failed, which was being thrown away.
+                #
+                # call-20260819-2216 had SEVEN `[failed]` responses with
+                # in_text=0, and four stretches of 8-11 seconds where nobody on
+                # the call made a sound — the failures and the dead air line up
+                # one for one. Twilio's own recording showed every agent block
+                # reaching the line within 0.4s of generation, so the transport
+                # was never the problem, and two rounds of diagnosis went into
+                # guessing at a reason the event carried all along.
+                #
+                # `status_details` holds {type, reason} and, for failures, an
+                # {error: {type, code, message}}. Printed, not logged, so it
+                # lands in the call log next to the response it explains.
+                _sd = ((msg.get("response") or {}).get("status_details") or {})
+                if _resp_status in ("failed", "incomplete") and _sd:
+                    _sd_err = _sd.get("error") or {}
+                    _why_failed = (_sd_err.get("message")
+                                   or _sd_err.get("code")
+                                   or _sd.get("reason") or "no reason given")
+                    print(f"[Realtime] ⚠️  response {_resp_status}: "
+                          f"{_why_failed}", flush=True)
+                    sess.response_failures.append(
+                        {"status": _resp_status,
+                         "reason": str(_why_failed)[:200]})
                 # The model's own count of audio it produced. Zero on a
                 # completed response means it said nothing at all, which on a
                 # phone line is indistinguishable from the call having dropped.
