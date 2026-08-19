@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import types
+from typing import Any
 from unittest import mock
 
 import core.bootstrap  # noqa: F401  (UTF-8 stdout on Windows)
@@ -39,7 +40,7 @@ if "soundfile" not in sys.modules:
         import soundfile  # noqa: F401
     except ImportError:
         _sf = types.ModuleType("soundfile")
-        _sf.write = lambda *a, **k: None
+        setattr(_sf, "write", lambda *a, **k: None)
         sys.modules["soundfile"] = _sf
 
 from core.models import Doctor
@@ -47,6 +48,31 @@ import agents.voice.realtime_worker as rw
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────────────
+
+
+def _fake(obj) -> Any:
+    """Hand a purpose-built test double to a parameter annotated for the real
+    thing. The hand-rolled fake CLASSES below (_S, _Sess, _FakeSess, FakeTwilio)
+    carry only the attributes the function under test reads; this states that
+    once per call site instead of leaving twenty type errors standing."""
+    return obj
+
+
+def double(**kw) -> Any:
+    """A duck-typed stand-in for a RealtimeSession (or a Doctor, or a turn).
+
+    The guards take `sess: "RealtimeSession"` but read four or five attributes
+    off it, so the unit checks below hand them a namespace carrying exactly
+    those. That is deliberate — building a real session per case would drag in
+    a websocket, a Doctor record and a template for no added coverage.
+
+    Returning `Any` is the point. Without it every one of these call sites is a
+    reportArgumentType error, forty-odd of them, and real type errors in this
+    file are invisible in the noise. This states the duck-typing once instead
+    of suppressing it at each site.
+    """
+    return types.SimpleNamespace(**kw)
+
 
 class FakeOAI:
     """Scripted OpenAI Realtime socket. Records everything sent to it."""
@@ -185,16 +211,22 @@ async def run_call(script, out=None, connect_failures=0):
          mock.patch.object(rw, "audio_dir", lambda: _ARTEFACTS), \
          mock.patch.object(rw, "json_dir", lambda: _ARTEFACTS), \
          mock.patch.dict("sys.modules",
-                         {"twilio.rest": types.SimpleNamespace(Client=_NoTwilio)}), \
+                         {"twilio.rest": double(Client=_NoTwilio)}), \
          mock.patch.object(rw.RealtimeSession, "__init__", spy_init):
         doctor = Doctor(doctor_name="Dr. Jane Okafor",
                         hospital_name="Northside Medical Group",
                         specialization="Cardiology")
         await asyncio.wait_for(
-            rw.handle_realtime(twilio, "CA000000000000000000000000testsid", doctor),
+            rw.handle_realtime(_fake(twilio), "CA000000000000000000000000testsid", doctor),
             timeout=30,
         )
-    return sent, captured.get("session")
+    session = captured.get("session")
+    # Not Optional. Every caller reads .memory or .turns off this, and pyright
+    # flagged forty of those as accesses on None. Asserting here turns a
+    # would-be AttributeError three hundred lines away into one clear failure,
+    # and lets the type checker see the rest of the file.
+    assert session is not None, "handle_realtime never constructed a session"
+    return sent, session
 
 
 # ── Scenarios ─────────────────────────────────────────────────────────────────
@@ -616,6 +648,55 @@ def script_repeat_across_responses():
     ]
 
 
+def script_vetting_then_invitation():
+    """call-20260819-2121, replayed. Four questions, no refusal, hung up on.
+
+    The caller screened the call the way a front desk is supposed to — who is
+    calling, is this about a patient, is it patient related — and then said
+    "How can I help you?". The ask budget counted all four exchanges as asks
+    that went unanswered, hit its limit, and told the agent to escalate. The
+    agent closed the call on the most willing thing anyone said on it.
+
+    Two separate defects, both asserted below: the budget must not spend on a
+    caller who is questioning back, and `escalate` must be REFUSED outright
+    when their last turn was an invitation — the directive is already in the
+    model's context by then and clearing a flag cannot unsay it.
+    """
+    def vet(said):
+        return [
+            {"type": "input_audio_buffer.speech_started"},
+            {"type": "input_audio_buffer.speech_stopped"},
+            {"type": "conversation.item.input_audio_transcription.completed",
+             "transcript": said},
+        ]
+    ask = "do you know which branch Dr. Okafor works out of?"
+    return HANDSHAKE + [
+        {"type": "response.output_audio_transcript.done",
+         "transcript": f"Hi, this is David, calling on behalf of Definitive "
+                       f"Healthcare about a doctor listing, {ask}"},
+        {"type": "response.done", "response": usage(1900, 0)},
+    ] + vet("This is Northside Medical Group and I'm Varun. Sorry, who's calling again?") + [
+        {"type": "response.output_audio_transcript.done",
+         "transcript": f"Yeah, this is David, calling on behalf of Definitive Healthcare — {ask}"},
+        {"type": "response.done", "response": usage()},
+    ] + vet("Um, is this about a patient or something urgent?") + [
+        {"type": "response.output_audio_transcript.done",
+         "transcript": f"No, nothing urgent — I'm just trying to find out {ask}"},
+        {"type": "response.done", "response": usage()},
+    ] + vet("Is this about patient related?") + [
+        {"type": "response.output_audio_transcript.done",
+         "transcript": f"No, there's no patient involved — {ask}"},
+        {"type": "response.done", "response": usage()},
+    ] + vet("How can I help you?") + [
+        # The model escalates anyway — which is what happened, because the
+        # give-up directive was already in its context.
+        {"type": "response.function_call_arguments.done", "call_id": "e1",
+         "name": "escalate", "arguments": json.dumps(
+             {"reason": "caller engaged but never provided a location"})},
+        {"type": "response.done", "response": usage()},
+    ]
+
+
 def script_invalid_branch():
     """A bare city must be rejected by save_branch and the call must continue."""
     return HANDSHAKE + [
@@ -695,7 +776,7 @@ async def main():
                     _backchannels_sent=0, stream_sid="MZtest",
                     listen_enabled=asyncio.Event())
         base.update(over)
-        s = types.SimpleNamespace(**base)
+        s = double(**base)
         s.listen_enabled.set()
         return s
 
@@ -721,7 +802,7 @@ async def main():
                 _sess._agent_quiet_since = 0.0
 
     with mock.patch.object(rw, "_SILENCE_PROMPT_AFTER", 0.0):
-        _wd = asyncio.create_task(rw._silence_watchdog(_ws, _sess, _done))
+        _wd = asyncio.create_task(rw._silence_watchdog(_ws, _fake(_sess), _done))
         _rearm = asyncio.create_task(_keep_quiet())
         await asyncio.sleep(3.2)
         _done.set()
@@ -749,7 +830,8 @@ async def main():
         await asyncio.sleep(1.2)
         _done2.set()
         await asyncio.wait_for(_wd2, timeout=2)
-    check(not _ws2.sent, "no prompt while the caller has the turn", len(_ws2.sent))
+    check(not _ws2.sent, "no prompt while the caller has the turn",
+          f"{len(_ws2.sent)} sent")
 
     # A response the VAD started in the same tick is already on its way. Sending
     # a second response.create raises conversation_already_has_active_response,
@@ -765,7 +847,8 @@ async def main():
         _done3.set()
         await asyncio.wait_for(_wd3, timeout=2)
     check(not _ws3.sent,
-          "no response.create while one is already generating", len(_ws3.sent))
+          "no response.create while one is already generating",
+          f"{len(_ws3.sent)} sent")
 
     # Two thresholds. Mid-conversation a pause is someone thinking, and seven
     # seconds of thinking room is right. Straight after the opening line there is
@@ -814,8 +897,13 @@ async def main():
     check(not any(re.search(r"\bsess\._silence_prompts\w*\s*=\s*0", l)
                   for l in _sp_lines),
           "no mid-call reset of the silence budget through the session")
-    _sp_vals = [re.search(r"=\s*([^\n=]+)$", l).group(1).strip().rstrip(",)")
-                for l in _sp_lines]
+    # check() reports and continues, so a line that does not parse must not be
+    # dereferenced anyway — that is a crash mid-suite, not a failed assertion.
+    _sp_m = [re.search(r"=\s*([^\n=]+)$", l) for l in _sp_lines]
+    check(all(m is not None for m in _sp_m),
+          "every silence-budget assignment parsed",
+          f"{sum(m is None for m in _sp_m)} unparsed")
+    _sp_vals = [m.group(1).strip().rstrip(",)") for m in _sp_m if m]
     check(all(v in ("0", "1") for v in _sp_vals),
           "silence budget is only ever initialised or incremented", f"{_sp_vals}")
 
@@ -869,6 +957,9 @@ async def main():
     _err_start = next((i for i, l in enumerate(_err_lines)
                        if 'event_type == "error"' in l), None)
     check(_err_start is not None, "found the API-error branch in the module")
+    # check() reports and CONTINUES, so this has to guard for itself — the
+    # slice below on a None index is a crash, not a failed assertion.
+    assert _err_start is not None
     _err_indent = len(_err_lines[_err_start]) - len(_err_lines[_err_start].lstrip())
     _err_body = []
     for _l in _err_lines[_err_start + 1:]:
@@ -1023,7 +1114,7 @@ async def main():
          {"branch": "Northgate"}, True,
          "a term never said at all is still rejected"),
     ):
-        _got = bool(rw._ungrounded_terms(_args, types.SimpleNamespace(turns=_turns)))
+        _got = bool(rw._ungrounded_terms(_args, double(turns=_turns)))
         check(_got == _exp, f"hint-echo: {_why}")
 
     # ── Repeats are clauses, not only sentences ──────────────────────────────
@@ -1037,7 +1128,7 @@ async def main():
     #
     # This metric is one of the figures used to compare calls, so a clean
     # number on a dirty call weakened every comparison drawn from it.
-    _mkr = lambda r, x: types.SimpleNamespace(role=r, text=x)
+    _mkr = lambda r, x: double(role=r, text=x)
     _r1 = ("Hi, this is David, calling on behalf of Definitive Healthcare "
            "about a doctor listing — which branch is Dr. Okafor working out of?")
     _r3 = "I can hear you now — which branch is Dr. Okafor working out of?"
@@ -1166,7 +1257,7 @@ async def main():
         def __init__(self, chunks): self._caller_pcm = chunks
     # Speech at 1000-3000ms, then silence. The old code, marking the position
     # late, would have taken the tail.
-    _sess_sl = _S([_silence[:int(1000*_bpms)], _loud, _silence])
+    _sess_sl: Any = _S([_silence[:int(1000*_bpms)], _loud, _silence])
     _cut = rw._utterance_slice(_sess_sl, 1000, 3000, fallback_chunk_pos=2)
     _rms_cut = rw._loudest_window_rms(rw._wire_to_pcm16(_cut))
     _tail = b"".join(_sess_sl._caller_pcm[2:])
@@ -1342,8 +1433,8 @@ async def main():
     # Mirror image of the SAME morning's failure, where it invented a street
     # number: one question asked in opposite directions. _ungrounded_terms asks
     # whether we recorded too MUCH; this asks whether we recorded too LITTLE.
-    _mk_c = lambda t: types.SimpleNamespace(role="caller", text=t, audio_rms=0.18)
-    _addr1847 = types.SimpleNamespace(turns=[
+    _mk_c = lambda t: double(role="caller", text=t, audio_rms=0.18)
+    _addr1847 = double(turns=[
         _mk_c("Okay, she's in San Francisco."),
         _mk_c("Right, it's the Mission Bay clinic, 1825 Fourth Street, I think so."),
     ])
@@ -1363,7 +1454,7 @@ async def main():
           "the number alone is enough to count as recorded")
     # Must not fire when no address was ever offered — that is 32 of the 36
     # calls in the history.
-    _no_addr = types.SimpleNamespace(turns=[
+    _no_addr = double(turns=[
         _mk_c("She's at the Northgate campus."),
         _mk_c("Just the main office, I think.")])
     check(rw._address_offered(_no_addr) is None,
@@ -1375,7 +1466,7 @@ async def main():
     for _t in ["Give me a minute, I need to check.",
                "We have 3 sites in the area.",
                "She joined us in 2019."]:
-        check(rw._address_offered(types.SimpleNamespace(turns=[_mk_c(_t)])) is None,
+        check(rw._address_offered(double(turns=[_mk_c(_t)])) is None,
               f"not an address: {_t[:34]!r}")
     # ONE-SHOT is load-bearing: the value being saved is CORRECT, just thinner
     # than what they said, so this must never be able to stop a call finishing.
@@ -1405,8 +1496,8 @@ async def main():
     # Worst failure category available: not empty, not obviously wrong, but
     # PLAUSIBLE. No reviewer catches it and someone sent to 1855 Fourth Street
     # finds the wrong building.
-    _hf = lambda t: types.SimpleNamespace(role="caller", text=t, audio_rms=0.15)
-    _addr_sess = types.SimpleNamespace(turns=[
+    _hf = lambda t: double(role="caller", text=t, audio_rms=0.15)
+    _addr_sess = double(turns=[
         _hf("Okay, she is in San Francisco."),
         _hf("Examination Bay Clinic, 1825 4th Street"),
     ])
@@ -1544,7 +1635,7 @@ async def main():
               "the same clip is not repeated back to back",
               f"{_bc.available(_v)} clips")
         import base64 as _b64
-        _raw = _b64.b64decode(_a)
+        _raw = _b64.b64decode(_a or "")
         check(800 <= len(_raw) <= 9600,
               "a backchannel is 0.1-1.2s of 8kHz mu-law — longer is a turn, "
               "and talking over someone for that long is worse than silence",
@@ -1653,7 +1744,7 @@ async def main():
     #     lowest 0.291   p10 0.458   median 0.766
     #     genuine turn below median*0.35 : 2/30   <- 0.35 was unsafe
     #     genuine turn below median*0.20 : 0/30
-    _sess_lv = types.SimpleNamespace(turns=[
+    _sess_lv = double(turns=[
         _TT(role="caller", text=t, audio_rms=r) for t, r in [
             ("Hello, who is this?", 0.1223),
             ("But why are you collecting this?", 0.0954),
@@ -1683,14 +1774,14 @@ async def main():
     # Too few turns to have a median: fall back to the absolute rule rather
     # than computing a fraction of one sample, which is that sample and can
     # never be below itself — a check that silently never fires.
-    _thin = types.SimpleNamespace(turns=[
+    _thin = double(turns=[
         _TT(role="caller", text="Mercy", audio_rms=0.05)])
     check(rw._caller_speech_level(_thin) is None,
           "no adaptive level until there are enough measured turns",
           f"{rw._MIN_TURNS_FOR_ADAPTIVE} needed")
     # The absolute stays a FLOOR: on a uniformly quiet call a fraction of a
     # small number must not drive the threshold toward zero.
-    _quiet = types.SimpleNamespace(turns=[
+    _quiet = double(turns=[
         _TT(role="caller", text=f"turn {i}", audio_rms=0.004) for i in range(3)])
     check(rw._is_hint_echo(_TT(role="caller", text="Mercy", audio_rms=0.002),
                            ["mercy"], rw._caller_speech_level(_quiet)),
@@ -1953,11 +2044,17 @@ async def main():
         # actual ask gives them something concrete to respond to and advances
         # the call in the same breath. So: no hospital confirmation, and end on
         # a question.
-        check(_probe.hospital_name not in _g,
+        # Not `(_probe.hospital_name or "")` — an empty needle is in every
+        # string, so a Doctor with no hospital would make this pass for the
+        # wrong reason. The name has to be there for the check to mean
+        # anything, so say so.
+        check(bool(_probe.hospital_name), f"{_name}: probe has a hospital name")
+        check(str(_probe.hospital_name) not in (_g or ""),
               f"{_name}: opener does not spend itself confirming the hospital",
-              _g[:52])
-        check(_g.rstrip().endswith("?"),
-              f"{_name}: opener ends on the ask, handing over the turn", _g[-40:])
+              (_g or "")[:52])
+        check((_g or "").rstrip().endswith("?"),
+              f"{_name}: opener ends on the ask, handing over the turn",
+              (_g or "")[-40:])
         check(settings.org_name not in _t.instructions,
               f"{_name}: organisation stays out of the cached instructions")
 
@@ -2172,11 +2269,18 @@ async def main():
     # test reported 5 paths while the module had 7, so the point of deriving
     # them from source (catch a new path the day it lands) was defeated by the
     # pattern used to derive them.
-    _injected = set(re.findall(r'"\(system: ([a-z][a-z ]{9,})', _worker_src))
+    # Counted as a LIST, not a set. Two directives can legitimately open with
+    # the same words — the hold block and the invitation block both begin
+    # "disregard the earlier instruction to stop and escalate", because they
+    # are retracting the same directive for different reasons. De-duplicating
+    # first made the count read 16 against 17 declared and looked exactly like
+    # a directive the pattern could not see.
+    _found = re.findall(r'"\(system: ([a-z][a-z ]{9,})', _worker_src)
+    _injected = set(_found)
     _declared = _worker_src.count('"(system: ')
-    check(len(_injected) == _declared,
+    check(len(_found) == _declared,
           "every injected directive is found, none skipped by the pattern",
-          f"{len(_injected)} found vs {_declared} in source")
+          f"{len(_found)} found vs {_declared} in source")
     check(len(_injected) >= 7,
           "found the module's injected directives to check against",
           f"{len(_injected)} paths")
@@ -2357,6 +2461,105 @@ async def main():
           f"({_v_sess.dropped_second_items})")
 
     # ── Repeats must survive into the artifact ───────────────────────────────
+    # ── A question back is not a refusal ─────────────────────────────────────
+    print("\n" + "=" * 66)
+    print("  SCENARIO 6c — the caller screens the call, and gets hung up on")
+    print("=" * 66)
+    _vet_sess = double(
+        doctor=double(hospital_name="Northside Medical Group",
+                                     doctor_name="Dr. Jane Okafor"),
+        org_name="Definitive Healthcare", agent_name="David", turns=[])
+    for _t, _want in [
+        # Every caller turn from call-20260819-2121. Not one is a refusal.
+        ("This is Northside Medical Group and I'm Varun. Sorry, who's calling again?", True),
+        ("Um, is this about a patient or something urgent?", True),
+        ("Is this about patient related?", True),
+        ("How can I help you?", True),
+        ("What can I do for you?", True),
+        ("What's this regarding?", True),
+        ("Are you a real person or is this a recording?", True),
+        # Answers, however they are phrased. The second one opens with an
+        # interrogative and is still an answer, which is why the shape test
+        # alone is not enough.
+        ("She's at the Mission Bay Clinic.", False),
+        ("Which one — the Mission Bay clinic?", False),
+        ("It's 1825 4th Street.", False),
+        ("She works at Northgate campus.", False),
+        # Refusals and holds are not vetting either — they have their own
+        # handling and must not be swallowed by this.
+        ("No, I can't give that out.", False),
+        ("We don't share that information.", False),
+        ("Sure, let me check our schedule.", False),
+    ]:
+        check(rw._caller_is_vetting(_t, _vet_sess) == _want,
+              f"vetting={_want!s:5} {_t[:52]!r}")
+    for _t, _want in [
+        ("How can I help you?", True), ("What can I do for you?", True),
+        ("What do you need?", True), ("Go ahead.", True),
+        # Screening questions are NOT invitations. They stop the budget but
+        # they are not an open door, and conflating the two would block
+        # escalation on any question at all.
+        ("Who's calling?", False), ("Is this about a patient?", False),
+        ("She's at Mission Bay.", False),
+    ]:
+        check(rw._invites_continuation(_t) == _want,
+              f"invitation={_want!s:5} {_t[:40]!r}")
+
+    _vt_sent, _vt_sess = await run_call(script_vetting_then_invitation())
+    check(not _vt_sess.memory.get("escalated"),
+          f"the call is NOT escalated after 'How can I help you?' "
+          f"({_vt_sess.memory.get('escalated')!r})",
+          "they offered to help and the agent closed the call on it")
+    _vt_out = [json.loads(m["item"]["output"])
+               for m in _vt_sent
+               if m.get("item", {}).get("type") == "function_call_output"]
+    check(any(o.get("ok") is False and "NOT ESCALATED" in str(o.get("error"))
+              for o in _vt_out),
+          "escalate is REFUSED at the tool, not just un-flagged",
+          "the give-up directive is already in the model's context by then — "
+          "clearing a flag cannot unsay it")
+    # The same clause on the end of every reply. Nothing caught this before:
+    # _MIN_REASK_GAP_S measures speed and the gaps were eleven seconds, the
+    # budget counts asks and not their wording, and repeated_sentences is
+    # computed once the call is already over.
+    _vt_directives = [m["item"]["content"][0]["text"] for m in _vt_sent
+                      if m.get("type") == "conversation.item.create"
+                      and m.get("item", {}).get("role") == "user"]
+    check(any("those exact words" in d for d in _vt_directives),
+          "asking in the identical clause again is caught while the call runs",
+          f"{len(_vt_directives)} directives sent, none about the wording")
+    check(sum("those exact words" in d for d in _vt_directives) == 1,
+          "and it is said once, not on every subsequent ask",
+          "a nudge repeated every turn is the same noise it is complaining "
+          "about")
+    # Asserted on the DIRECTIVE, not on sess._location_asks. The escalation
+    # block resets the counter, so reading it after the call returns 0 whether
+    # the budget burned or not — the first version of this check passed under
+    # a mutation that disabled the exemption entirely, which is the whole
+    # failure mode it was written to catch. The give-up directive is on the
+    # wire and nothing rewrites it.
+    check(not any("you have now asked for the location" in d
+                  for d in _vt_directives),
+          "the budget did not burn on four screening questions",
+          "a front desk asking who you are is doing its job, not refusing")
+    # Bounded, or a caller who only ever asks questions keeps the call alive
+    # for as long as they feel like it.
+    check(rw._MAX_VETTING_REASKS > 0,
+          f"vetting exemption is bounded ({rw._MAX_VETTING_REASKS})")
+    _bound_sess = double(
+        doctor=_vet_sess.doctor, org_name="Definitive Healthcare",
+        agent_name="David",
+        turns=[rw.TranscriptTurn(role="caller", text="Who's calling?",
+                                 timestamp="21:21:24")])
+    check(rw._caller_vetted_since(_bound_sess, 0) is True,
+          "a lone vetting turn is recognised by the since-helper")
+    _bound_sess.turns.append(
+        rw.TranscriptTurn(role="caller", text="She's at Northgate campus.",
+                          timestamp="21:21:40"))
+    check(rw._caller_vetted_since(_bound_sess, 0) is False,
+          "one real answer in the run ends the exemption",
+          "otherwise an answered call would never advance the budget")
+
     print("\n" + "=" * 66)
     print("  METRICS — a verbatim repeat must not be tidied away")
     print("=" * 66)
@@ -2551,7 +2754,8 @@ async def main():
                 # runtime values (a mismatch description, a reason) — not a
                 # register this file chose, and not something it can assert on.
                 _inline_errs.append("".join(
-                    _p.value for _p in _v.values if isinstance(_p, _ast.Constant)))
+                    str(_p.value) for _p in _v.values
+                    if isinstance(_p, _ast.Constant)))
     # Lower bound, so it ages without edits when a fifth guard is added, but
     # fails loudly if the walk stops finding them — the key renamed, the dicts
     # moved behind a helper. A judging loop over an empty list passes.
@@ -2649,7 +2853,7 @@ async def main():
         ("What do you want now?", ["What do you want?"], False, "repeated question"),
         ("Hello", ["Hello"], False, "too short to mean anything"),
     ]:
-        check(bool(rw.caller_repeated_answer(_now, _ss(*_prior))) == _want,
+        check(bool(rw.caller_repeated_answer(_now, _fake(_ss(*_prior)))) == _want,
               f"caller repeat ({_why}): {_now[:34]!r}")
 
     # A caller going to look something up has not refused. The give-up directive
@@ -2690,8 +2894,7 @@ async def main():
     # banned-phrase list for thinking-narration missed 2 of the 3 wordings
     # actually used ("let me respond to that for a moment", "let me say that
     # more clearly"), because "ways to narrate" is an open set, same as cities.
-    import types as _t
-    _mk = lambda r, x: _t.SimpleNamespace(role=r, text=x)
+    _mk = lambda r, x: double(role=r, text=x)
     _turns = [
         _mk("agent", "Hi, this is Sarah, calling on behalf of X."),   # greeting, exempt
         _mk("caller", "Why should I tell you?"),
@@ -2792,11 +2995,10 @@ async def main():
     # the call reached somewhere else. On a live call the record said "Northside
     # Medical Group", the caller answered "Thank you for calling the Methodist
     # Medical Center", nothing noticed, and the agent invented an address for it.
-    import types as _types
     def _sess(rec, *turns):
-        return _types.SimpleNamespace(
-            doctor=_types.SimpleNamespace(hospital_name=rec),
-            turns=[_types.SimpleNamespace(role="caller", text=t) for t in turns])
+        return double(
+            doctor=double(hospital_name=rec),
+            turns=[double(role="caller", text=t) for t in turns])
     _R = "Northside Medical Group"
     for _turn, _want, _why in [
         ("Thank you for calling the Methodist Medical Center.", True, "different org"),
@@ -2870,7 +3072,7 @@ async def main():
         ("could not obtain the location", not_working, False),
         ("doctor deceased", passed_away, False),
     ]:
-        got = bool(rw._ungrounded_escalation(reason, sess_))
+        got = bool(rw._ungrounded_escalation(reason, _fake(sess_)))
         check(got == blocked,
               f"escalate {reason!r}: {'blocked' if blocked else 'allowed'} "
               f"given {sess_.turns[0].text[:34]!r}")
@@ -2934,9 +3136,9 @@ async def main():
         # Must clear the same hint-echo bar a real save has to clear.
         (False, "bare term, dead air",   _cs("Northgate", rms=0.001)),
     ]:
-        check(bool(rw._discarded_location(_R, _s)) == _want,
+        check(bool(rw._discarded_location(_R, _fake(_s))) == _want,
               f"discarded-answer detector: {_want!s:5} for {_label}",
-              rw._candidate_location(_s)[:52])
+              rw._candidate_location(_fake(_s))[:52])
 
     # The reason gate. Reasons describing the CALL are the agent's own
     # observation; a place name in the transcript says nothing about whether
@@ -2949,7 +3151,7 @@ async def main():
         ("wrong number", False), ("voicemail", False),
         ("declined to share", False), ("no response", False),
     ]:
-        check(bool(rw._discarded_location(_reason, _gs)) == _want,
+        check(bool(rw._discarded_location(_reason, _fake(_gs))) == _want,
               f"reason gate: {_reason!r} "
               f"{'checked' if _want else 'exempt'}")
 
@@ -3023,12 +3225,14 @@ async def main():
     _dB = Doctor(doctor_name="Dr. B", hospital_name="Hospital B")
     _tw.register_call("CA_aaa", _dA)
     _tw.register_call("CA_bbb", _dB)
-    check((await _tw._doctor_for("CA_aaa")).doctor_name == "Dr. A"
-          and (await _tw._doctor_for("CA_bbb")).doctor_name == "Dr. B",
+    _dr_a, _dr_b = await _tw._doctor_for("CA_aaa"), await _tw._doctor_for("CA_bbb")
+    check(_dr_a is not None and _dr_b is not None
+          and _dr_a.doctor_name == "Dr. A" and _dr_b.doctor_name == "Dr. B",
           "two calls in flight resolve to their own doctors")
     # Twilio retries webhooks. A second /answer for the same SID must resolve
     # to the same doctor, so the lookup must not consume the entry.
-    check((await _tw._doctor_for("CA_aaa")).doctor_name == "Dr. A",
+    _dr_again = await _tw._doctor_for("CA_aaa")
+    check(_dr_again is not None and _dr_again.doctor_name == "Dr. A",
           "a retried webhook still resolves — the lookup does not pop")
     # An unknown SID waits, then gives up. Hanging up beats calling a hospital
     # about a record we cannot identify.
@@ -3261,7 +3465,7 @@ async def main():
         (["[...]"], {"branch": "Anything At All"}, False),
     ]
     for lines, args, expect_blocked in grounding_cases:
-        blocked = bool(rw._ungrounded_terms(args, _FakeSess(lines)))
+        blocked = bool(rw._ungrounded_terms(args, _fake(_FakeSess(lines))))
         check(blocked == expect_blocked,
               f"{'blocks' if expect_blocked else 'allows'} {args.get('branch')!r} "
               f"given caller said {lines[0][:32]!r}")

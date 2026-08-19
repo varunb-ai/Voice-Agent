@@ -253,6 +253,32 @@ def _caller_answered_since(sess: "RealtimeSession", since_idx: int) -> bool:
 # would end the call.
 _MAX_UNANSWERED_REASKS = 2
 
+# How many times the caller may question the agent back before those exchanges
+# start costing budget again. Three because a front desk screening a cold call
+# reasonably asks who you are, what it concerns, and whether it is urgent —
+# call-20260819-2121 asked exactly those three and got hung up on. Bounded for
+# the same reason as _MAX_UNANSWERED_REASKS: without it, a caller who only ever
+# asks questions would keep the call alive indefinitely.
+_MAX_VETTING_REASKS = 3
+
+
+def _caller_vetted_since(sess: "RealtimeSession", since_idx: int) -> bool:
+    """Since turn `since_idx`, did the caller ONLY question the agent back?
+
+    Every substantive caller turn must be a vetting turn. One real answer, or
+    one refusal, and this is False — the budget should advance normally then.
+    """
+    seen = False
+    for t in sess.turns[since_idx:]:
+        if t.role != "caller" or t.text.strip() == "[...]":
+            continue
+        if _is_filler_reply(t.text, sess.agent_name):
+            continue
+        if not _caller_is_vetting(t.text, sess):
+            return False
+        seen = True
+    return seen
+
 # How long after a truncation the next caller turn is read as a repair signal
 # rather than an answer. Generous: the caller has to notice the line went odd,
 # decide to say something, and be transcribed. Bounded so a truncation early in
@@ -658,6 +684,104 @@ _PATIENT_ASK = re.compile(
 def _asks_about_patient(text: str) -> bool:
     """Did the caller ask whether this concerns a patient?"""
     return bool(_PATIENT_ASK.search(_norm_quotes(text or "")))
+
+
+# The caller putting a question TO the agent instead of answering theirs.
+#
+# call-20260819-2121, in sixty seconds:
+#   "Sorry, who's calling again?"
+#   "Um, is this about a patient or something urgent?"
+#   "Is this about patient related?"
+#   "How can I help you?"
+# Four turns, four questions, no refusal anywhere — a front desk deciding
+# whether this call is safe to engage with, which is their job. The ask budget
+# counted every one of them as an ask that went unanswered, hit its limit of
+# four, and told the agent to escalate. The agent then hung up on "How can I
+# help you?" — an open door, and the clearest invitation on the whole call.
+#
+# `_caller_answered_since` was the wrong instrument to lean on here: it asks
+# "did they say something substantive", and a question IS substantive. It just
+# is not a refusal, and the budget exists to end calls that are going nowhere,
+# not calls where the other person is still working out who they are talking
+# to.
+#
+# Matched by SHAPE, not by a phrase list. Interrogative opener, or an offer of
+# help, in a turn that contains no location — an open set of wordings with a
+# closed set of shapes.
+_VETTING_OPENER = re.compile(
+    r"^\W*(?:um+|uh+|er+|so|sorry|okay|ok|alright|yeah|well|hi|hello)?[\s,]*"
+    r"(?:who|what|why|which|where|how|is|are|was|were|do|does|did|can|could|"
+    r"would|will|may|might|should|sorry)\b", re.I)
+
+# An explicit offer to keep going. Stronger than a screening question: they are
+# not deciding whether to engage, they have decided and are waiting on you.
+_INVITATION = re.compile(
+    r"\bhow\s+(?:can|may|could)\s+i\s+(?:help|assist)\b"
+    r"|\bwhat\s+can\s+i\s+(?:do|help)\b"
+    r"|\bwhat\s+(?:do|did)\s+you\s+need\b"
+    r"|\bwhat(?:'?s| is)\s+(?:this|it)\s+(?:regarding|about|in regard)\b"
+    r"|\bgo\s+ahead\b|\bhow\s+can\s+i\s+help\b", re.I)
+
+
+def _invites_continuation(text: str) -> bool:
+    """The caller asking what the agent wants — an open door, not a refusal.
+
+    Blocking escalation on this is the same move as blocking it on a hold
+    request. A caller who says "How can I help you?" has told you they are
+    willing; ending the call there throws away the one turn most likely to
+    produce an answer.
+    """
+    return bool(_INVITATION.search(_norm_quotes(text or "")))
+
+
+def _caller_is_vetting(text: str, sess: "RealtimeSession") -> bool:
+    """The caller questioning the agent rather than answering, or declining.
+
+    NOT a refusal and NOT an answer — a third thing the budget had no category
+    for. Requires the turn to carry no location: "Which branch? The Mission Bay
+    one." opens with an interrogative and is plainly an answer, so a shape test
+    alone would misread it.
+    """
+    t = _norm_quotes(text or "").strip()
+    if not t:
+        return False
+    if _invites_continuation(t):
+        return True
+    if not ("?" in t or _VETTING_OPENER.match(t)):
+        return False
+    # A turn that NAMES something is an answer however it is phrased. "Which
+    # one — the Mission Bay clinic?" opens with an interrogative and is plainly
+    # an answer, so the shape test alone would misread it. Same capitalisation
+    # signal the grounding checks use, and the same caveat: skip the first word
+    # (always capitalised) and skip what we brought to the call ourselves.
+    known: set[str] = set()
+    known |= _distinctive(getattr(sess.doctor, "hospital_name", "") or "")
+    known |= _distinctive(sess.org_name or "")
+    known |= {w for w in re.findall(r"[a-z]+",
+                                    (getattr(sess.doctor, "doctor_name", "") or "").lower())
+              if len(w) > 2}
+    if sess.agent_name:
+        known.add(sess.agent_name.lower())
+    #
+    # A proper noun alone is not enough: the first live case was "This is
+    # Northside Medical Group and I'm Varun. Sorry, who's calling again?" —
+    # which is vetting, and "Varun" is the caller's own name, not a branch. So
+    # the word must also sit within two words of a location anchor, the same
+    # conjunction _candidate_location uses.
+    raw = [w.strip(".,!?-—'\"") for w in t.split()]
+    words = [w.lower() for w in raw]
+    for i, w in enumerate(words):
+        if i == 0 or len(w) <= 2 or not w.isalpha():
+            continue
+        if (w in known or w in _UNGROUNDED_STOPWORDS or w in _NON_PLACE
+                or w in _ORG_STOPWORDS):
+            continue
+        if not raw[i][:1].isupper():
+            continue
+        near = words[max(0, i - 2):i] + words[i + 1:i + 3]
+        if any(n in _LOCATION_ANCHORS for n in near):
+            return False
+    return True
 
 
 def _content_words(text: str) -> set:
@@ -1706,6 +1830,13 @@ class RealtimeSession:
         # Asks for the location so far, and whether we have already told the
         # model to stop. See realtime_max_location_asks.
         self._location_asks: int = 0
+        # Exchanges where the caller questioned the agent back instead of
+        # answering. Bounded by _MAX_VETTING_REASKS.
+        self._vetting_reasks: int = 0
+        # Normalised wordings the location has already been asked in, so the
+        # identical clause going out a second time is detectable.
+        self._ask_phrasings: set[str] = set()
+        self._verbatim_ask_nudged: bool = False
         self._give_up_sent: bool = False
         # When the last location ask finished, so a re-ask fired seconds later
         # can be caught. See _MIN_REASK_GAP_S. Nudge at most once — a second
@@ -1823,7 +1954,11 @@ class RealtimeSession:
         self._output_text_tokens:        int = 0
         self._responses:                 int = 0
 
-    def note_utterance_rms(self, rms: float) -> None:
+    # Optional, because the body has always handled None and the callers have
+    # always been able to pass it: an unmeasurable segment is None, not 0.0,
+    # and collapsing the two is what made a silent slice look like a real
+    # measurement. The annotation said `float` and was simply wrong.
+    def note_utterance_rms(self, rms: Optional[float]) -> None:
         """Record one VAD segment's loudest-window RMS, keeping the loudest.
 
         Segments accumulate until a transcript consumes them, because one
@@ -3169,22 +3304,54 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
         last_caller = next((t.text for t in reversed(sess.turns)
                             if t.role == "caller" and t.text
                             and t.text != "[...]"), "")
-        if is_hold_request(last_caller) and not sess.memory.get("branch"):
-            result = {"ok": False, "error": (
-                "NOT ESCALATED — caller is mid-lookup, not refusing "
-                "| NEED: a two-word hold acknowledgement, then "
-                "silence until they return")}
+        # Two shapes of "not a refusal", blocked the same way. A hold request
+        # is "wait, I'm getting it"; an invitation is "what do you want?" —
+        # and on call-20260819-2121 the agent answered the second by hanging
+        # up. The caller had asked three screening questions, the budget
+        # counted all three, the give-up directive went out, and then they
+        # said "How can I help you?" — the most willing thing anyone said on
+        # that call — and the agent closed on it.
+        _blocked = ""
+        if not sess.memory.get("branch"):
+            if is_hold_request(last_caller):
+                _blocked = "hold"
+            elif _invites_continuation(last_caller):
+                _blocked = "invitation"
+        if _blocked:
+            if _blocked == "hold":
+                result = {"ok": False, "error": (
+                    "NOT ESCALATED — caller is mid-lookup, not refusing "
+                    "| NEED: a two-word hold acknowledgement, then "
+                    "silence until they return")}
+                _line = "⏳ ESCALATION BLOCKED — caller is checking"
+                _say = ("(system: disregard the earlier instruction to "
+                        "stop and escalate. They are looking the branch up "
+                        "right now. Wait for them.)")
+            else:
+                result = {"ok": False, "error": (
+                    "NOT ESCALATED — caller just asked what you need "
+                    "| NEED: tell them plainly, in one sentence, which "
+                    "doctor and that you want the branch")}
+                _line = "🚪 ESCALATION BLOCKED — caller asked what you need"
+                _say = ("(system: disregard the earlier instruction to "
+                        "stop and escalate. They have just asked what you "
+                        "want, which means they are willing to help and "
+                        "have not refused anything. Answer them: name the "
+                        "doctor and say you are trying to find out which "
+                        "branch they work out of. One sentence, then "
+                        "wait.)")
+            # The budget put us here, and it was wrong: they were engaging
+            # the whole time. Reset it or the very next ask escalates again.
+            sess._give_up_sent = False
+            sess._give_up_at_turn = None
+            sess._location_asks = 0
+            sess._vetting_reasks = 0
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"⏳ ESCALATION BLOCKED — caller is checking: "
-                  f"{last_caller[:60]!r}", flush=True)
+                  f"{_line}: {last_caller[:60]!r}", flush=True)
             await oai_ws.send(json.dumps({
                 "type": "conversation.item.create",
                 "item": {"type": "message", "role": "user",
-                         "content": [{"type": "input_text", "text": (
-                             "(system: disregard the earlier "
-                             "instruction to stop and escalate. They "
-                             "are looking the branch up right now. "
-                             "Wait for them.)")}]},
+                         "content": [{"type": "input_text", "text": _say}]},
             }))
             _pending_tools.pop(call_id, None)
             await oai_ws.send(json.dumps({
@@ -3792,7 +3959,23 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
             _answered = _first_ask or _caller_answered_since(
                 sess, sess._last_ask_turn_idx)
             _forced = sess._unanswered_reasks >= _MAX_UNANSWERED_REASKS
-            if _answered or _forced:
+            # They replied, but with a question rather than an answer. That is
+            # a front desk deciding whether to engage, not a caller refusing,
+            # and it must not spend the budget — see _caller_is_vetting.
+            # Bounded the same way the silence case is: a caller who only ever
+            # asks questions would otherwise keep the call alive forever.
+            _vetted = (not _first_ask
+                       and sess._vetting_reasks < _MAX_VETTING_REASKS
+                       and _caller_vetted_since(sess, sess._last_ask_turn_idx))
+            if _vetted:
+                sess._vetting_reasks += 1
+                print(f"[Realtime] They asked a question back rather than "
+                      f"answering ({sess._vetting_reasks}/"
+                      f"{_MAX_VETTING_REASKS}) — not spending budget "
+                      f"({sess._location_asks}/"
+                      f"{settings.realtime_max_location_asks} used)",
+                      flush=True)
+            elif _answered or _forced:
                 sess._location_asks += 1
                 sess._unanswered_reasks = 0
             else:
@@ -3804,6 +3987,42 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                       f"{settings.realtime_max_location_asks} used)",
                       flush=True)
             sess._last_ask_turn_idx = len(sess.turns)
+            # The SAME WORDS, again.
+            #
+            # call-20260819-2121 ended every one of its four turns with "which
+            # branch Dr. Okafor works out of" — greeting, then stapled onto the
+            # answer to each of three screening questions. Nothing caught it:
+            # _MIN_REASK_GAP_S measures speed and the gaps were eleven seconds,
+            # the ask budget counts asks and not their wording, and
+            # repeated_sentences is computed after the call is over.
+            #
+            # Re-asking is sometimes right. Re-asking in the identical clause
+            # is never right — it is the single clearest tell that nobody is
+            # listening on this end, because a person who has to ask twice
+            # rephrases without thinking about it.
+            _ask_clauses = {_norm_clause(c) for s in _sentences(text)
+                            for c in _clauses(s) if _is_location_ask(c)}
+            _repeat_phrasing = _ask_clauses & sess._ask_phrasings
+            sess._ask_phrasings |= _ask_clauses
+            if (_repeat_phrasing and not sess._verbatim_ask_nudged
+                    and not sess._give_up_sent):
+                sess._verbatim_ask_nudged = True
+                print(f"[Realtime] 🗣  Asked in the SAME WORDS again: "
+                      f"{sorted(_repeat_phrasing)[0][:60]!r} — telling the "
+                      f"agent to stop stapling it on", flush=True)
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": (
+                                 "(system: you have now asked for the branch "
+                                 "in those exact words more than once, and "
+                                 "you are attaching it to the end of every "
+                                 "reply. They heard it the first time. When "
+                                 "they ask you something, answer it and STOP "
+                                 "— no question on the end. Ask again only "
+                                 "once they have answered you and gone quiet, "
+                                 "and when you do, use different words.)")}]},
+                }))
             # Two asks inside _MIN_REASK_GAP_S is badgering, not
             # persistence. This fires after the fact — the agent has
             # already said it — so it cannot prevent the re-ask that

@@ -616,5 +616,33 @@
     "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Mission Bay Clinic, 1825 4th Street.",
     "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260819-2044-568a.wav",
     "json_path": "data/3 cases jsons/call-20260819-2044-568a.json"
+  },
+  {
+    "call_id": "call-20260819-2121-a79a",
+    "time": "2026-08-19T21:21:07.931986",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": null,
+    "resolved": false,
+    "grounding": null,
+    "duration_seconds": 62,
+    "cost_usd": 0.126614,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260819-2121-a79a.wav",
+    "json_path": "data/3 cases jsons/call-20260819-2121-a79a.json"
+  },
+  {
+    "call_id": "call-20260819-2145-9a81",
+    "time": "2026-08-19T21:45:51.624925",
+    "doctor": "Dr. Jane Okafor",
+    "hospital": "Northside Medical Group",
+    "branch": null,
+    "resolved": false,
+    "grounding": null,
+    "duration_seconds": 78,
+    "cost_usd": 0.147032,
+    "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260819-2145-9a81.wav",
+    "json_path": "data/3 cases jsons/call-20260819-2145-9a81.json"
   }
 ]
