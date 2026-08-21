@@ -799,6 +799,8 @@ async def main():
                     # backchannel state — the caller is not speaking by default
                     _hold_until=0.0, _claimed_done_at=0.0,
                     _playback_ends_at=0.0,
+                    _owed_substance="", _owed_recovered=0,
+                    _owed_directive_sent=False,
                     _claimed_done_nudged=False, memory={},
                     _caller_speaking_since=None, agent_speaking=False,
                     _backchannel_done_this_utterance=False,
@@ -852,6 +854,106 @@ async def main():
     check(_sess._silence_prompts_midcall == 0,
           "opening silence does not spend the mid-call budget",
           _sess._silence_prompts_midcall)
+    # ── The muted half must be SAID, not just logged ─────────────────────────
+    # The one-item guard keeps the first item to produce audio and mutes the
+    # rest, and it has to: the first is already on the wire when the second
+    # appears. But the model does not reliably put the substance first, and
+    # when it does not the guard deletes the answer and keeps the filler.
+    #
+    # call-20260820-1421, caller: "can you repeat that question please?"
+    #     spoken : "Sure, I'll repeat it clearly."
+    #     muted  : "I'm trying to find out which branch Dr. Okafor works out of."
+    # They asked for the question and got a promise to give it. Seven seconds
+    # of silence, the watchdog asked "Are you still with me?" — the wrong
+    # sentence, the line was never the problem — they asked twice more and hung
+    # up at 88s. The artifact said "2nd items muted 4" and nothing else.
+    for _sp, _dr, _want in [
+        # the call above, both halves
+        ("Sure, I'll repeat it clearly.",
+         "I'm trying to find out which branch Dr. Okafor works out of.", True),
+        ("I'm calling on behalf of Definitive Healthcare, and this is an "
+         "automated call.",
+         "I'm calling on behalf of Definitive Healthcare, and this is an "
+         "automated call. Could you tell me which branch Dr. Okafor sees "
+         "patients at?", True),
+        # ...and the cases that owe NOTHING. Saying these anyway is repetition,
+        # which this project treats as what makes people hang up.
+        ("Sure, no rush.", "Sure, no rush.", False),
+        ("Got it, I just need the specific branch or site name in San Francisco.",
+         "Got it, which branch in San Francisco is it?", False),
+        # A REPHRASING of an ask they already heard owes nothing, and word
+        # overlap cannot see that on its own — these two share almost no
+        # vocabulary and are the same request. If the spoken half asked,
+        # they have the question.
+        ("Got it, which branch is she at?",
+         "Got it, do you know which branch she works out of these days?",
+         False),
+        # ...but a watchdog line is not an ask, so the muted ask behind it
+        # IS owed. Same call, 14:23:00.
+        ("Are you still with me?",
+         "Which branch does Dr. Okafor see patients at?", True),
+    ]:
+        check(rw._drop_lost_substance(_sp, _dr) == _want,
+              f"owed after muting: {_want!s:5} for {_dr[:40]!r}")
+
+    # And it has to actually be spoken. Owned by the watchdog for the same
+    # reason the goodbye retry is — the drop is detected inside the event pump
+    # while a response is still settling.
+    _sess_ow = _wd_sess(
+        _owed_substance="I'm trying to find out which branch Dr. Okafor works "
+                        "out of.",
+        _agent_quiet_since=None)          # not silence: the owed path must fire
+    _ws_ow, _done_ow = _WS(), asyncio.Event()
+    _wd_ow = asyncio.create_task(rw._silence_watchdog(_ws_ow, _sess_ow, _done_ow))
+    await asyncio.sleep(1.4)
+    _done_ow.set()
+    await asyncio.wait_for(_wd_ow, timeout=2)
+    _ow_nudges = [c["text"] for m in _ws_ow.sent
+                  if m.get("type") == "conversation.item.create"
+                  for c in m["item"].get("content", []) if c.get("type") == "input_text"]
+    check(any("only the first half" in n for n in _ow_nudges),
+          "the muted half is recovered on the next turn")
+    check(any("which branch Dr. Okafor works out of" in n for n in _ow_nudges),
+          "and it is quoted back verbatim, not paraphrased")
+    check(any(m.get("type") == "response.create" for m in _ws_ow.sent),
+          "and a response is created to speak it")
+    check(_sess_ow._owed_substance == "" and _sess_ow._owed_recovered == 1,
+          "cleared once said, so it cannot fire twice",
+          f"{_sess_ow._owed_recovered} recovered")
+
+    # ── ...and it must not claim success when the create is REFUSED ──────────
+    # The first cut cleared the text, counted a recovery and printed "saying it
+    # now" all BEFORE _create_response, which can decline while audio is still
+    # playing out. It declined on the very next live call: call-20260820-1440
+    # detected the owed text at t=45.0s with the previous reply running to
+    # t=45.86s, so nothing was created and the owed half was dropped — while
+    # the log said it had been said. The false-save shape exactly: success
+    # reported before the operation that decides it.
+    #
+    # Driven with audio still queued, which is the condition that broke it.
+    _sess_rf = _wd_sess(
+        _owed_substance="I'm trying to find out which branch she works out of.",
+        _agent_quiet_since=None,
+        _playback_ends_at=time.monotonic() + 30)     # queue will not drain
+    _ws_rf, _done_rf = _WS(), asyncio.Event()
+    _wd_rf = asyncio.create_task(rw._silence_watchdog(_ws_rf, _sess_rf, _done_rf))
+    await asyncio.sleep(1.4)
+    _done_rf.set()
+    await asyncio.wait_for(_wd_rf, timeout=2)
+    check(not any(m.get("type") == "response.create" for m in _ws_rf.sent),
+          "no response is created while the queue is still playing out")
+    check(_sess_rf._owed_substance != "" and _sess_rf._owed_recovered == 0,
+          "and the owed text is KEPT, not counted as recovered",
+          f"owed={_sess_rf._owed_substance[:24]!r} recovered={_sess_rf._owed_recovered}")
+    # Retrying must not re-inject the directive on every tick — the model would
+    # be told the same thing several times over.
+    _injected = [c["text"] for m in _ws_rf.sent
+                 if m.get("type") == "conversation.item.create"
+                 for c in m["item"].get("content", []) if c.get("type") == "input_text"]
+    check(len([n for n in _injected if "only the first half" in n]) == 1,
+          "the directive is injected once across many refused retries",
+          f"{len(_injected)} injected over ~{int(1.4 / 0.25)} ticks")
+
     # And it must stand down the moment they speak.
     _sess2 = _wd_sess(_agent_quiet_since=None)
     _ws2, _done2 = _WS(), asyncio.Event()
@@ -1018,6 +1120,46 @@ async def main():
                "who does he see on Tuesdays"):
         check(not rw._IDENTITY_ASK.search(_q),
               f"not mistaken for an identity question: {_q[:34]!r}")
+    # THE CONTRACTION. The pattern was `who (is|are|'s) …` with a literal
+    # space, so it needed "who 's" and never matched "who's" — the way the
+    # question is actually asked. Every probe above avoided the contraction, so
+    # the gap survived a suite that looked like it covered this.
+    #
+    # call-20260820-1440: "Sorry, who's calling again?" did not match, the
+    # identity nudge never went out, and _is_reintroduction then flagged the
+    # correct answer as a re-introduction. The detector that should have fired
+    # did not; the one that should not have, did.
+    for _q in ("Sorry, who's calling again?", "who's this?", "Who's speaking?",
+               "who's calling"):
+        check(bool(rw._IDENTITY_ASK.search(_q)),
+              f"contraction recognised: {_q[:34]!r}")
+
+    # ── Answering a direct WHO is not a re-introduction ──────────────────────
+    # _is_reintroduction fires on self-name + org, which is exactly the correct
+    # answer to "who's calling?" — and the prompt's own EXCEPTION requires it:
+    # identity facts get repeated every time they are asked. Flagging it told
+    # the model to stop doing the one thing it had just got right.
+    #
+    # The detector's docstring argued it could not key off "did they ask who I
+    # am", because the case it was built for had a mis-transcription the model
+    # read as an identity question. That held while _IDENTITY_ASK could not see
+    # the commonest phrasing. It does not hold now.
+    _reintro_src = pathlib.Path(rw.__file__).read_text(encoding="utf-8")
+    _rb = _reintro_src[_reintro_src.find("# Re-introduction: the greeting delivered"):][:2200]
+    check("_IDENTITY_ASK.search(_prev_caller)" in _rb,
+          "the re-introduction guard consults the identity detector")
+    check("not _answered_who" in _rb,
+          "and stands down when the caller just asked who is calling")
+    # Only the turn IMMEDIATELY before counts — an identity question four turns
+    # back does not license re-delivering the greeting now, which is the
+    # failure the guard exists for.
+    check("next((t.text for t in reversed(sess.turns)" in _rb,
+          "and only the most recent caller turn licenses it")
+    # The detector itself is unchanged: still a positive test on self-name+org.
+    check(rw._is_reintroduction(
+              "Oh, sorry Varun — I'm David, calling on behalf of Definitive "
+              "Healthcare.", "David", "Definitive Healthcare"),
+          "the detector still recognises the greeting formula itself")
 
     # The re-ask gap has to be long enough to catch the observed case: two asks
     # 3s apart, the second landing 0.14s after the agent's own audio ended.
@@ -1044,12 +1186,57 @@ async def main():
               f"hint does not supply the caller's line: {_phrase!r}")
     check("likely phrases" not in _hint.lower(),
           "hint has no complete-utterance section at all")
-    # Positive control: the proper nouns a hint legitimately exists for are
-    # still there, so gutting the hint fails rather than passing this section.
-    for _noun in ("Kaiser Permanente", "Cleveland Clinic", "campus",
-                  "medical center", "boulevard"):
+    # Positive control: the vocabulary the hint legitimately exists for is
+    # still there, so gutting it fails rather than passing this section.
+    #
+    # NARROWED 2026-08-20 to location words only. It used to require health
+    # systems here too — "Kaiser Permanente", "Cleveland Clinic" — and those
+    # are now deliberately absent. A controlled A/B on identical audio (Arm A)
+    # showed the list was the SOURCE of the fabrications: 0.7s of near-silence
+    # returned "Hello, this is the Methodist Hospital. How may I assist you?"
+    # with the list present, and single non-English tokens without it. Arm C
+    # then showed removing it costs nothing measurable on real branch audio —
+    # branch names 7/11 -> 9/11, digits 8/11 -> 9/11, over identical bytes.
+    for _noun in ("campus", "medical center", "boulevard", "street", "clinic"):
         check(_noun.lower() in _hint.lower(),
               f"hint still primes the vocabulary it is for: {_noun!r}")
+    # And the priming vocabulary is GONE from what we send. Asserted as an
+    # absence only because the corresponding presence is asserted on the
+    # DETECTOR below — the pair is what makes this meaningful rather than a
+    # check that passes by finding nothing.
+    for _primer in ("Mercy", "Baptist", "Mayo", "Northwell", "receptionist"):
+        check(_primer.lower() not in _hint.lower(),
+              f"hint no longer primes: {_primer!r}")
+    check(len(_hint) < 200,
+          "hint is location vocabulary only", f"{len(_hint)} chars")
+
+    # ── ...and the DETECTOR keeps that vocabulary, independently ─────────────
+    # Deleting the list from the hint disarmed the fabrication detector with
+    # it: _hint_proper_nouns read the live hint, so it went from 21 names to
+    # zero and stopped recognising every fabrication on record. The two jobs
+    # were never the same job — the hint is what we SEND, the vocabulary is
+    # what we RECOGNISE — so they are now separate constants.
+    for _name in ("mercy", "mayo", "northwell", "baptist", "methodist",
+                  "sutter", "providence", "cleveland", "kaiser"):
+        check(_name in rw._FABRICATION_VOCAB,
+              f"detector still knows the fabrication vocabulary: {_name!r}")
+    check(len(rw._FABRICATION_VOCAB) >= 20,
+          "detector vocabulary survived the hint being minimised",
+          f"{len(rw._FABRICATION_VOCAB)} names")
+    # Every observed fabrication must still be recognised with the NEW hint in
+    # force — this is the regression the decoupling exists to prevent.
+    for _fab in ("Mercy Hospital",
+                 "Hello, I need to schedule an appointment at the Mayo",
+                 "across from the Northwell campus",
+                 "Hi, this is Mercy Hospital. How may I help you?",
+                 "Okay, I'm looking at her profile now. Baptist"):
+        check(rw._reads_as_hint_vocabulary(_fab, _hint),
+              f"fabrication still caught under the minimal hint: {_fab[:38]!r}")
+    # ...and real caller answers still are not.
+    for _real in ("It's the Mission Bay clinic, 1825 Fourth Street",
+                  "She works at the Abadan branch", "Northgate", "Yes."):
+        check(not rw._reads_as_hint_vocabulary(_real, _hint),
+              f"real answer not mistaken for fabrication: {_real[:38]!r}")
 
     # Re-introduction: the greeting delivered a second time. The prompt has had
     # a rule against this since templates.py:296 and it lost on turn TWO of
@@ -1283,8 +1470,10 @@ async def main():
     _bpms = rw._wire_bytes_per_ms()
     _silence = b"\xff" * int(4000 * _bpms)        # 4s of mu-law silence
     _loud = bytes([0x00, 0x80] * int(2000 * _bpms // 2))   # 2s of loud audio
-    class _S:  # minimal session: only _caller_pcm is read
-        def __init__(self, chunks): self._caller_pcm = chunks
+    class _S:  # minimal session: only _caller_pcm and the listen offset are read
+        def __init__(self, chunks, listen_start_bytes=0):
+            self._caller_pcm = chunks
+            self._listen_start_bytes = listen_start_bytes
     # Speech at 1000-3000ms, then silence. The old code, marking the position
     # late, would have taken the tail.
     _sess_sl: Any = _S([_silence[:int(1000*_bpms)], _loud, _silence])
@@ -1300,6 +1489,53 @@ async def main():
           "no timestamps -> fall back to the chunk position")
     check(rw._utterance_slice(_sess_sl, 99_000, 99_500, 0) == b"".join(_sess_sl._caller_pcm),
           "out-of-range timestamps fall back rather than slicing nothing")
+
+    # ── ...and OpenAI's clock does not start when ours does ──────────────────
+    # SECOND ROOT CAUSE, found 2026-08-20 on call-20260820-1154, and the reason
+    # the fix above did not land. _caller_pcm is appended for every inbound
+    # frame from stream start; frames are only FORWARDED to OpenAI once
+    # listen_enabled is set, after the greeting finishes. So OpenAI's
+    # audio_start_ms counts from "greeting done" and ours from "stream start",
+    # and every slice read that far too early.
+    #
+    # Solving for the offset that reproduces all six recorded audio_rms values
+    # against the Twilio caller channel gave 9.6s, against a greeting that
+    # ended at 9.50s. Offset 0 predicts 0.13-0.19 for every turn and matches
+    # none. The damage: four turns of audible speech recorded 0.000244140625 —
+    # the SAME signature the previous fix was written to remove, arriving for a
+    # new reason — and one turn of pure silence recorded 0.1230, the loudest on
+    # the call, because 9.6s earlier the caller was mid-sentence. That turn was
+    # a fabricated transcript, and the quarantine waved it through as the
+    # clearest speech on the call.
+    _lead = _silence[:int(9_600 * _bpms)]          # greeting: never sent to OpenAI
+    _sess_off: Any = _S([_lead, _silence[:int(1000*_bpms)], _loud, _silence],
+                        listen_start_bytes=len(_lead))
+    # OpenAI reports speech at 1000-3000ms of ITS buffer = 10600-12600ms of ours.
+    _cut_off = rw._utterance_slice(_sess_off, 1000, 3000, fallback_chunk_pos=0)
+    _rms_off = rw._loudest_window_rms(rw._wire_to_pcm16(_cut_off))
+    check(_rms_off > 0.01,
+          "OpenAI's ms are offset by where ITS buffer starts, not ours",
+          f"rms {_rms_off:.4f} (speech), not the pre-greeting silence")
+    # The exact failure that shipped: without the offset the slice lands in the
+    # greeting, which is mu-law silence, and returns the 0.000244140625 that
+    # two previous fixes were each written to eliminate.
+    _sess_bug: Any = _S([_lead, _silence[:int(1000*_bpms)], _loud, _silence],
+                        listen_start_bytes=0)
+    _rms_bug = rw._loudest_window_rms(rw._wire_to_pcm16(
+        rw._utterance_slice(_sess_bug, 1000, 3000, fallback_chunk_pos=0)))
+    check(_rms_bug < 0.001 and _rms_off > 100 * _rms_bug,
+          "and ignoring the offset collapses the measurement to the floor",
+          f"offset {_rms_off:.4f} vs no-offset {_rms_bug:.9f}")
+    # The offset must be captured BEFORE any caller turn can exist, at the one
+    # place listening is enabled — not recomputed later, when _caller_pcm has
+    # grown past it.
+    _src_all = _plb.Path(rw.__file__).read_text(encoding="utf-8")
+    check("sess._listen_start_bytes = sum(len(c) for c in sess._caller_pcm)" in _src_all,
+          "the offset is recorded where listening is enabled")
+    _assigns = re.findall(r"_listen_start_bytes(?:\s*:\s*int)?\s*=", _src_all)
+    check(len(_assigns) == 2,
+          "and set in exactly two places: the initialiser and that one site",
+          f"{len(_assigns)} assignments")
 
     # ── The quarantine needs TWO signals, never audio alone ──────────────────
     # A guard that DISCARDS a caller's words must not rest on one number that
@@ -1334,6 +1570,213 @@ async def main():
     check(_ct_src and "_audio_carried_nothing" in _ct_src.group(0)
           and "_reads_as_hint_vocabulary" in _ct_src.group(0),
           "the drop requires both signals together")
+
+    # ── ...and the hole that rule leaves: a fabrication in ordinary English ──
+    # Three confirmed fabrications, all adjudicated from the Twilio caller
+    # channel rather than from our own numbers. NONE of them quotes the hint,
+    # so _reads_as_hint_vocabulary is False for all three and the two-signal
+    # rule cannot fire:
+    #
+    #   call-20260819-2006  "...schedule an appointment at the Mayo"
+    #   call-20260820-1154  "...appointment for my annual check-up"   13s of 0.0003
+    #   call-20260820-1230  "Hello,"                                  72-80s of 0.0003
+    #
+    # The claim that such a turn "corrupts nothing because grounding still
+    # applies" held for the SAVE and failed for the CALL: on -1230 the phantom
+    # drew a reply, the reply stacked on audio still playing, and the callee
+    # spent 7.35s saying "Hello?", "campus", "Hello," into a line with no gap.
+    for _t10 in ("Hi, I need to schedule an appointment for my annual check-up.",
+                 "Hello,"):
+        check(not rw._reads_as_hint_vocabulary(_t10, _hint2),
+              f"vocabulary test cannot see this fabrication: {_t10[:34]!r}")
+
+    # Silence is decided absolutely, never as a fraction of the caller's own
+    # level: the median it would be compared against is computed from turns
+    # this predicate exists to exclude.
+    check(rw._audio_was_silent(0.000244140625),
+          "mu-law digital silence is silence")
+    check(rw._audio_was_silent(0.0003),
+          "and so is the 0.0003 the Twilio channel shows under all three")
+    # Real turns must NEVER read as silent. These are the nine recorded on
+    # call-20260820-1230 (the first call after the measurement was fixed) plus
+    # the quietest genuine turn seen across all 48 dual-channel recordings.
+    for _r10 in (0.1583, 0.1197, 0.1882, 0.0969, 0.1584, 0.1304, 0.1642,
+                 0.1239, 0.1227, 0.0793, 0.030):
+        check(not rw._audio_was_silent(_r10),
+              f"real caller speech is not silence: {_r10}")
+    check(rw._audio_was_silent(None) is False,
+          "unmeasured is not silent — absence of measurement proves nothing")
+
+    # The margin is the whole reason this may act on audio alone. If someone
+    # later tunes _SILENT_AUDIO_RMS up toward the faint threshold, it stops
+    # being a different question and starts being able to discard real speech.
+    check(rw._SILENT_AUDIO_RMS < rw._LOW_AUDIO_RMS / 5,
+          "the silence floor stays far below the faint threshold",
+          f"{rw._SILENT_AUDIO_RMS} vs {rw._LOW_AUDIO_RMS}")
+    check(0.030 / rw._SILENT_AUDIO_RMS >= 10,
+          "and at least 10x below the quietest genuine turn on record",
+          f"{0.030 / rw._SILENT_AUDIO_RMS:.0f}x")
+
+    # The drop site must reach the silence branch WITHOUT the vocabulary test,
+    # and must not have quietly merged the two thresholds into one.
+    check(_ct_src and "_audio_was_silent" in _ct_src.group(0),
+          "the drop site acts on silence independently of vocabulary")
+    check(_ct_src and "fabricated_turns" in _ct_src.group(0),
+          "and records it, so the artifact says the model was told a phantom")
+    # The faint-line warning is once per call; this nudge is not. There can be
+    # more than one phantom, and suppressing the second leaves exactly the
+    # failure the branch exists for.
+    # Prove the slice exists before asserting an absence inside it. Unguarded,
+    # a regex miss makes _ct_src None and this raises; guarded with `and`, it
+    # would silently assert nothing — which is the worse of the two, and the
+    # shape this file has been caught by. So check the anchor was found first.
+    _ct_body = _ct_src.group(0) if _ct_src else ""
+    check("if _silent:" in _ct_body,
+          "found the silence branch to inspect")
+    _sil_branch = _ct_body[_ct_body.find("if _silent:"):][:1600]
+    check("_low_audio_warned" not in _sil_branch,
+          "the silence nudge is not rationed like the faint-line warning")
+
+    # END TO END, because every check above is source-level and source-level
+    # checks cannot see a branch being disabled. Setting `_silent = False`
+    # leaves _audio_was_silent and fabricated_turns both still present in the
+    # file, so all of them keep passing while the guard does nothing — the
+    # exact false-negative shape this suite has been caught by before.
+    # _handle_caller_transcript mutates only `sess`, so it can be driven here.
+    class _SilWS:
+        def __init__(self): self.sent = []
+        async def send(self, s): self.sent.append(json.loads(s))
+
+    async def _drive(rms, text):
+        _s = rw.RealtimeSession("CA00000000000000000000silence",
+                                Doctor(doctor_name="Dr. Jane Okafor",
+                                       hospital_name="Northside Medical Group"))
+        _s._pending_utterance_rms = rms
+        _w = _SilWS()
+        await rw._handle_caller_transcript({"transcript": text}, _s, _w)
+        _said = [t.text for t in _s.turns if t.role == "caller"]
+        _nudges = [m for m in _w.sent
+                   if m.get("item", {}).get("role") == "user"]
+        return _s, _said, _nudges
+
+    _s, _said, _nudges = await _drive(0.0003, "Hello,")
+    check("Hello," not in _said,
+          "a transcript over a silent line never becomes a caller turn")
+    check(_s.fabricated_turns == ["Hello,"],
+          "it is recorded as fabricated", f"{_s.fabricated_turns}")
+    check(len(_nudges) == 1 and "was silent" in json.dumps(_nudges),
+          "and the model is told not to answer it", f"{len(_nudges)} nudges")
+
+    # The direction that costs a real answer. A genuine turn at the quietest
+    # level ever recorded must pass straight through, untouched and unflagged.
+    _s2, _said2, _nudges2 = await _drive(
+        0.030, "She's at the Mission Bay clinic, 1825 Fourth Street.")
+    check(_said2 == ["She's at the Mission Bay clinic, 1825 Fourth Street."],
+          "the quietest genuine turn on record is kept in full")
+    check(not _s2.fabricated_turns and not _nudges2,
+          "not flagged, and no nudge sent")
+    # Unmeasured audio must behave like the quiet turn, not like the silent one.
+    _s3, _said3, _nudges3 = await _drive(None, "Northgate")
+    check(_said3 == ["Northgate"] and not _s3.fabricated_turns and not _nudges3,
+          "an unmeasured turn is kept — absence of measurement is not evidence")
+
+    # ── REJECTING A TRANSCRIPT ≠ PREVENTING A REPLY TO IT ────────────────────
+    # `create_response` is not set in build_audio_config, so it runs on the API
+    # default of true: OpenAI's server VAD creates the response at
+    # speech_stopped, strictly BEFORE transcription exists. Every guard here is
+    # therefore downstream of a decision already taken.
+    #
+    #   speech_stopped -> [VAD creates response] -> response.created
+    #       -> input_audio_transcription.completed -> guard rejects
+    #       -> response.output_audio.delta ... the agent answers it anyway
+    #
+    # call-20260820-1611: "Hi, I'm looking to schedule an appointment at Mercy
+    # Hospital" was dropped as unevidenced and the agent replied "Okay, I'll
+    # hold." to it. The drop printed BEFORE the first audio delta, so the reply
+    # was suppressible and nothing tried.
+    #
+    # Three states, three different right answers — and the third must not be
+    # dressed up as the second.
+    async def _reject_with(active, audio_started):
+        _s = rw.RealtimeSession("CA00000000000000000000cancel",
+                                Doctor(doctor_name="Dr. Jane Okafor",
+                                       hospital_name="Northside Medical Group"))
+        _s._pending_utterance_rms = 0.0003            # digital silence
+        _s._response_active = active
+        _s._response_audio_started = audio_started
+        _s._caller_stopped_at = time.monotonic() - 0.4
+        _s._response_created_at = time.monotonic() - 0.3
+        _w = _SilWS()
+        await rw._handle_caller_transcript({"transcript": "Hello,"}, _s, _w)
+        _cancels = [m for m in _w.sent if m.get("type") == "response.cancel"]
+        return _s, _cancels
+
+    _sc, _cx = await _reject_with(active=True, audio_started=False)
+    check(len(_cx) == 1,
+          "reply in flight with no audio yet -> response.cancel is sent")
+    check(_sc._suppressed_response is True,
+          "and the cancelled response's own transcript is marked to be skipped")
+    check(_sc.rejection_cancels[0]["outcome"] == "cancelled before any audio",
+          "recorded as cancelled", _sc.rejection_cancels[0]["outcome"])
+    check(isinstance(_sc.rejection_cancels[0]["since_speech_stopped_s"], float),
+          "with the margin, so it can be measured across calls",
+          f"{_sc.rejection_cancels[0]['since_speech_stopped_s']}s")
+
+    # Already audible: cancelling cannot unsay it. Report it, do not pretend.
+    _sl, _cx2 = await _reject_with(active=True, audio_started=True)
+    check(not _cx2,
+          "audio already reaching the caller -> no cancel is attempted")
+    check(_sl._suppressed_response is False,
+          "and its transcript is NOT skipped — the caller did hear it")
+    check("TOO LATE" in _sl.rejection_cancels[0]["outcome"],
+          "recorded as too late, not as a prevention",
+          _sl.rejection_cancels[0]["outcome"])
+
+    # Nothing in flight at all — no protocol traffic for the sake of it.
+    _sn, _cx3 = await _reject_with(active=False, audio_started=False)
+    check(not _cx3 and _sn.rejection_cancels[0]["outcome"] == "no reply in flight",
+          "nothing in flight -> nothing cancelled")
+
+    # THE WIRING, which the three checks above cannot see. They set the state
+    # by hand, so deleting the lines that MAINTAIN it leaves them all passing —
+    # mutation-proven blind before these were added.
+    #
+    # A cancelled response still emits its transcript. Nothing was heard, so
+    # letting it become a turn would put words in the record the caller never
+    # got, and hand them to the guards as evidence.
+    _sup_sess = rw.RealtimeSession("CA0000000000000000000supskip",
+                                   Doctor(doctor_name="Dr. Jane Okafor"))
+    _sup_sess._suppressed_response = True
+    _buf, _bip = await rw._handle_agent_transcript(
+        {"transcript": "Okay, I'll hold."}, _sup_sess, _SilWS(), "", False)
+    check(not [t for t in _sup_sess.turns if t.role == "agent"],
+          "a suppressed response's transcript never becomes an agent turn")
+    check(_sup_sess._suppressed_response is False,
+          "and the flag is consumed, so the next response is unaffected")
+    # ...and an ordinary response still does become one.
+    _ok_sess = rw.RealtimeSession("CA00000000000000000000supok",
+                                  Doctor(doctor_name="Dr. Jane Okafor"))
+    await rw._handle_agent_transcript(
+        {"transcript": "Okay, I'll hold."}, _ok_sess, _SilWS(), "", False)
+    check([t.text for t in _ok_sess.turns if t.role == "agent"] == ["Okay, I'll hold."],
+          "an ordinary response is still recorded")
+
+    # _response_audio_started must be maintained in exactly two places: reset
+    # per response, and set on the first delta. Losing either silently breaks
+    # the state distinction the whole decision rests on — the "too late" branch
+    # would stop firing, or would fire always.
+    _rw_txt = pathlib.Path(rw.__file__).read_text(encoding="utf-8")
+    _aud = re.findall(r"_response_audio_started\s*(?::\s*bool\s*)?=\s*(\w+)",
+                      _rw_txt)
+    check(_aud == ["False", "False", "True"],
+          "audio-started is initialised, reset per response, and set on audio",
+          f"{_aud}")
+    _resp_created = _rw_txt[_rw_txt.find('event_type == "response.created"'):][:1800]
+    check("_response_audio_started = False" in _resp_created,
+          "the reset lives in the response.created handler, before any audio")
+    _delta_blk = _rw_txt[_rw_txt.find('event_type == "response.output_audio.delta"'):][:3000]
+    check("_response_audio_started = True" in _delta_blk,
+          "and the set lives in the audio-delta handler")
 
     # ── A silent drop must leave a trace ─────────────────────────────────────
     # Two turns were dropped on call-20260819-2006 and the artifact recorded
@@ -1554,6 +1997,228 @@ async def main():
     for _ph in ("ask them", "could you", "tell me", "please provide"):
         check(_ph not in _dv.lower(),
               f"digit rejection has no speakable imperative ({_ph!r})")
+
+    # ── ...and the same tolerance for a number SPELLED OUT ───────────────────
+    # The digit rule only inspects digit runs, so a value carrying no digits
+    # skipped it entirely and passed vacuously. Spelling the number in words
+    # was a complete bypass of the strictest guard in the file.
+    #
+    # call-20260820-1321 found it, and the guard drove the model there. Caller
+    # said "It's Mission Bay Clinic, 1844th Street":
+    #   1st  'Mission Bay Clinic, 18 4th Street'              REJECTED, rightly
+    #   2nd  'Mission Bay Clinic, 18 4th Street'              REJECTED, rightly
+    #   3rd  'mission bay clinic, eighteen forty fourth street'  SAVED
+    # into doctors.json as partially_verified, grounding "verified against
+    # caller transcript". Nothing verified it — there were no digits to check.
+    _bypass = double(turns=[
+        _hf("It's Mission Bay Clinic, 1844th Street."),
+        _hf("Okay, she lives San Francisco."),
+    ])
+    for _want, _label, _args in [
+        (True,  "the exact bypass that shipped a bad record",
+         {"branch": "mission bay clinic, eighteen forty fourth street",
+          "city": "San Francisco"}),
+        (True,  "and the same trick with a different invented number",
+         {"branch": "Mission Bay Clinic, eighteen twenty fifth street"}),
+        (False, "the caller's own digits are still accepted",
+         {"branch": "Mission Bay Clinic, 1844th Street", "city": "San Francisco"}),
+    ]:
+        check(bool(rw._ungrounded_terms(_args, _bypass)) == _want,
+              f"spelled-number grounding: "
+              f"{'blocked' if _want else 'allowed'} — {_label}")
+
+    # ── Closing a hole must not open a liveness one ─────────────────────────
+    # Every correction at the save-rejection site is one-shot and nothing
+    # counted the rejections, so a model that cannot produce an acceptable
+    # value retried indefinitely. call-20260820-1321 attached a closing line to
+    # each attempt — "I'll note that and wrap up", "I'll note it and let you
+    # go", "take care" — twenty seconds of thanking a caller for a branch that
+    # was never recorded, and the SECOND rejection got no correction at all
+    # because _false_save_nudged was spent on the first.
+    #
+    # That call terminated only because the third attempt slipped through the
+    # spelled-number bypass. Closing that bypass removes the accidental exit,
+    # so the bound has to be explicit: a guard made stricter must carry the
+    # liveness the leak was accidentally providing.
+    check(rw._MAX_SAVE_REJECTIONS >= 2,
+          "a save budget exists and allows a normal correction cycle",
+          f"{rw._MAX_SAVE_REJECTIONS}")
+    _rsrc = _plb.Path(rw.__file__).read_text(encoding="utf-8")
+    _rej = _rsrc[_rsrc.find("sess._save_rejections += 1"):][:1800]
+    check(_rej, "found the rejection-counting site")
+    # Guessing is not the exit. The caller's words are already on the
+    # transcript, so the directive must QUOTE them rather than ask for another
+    # attempt — and must offer escalate as the way out if that fails too.
+    check("_candidate_location(sess)" in _rej,
+          "at the limit the agent is handed the caller's verbatim words")
+    check("escalate" in _rej,
+          "and a truthful escalation is offered as the exit")
+    check("do not say goodbye again" in _rej,
+          "and told to stop closing the call until something succeeds")
+    # END TO END. Every check above is source-level, and source-level checks
+    # cannot see the branch being disabled: `if False:` leaves
+    # _candidate_location, "escalate" and "do not say goodbye" all present in
+    # the slice, so all of them keep passing while the budget never fires.
+    # Mutation-proven blind before this was added. _handle_tool_call takes five
+    # plain arguments, so it can be driven directly.
+    class _TcWS:
+        def __init__(self): self.sent = []
+        async def send(self, s): self.sent.append(json.loads(s))
+
+    async def _reject_n(n):
+        _s = rw.RealtimeSession("CA0000000000000000000rejbud",
+                                Doctor(doctor_name="Dr. Jane Okafor",
+                                       hospital_name="Northside Medical Group"))
+        _s.turns = [rw.TranscriptTurn(role="caller", text=t, timestamp="00:00:00",
+                                      audio_rms=0.15)
+                    for t in ("Okay, she lives San Francisco.",
+                              "It's Mission Bay Clinic, 1844th Street.")]
+        _w = _TcWS()
+        for i in range(n):
+            await rw._handle_tool_call(
+                {"name": "save_branch", "call_id": f"c{i}",
+                 "arguments": json.dumps(
+                     {"branch": "mission bay clinic, eighteen forty fourth street",
+                      "city": "San Francisco"})},
+                _s, _w, {}, True)
+        _d = [m for m in _w.sent
+              if "nothing has been recorded" in json.dumps(m)]
+        return _s, _d
+
+    _s_b, _d_b = await _reject_n(rw._MAX_SAVE_REJECTIONS - 1)
+    check(_s_b._save_rejections == rw._MAX_SAVE_REJECTIONS - 1 and not _d_b,
+          "under the budget the agent is left to correct itself",
+          f"{_s_b._save_rejections} rejections, {len(_d_b)} directives")
+    _s_b, _d_b = await _reject_n(rw._MAX_SAVE_REJECTIONS)
+    check(len(_d_b) == 1,
+          "at the budget the directive fires exactly once",
+          f"{len(_d_b)} directives")
+    check("1844th Street" in json.dumps(_d_b),
+          "and it quotes the caller's number, digit for digit")
+    # The counter must be a plain increment, never reset mid-call — the same
+    # shape the silence budget is asserted on, and for the same reason: a reset
+    # makes a budget unreachable while every test of the budget still passes.
+    _assigns = re.findall(r"_save_rejections\s*(?::\s*int\s*)?([+]?=)\s*(\S+)", _rsrc)
+    check(_assigns == [("=", "0"), ("+=", "1")],
+          "the save counter is only initialised or incremented, never reset",
+          f"{_assigns}")
+
+    # ── A QUESTION IS NOT AN ANSWER ──────────────────────────────────────────
+    # Grounding compared a saved value against one blob of every caller turn,
+    # so a value the caller ASKED about grounded exactly like one they stated.
+    #
+    # call-20260820-1703: "She's in San Francisco, right?" — never confirmed
+    # afterwards — put city="San Francisco" into the directory stamped
+    # "verified against caller transcript". They were asking US, and we had
+    # nothing to confirm it with: the record holds an organisation, not a city.
+    #
+    # The distinction already existed for the ask budget (_caller_is_vetting,
+    # built after the agent hung up on "How can I help you?"). Grounding never
+    # consulted it.
+    _ta = lambda t: rw._turn_asserts(t, double(
+        turns=[], doctor=double(hospital_name="Northside Medical Group",
+                                doctor_name="Dr. Jane Okafor"),
+        org_name="Definitive Healthcare", agent_name="David"))
+    for _kind, _txt, _want in [
+        # ── direct assertions: every one must stay usable ──────────────────
+        ("assertion", "It's the Mission Bay Clinic.", True),
+        ("assertion", "She's in San Francisco.", True),
+        ("assertion", "Northgate.", True),
+        # THE EXPENSIVE DIRECTION. _caller_is_vetting fires on _VETTING_OPENER
+        # alone, so without the "?" conjunct this bare answer is discarded —
+        # the case the digit/word rule below defends by name.
+        ("assertion", "Sorry, Northgate.", True),
+        ("assertion", "Um, Northgate.", True),
+        ("assertion", "Yes, San Francisco.", True),
+        ("assertion", "She works out of the Abadan branch.", True),
+        ("assertion", "Where she works is the Mission Bay clinic.", True),
+        ("assertion", "Northgate and Riverside.", True),
+        ("assertion", "Can confirm it's the Abadan branch.", True),
+        # ── confirmation-seeking: the defect this closes ────────────────────
+        ("confirm-seeking", "She's in San Francisco, right?", False),
+        ("confirm-seeking", "Is she in San Francisco?", False),
+        ("confirm-seeking", "Maybe San Francisco? I'm not sure.", False),
+        # ── screening questions ─────────────────────────────────────────────
+        ("screening", "Sorry, who's calling again?", False),
+        ("screening", "Is this about a patient?", False),
+        ("screening", "How can I help you?", False),
+        # ── hedged is still telling ─────────────────────────────────────────
+        ("hedged", "I think it's the Mission Bay clinic.", True),
+        # ── MIXED: an answer wearing a question's shape. All must survive. ──
+        ("mixed", "Which one — the Mission Bay clinic?", True),
+        ("mixed", "It's Mission Bay Clinic, right?", True),
+        ("mixed", "It's the Mission Bay clinic. Is that what you needed?", True),
+        ("mixed", "Who's calling? Oh — she's at the Northgate campus.", True),
+        ("mixed", "Mission Bay Clinic. Anything else?", True),
+        # ── OUT OF SCOPE, asserted so the gap is not mistaken for a
+        # regression. Negation is a different axis and is tracked separately:
+        # this turn still grounds "Northside Medical Group" today and after.
+        ("negation (untouched)", "We're not Northside Medical Group.", True),
+    ]:
+        check(_ta(_txt) == _want,
+              f"turn asserts ({_kind}): {_want!s:5} for {_txt[:44]!r}")
+
+    # MULTI-TURN, the real call. Reproduced exactly: the city was only ever
+    # asked about, the branch was stated. One must ground and the other must
+    # not — which the blob could not express, because it had no per-turn view.
+    _1703 = double(turns=[_hf("Okay, that's fine. I'm just trying to, then okay, "
+                              "I'm sorry. She's in San Francisco, right?"),
+                          _hf("Let me check that again."),
+                          _hf("It's the Mission Bay Clinic")],
+                   doctor=double(hospital_name="Northside Medical Group",
+                                 doctor_name="Dr. Jane Okafor"),
+                   org_name="Definitive Healthcare", agent_name="David")
+    check(not rw._ungrounded_terms({"branch": "Mission Bay Clinic"}, _1703),
+          "call-1703: the branch they STATED still grounds")
+    check(bool(rw._ungrounded_terms(
+              {"branch": "Mission Bay Clinic", "city": "San Francisco"}, _1703)),
+          "call-1703: the city they ASKED about no longer does")
+    # And the whole-call safety valve: if every turn is a question there is no
+    # assertion to judge against, which must not block — same conservative
+    # direction as an untranscribed call.
+    _allq = double(turns=[_hf("Who's calling?"), _hf("Is this about a patient?")],
+                   doctor=double(hospital_name="Northside Medical Group",
+                                 doctor_name="Dr. Jane Okafor"),
+                   org_name="Definitive Healthcare", agent_name="David")
+    check(not rw._ungrounded_terms({"branch": "Northgate"}, _allq),
+          "a call of nothing but questions does not block — it cannot judge")
+
+    # RENDERING IS NOT SUBSTITUTION, and the first cut of this rule could not
+    # tell them apart — it blocked "1825 Fourth Street" against a caller who
+    # said "1825 4th Street", which throws away a correct address. That is the
+    # expensive direction. A number-word grounds if the caller said the WORD or
+    # said the DIGIT it stands for.
+    check(not rw._ungrounded_terms(
+              {"branch": "Mission Bay Clinic, 1825 Fourth Street"}, _addr_sess),
+          "'4th' heard, 'Fourth' saved — rendering still passes")
+    for _said, _val in [("She's at the Seven Hills clinic.", "Seven Hills Clinic"),
+                        ("It's the Fourth Avenue site.",     "Fourth Avenue"),
+                        ("One Medical on Broadway.",         "One Medical")]:
+        check(not rw._ungrounded_terms({"branch": _val},
+                                       double(turns=[_hf(_said)])),
+              f"a real name whose number-word the caller said: {_val!r}")
+
+    # THE REASON HAS TO REACH THE MODEL. _ungrounded_terms always computed a
+    # specific one and the tool site discarded it for a generic line — the
+    # same shape as 5aed263, where the failure reason was in every event and
+    # was thrown away. Two rejections saying only "NEED: wording the caller
+    # used out loud" are why the model reached for words: "out loud" reads as
+    # "as spoken". It must no longer say that, and must pass the detail on.
+    _gsrc = _plb.Path(rw.__file__).read_text(encoding="utf-8")
+    check("REJECTED — {ungrounded} " in _gsrc,
+          "the grounding rejection carries the specific reason")
+    # Asserted POSITIVELY, on the clause that must be there. The obvious
+    # version — "wording the caller used out loud" not in source — passes by
+    # finding nothing, and here it would have failed on the comment explaining
+    # the fix rather than on the message itself.
+    check("| NEED: their own words, any number in digits" in _gsrc,
+          "and the NEED clause asks for digits, not for spoken wording")
+    # Still machinery, not speech — one of these was read aloud to a caller.
+    _sv = rw._ungrounded_terms(
+        {"branch": "mission bay clinic, eighteen forty fourth street"}, _bypass)
+    for _ph in ("ask them", "could you", "tell me", "please provide", "you should"):
+        check(_ph not in _sv.lower(),
+              f"spelled-number rejection stays unspeakable ({_ph!r})")
 
     # ── The watchdog must not break a hold ───────────────────────────────────
     # call-20260819-1619. The caller said "give me a minute I just need to
@@ -2021,6 +2686,25 @@ async def main():
           "transcription pinned to en")
     check(session.get("max_output_tokens") == settings.realtime_max_response_tokens,
           "response token cap set")
+    # And the cap has to clear the longest turn the script can legitimately
+    # ask for. It counts AUDIO tokens (~20/s of speech) as well as text, which
+    # is what made 400 look generous and truncate a live disclosure on
+    # call-20260820-1230 at out_audio=151. The voicemail message is the long
+    # pole: organisation, doctor, purpose, and an email read out character by
+    # character — ~25s of speech, ~500 audio tokens plus its transcript.
+    #
+    # Asserted as a floor, not an equality: raising it further is fine, and
+    # this must not become a test that has to be edited to tune a knob. What
+    # it catches is the cap drifting back DOWN to where it silently cuts the
+    # agent off mid-sentence.
+    check(settings.realtime_max_response_tokens >= 1000,
+          "token cap clears the longest legitimate turn (voicemail ~650 tok)",
+          f"{settings.realtime_max_response_tokens} tok")
+    # The log must show BOTH halves of what the cap counts. Showing only
+    # out_audio is why the truncation was unexplainable from the log.
+    _rw_src = _plb.Path(rw.__file__).read_text(encoding="utf-8")
+    check("out_text=" in _rw_src and "out_audio=" in _rw_src,
+          "usage log shows out_text too — the cap counts it")
 
     ctx = items[0]["item"]["content"][0]["text"]
     check("CALL CONTEXT" in ctx, "per-call facts sent as a conversation item")
@@ -2185,6 +2869,19 @@ async def main():
           "instructions forbid inventing a phone number")
     check("repeat it plainly and in full" in flat,
           "mid-call identity re-ask is handled")
+    # ...and answering WHO must END there. The rule used to say "give your
+    # name and the organisation, however many times they ask", which is what
+    # _is_reintroduction flags as re-delivering the greeting — a genuine
+    # prompt/guard contradiction, and the prompt wins because it is in
+    # context from turn one while the guard arrives after the fact.
+    # call-20260820-1440: "Sorry, who's calling again?" -> "Oh, sorry Varun —
+    # I'm David, calling on behalf of Definitive Healthcare." Correct answer,
+    # flagged as a fault. Asserted positively: an absence check on the old
+    # wording would pass by finding nothing.
+    check("do not re-run the opening line" in flat,
+          "answering WHO does not re-deliver the greeting")
+    check("do not put the branch question on the end" in flat,
+          "and does not staple the branch question onto the identity answer")
     check("EXCEPTION: identity and contact facts" in flat,
           "identity facts exempt from the no-repetition rule")
 
@@ -2257,6 +2954,25 @@ async def main():
         # answered WHY and dropped the yes/no entirely.
         check("EMERGENCY" in _f3 and "nothing urgent" in _f3,
               f"{_n3}: prompt answers the is-this-an-emergency question")
+        # "Is it urgent?" and "is it about a patient?" are two questions with
+        # two answers, and merging them costs the second one. The 2026-08-20
+        # deletion pass folded the patient question into the EMERGENCY branch
+        # to save lines, which handed it the emergency ANSWER — and on
+        # call-20260820-1321 the agent said "No, nothing urgent — it's a
+        # listing check" to "is it about a patient?", leaving the actual
+        # question hanging. _asks_about_patient exists precisely to stop that
+        # ("answering only the 'urgent' half leaves them guessing") and lost:
+        # its nudge is injected when the transcript lands, which is after
+        # OpenAI's VAD has already begun the reply, so the prompt wins the
+        # race whenever generation starts first. A guard that races cannot be
+        # the only thing saying this.
+        check("about a PATIENT" in _f3,
+              f"{_n3}: the patient question has its own branch")
+        check("no patient is involved" in _f3,
+              f"{_n3}: and its own answer, in its own terms")
+        _pat = _f3[_f3.find("about a PATIENT"):][:240]
+        check("DIFFERENT question" in _pat,
+              f"{_n3}: marked as distinct from the urgency question")
         # It opened that same turn with "It's just me, calling on behalf of..."
         # — a phrase that identifies nobody, from a stranger on their phone.
         check("it's just me" in _f3.lower(),
@@ -2271,8 +2987,21 @@ async def main():
         # And the rejection-handling rule that lost the branch.
         check("RE-READ WHAT THEY ACTUALLY SAID" in _f3,
               f"{_n3}: prompt re-reads the transcript before re-asking")
-    check("Never claim to have noted, saved, or recorded a location you were" in flat,
-          "cannot claim to have saved a location it never got")
+    # The prose rule "Never claim to have noted, saved, or recorded a location
+    # you were not given" was DELETED from the prompt on 2026-08-20. It was
+    # observed failing on call-20260818-1613 (told the caller it was saved
+    # 0.0s before the save was rejected) and again on call-20260819-1619, and
+    # the guard written for it — _claims_saved, feeding both the tool-site
+    # nudge and the claimed-done watchdog — is what actually holds. The guard's
+    # own comment says so: "The prompt already carries [it] and it did not
+    # hold." Carrying both left the model arbitrating a rule that never won.
+    #
+    # Asserting the prose is now ABSENT would be the wrong invariant: it passes
+    # by finding nothing, so it would pass just as well on the day someone
+    # deletes the guard as well. Assert what must be true — the rule is still
+    # enforced, somewhere — which passes only by finding something.
+    check(rw._claims_saved("Thanks — I've got that saved, that's all I needed."),
+          "the deleted false-save rule is still enforced, in code")
     # Directives are injected as role:"user" input_text items — the standard
     # workaround, but it means a fake caller utterance is one bug away from
     # landing in the saved transcript and quietly polluting the dataset.
@@ -2381,6 +3110,53 @@ async def main():
               f"{name}: never impersonates hospital staff or a patient")
         check("{{" not in t.instructions,
               f"{name}: no unsubstituted template placeholders")
+
+    # ── The prompt has a ceiling, and it is a hard one ───────────────────────
+    # Every prompt edit before 2026-08-20 was additive. A live call produced a
+    # failure, a rule was written for it, and the rule stayed — so the prompt
+    # went 5,434 -> 6,125 in-text tokens over two sessions while a deletion
+    # pass was deferred four times. Each deferral came with a test ("if the
+    # next call adds no Conversation Flow rules, the pass has no reason to
+    # wait"), the test was met twice, and the section grew both times. A
+    # deferral that never fires is not a deferral.
+    #
+    # A ceiling is the only thing that makes the trade explicit: adding a rule
+    # now costs evicting one, at the moment of adding, rather than costing a
+    # cleanup nobody schedules. The number is deliberately close to where the
+    # prompt sits after the pass — a ceiling with 1,500 tokens of headroom is
+    # the same thing as no ceiling.
+    #
+    # HISTORY: 5,828 static tokens before the 2026-08-20 pass (the high-water
+    # mark, 37% above the prompt it replaced for bloat); 4,733 after. Every
+    # call that ever RESOLVED ran at <=4,641 in-text tokens. That is
+    # confounded — the twelve-day regression changed several things at once —
+    # so it is not evidence that a short prompt resolves calls, only that no
+    # long one ever has. Raising this ceiling is allowed; doing it silently,
+    # as a side effect of adding a rule, is what it exists to stop.
+    _PROMPT_TOKEN_CEILING = 4_800
+    _PROMPT_CHAR_CEILING  = 20_400      # calibrated at the same moment
+    try:
+        import tiktoken as _tk
+        _enc = _tk.get_encoding("o200k_base")
+    except Exception:
+        _enc = None
+    for name, t in TEMPLATES.items():
+        # The char ceiling runs ALWAYS, not only when tiktoken is missing. A
+        # guard that reports nothing when its input is unavailable is the
+        # false-negative shape this suite has been bitten by before: it would
+        # pass loudly in CI while measuring nothing at all.
+        check(len(t.instructions) <= _PROMPT_CHAR_CEILING,
+              f"{name}: prompt within the character ceiling",
+              f"{len(t.instructions):,} / {_PROMPT_CHAR_CEILING:,} chars")
+        if _enc is None:
+            check(False, f"{name}: token ceiling NOT measured — tiktoken "
+                         f"unavailable, only the char proxy ran")
+            continue
+        _n = len(_enc.encode(t.instructions))
+        check(_n <= _PROMPT_TOKEN_CEILING,
+              f"{name}: prompt within the token ceiling — to add a rule, "
+              f"evict one",
+              f"{_n:,} / {_PROMPT_TOKEN_CEILING:,} tok")
 
     probe = Doctor(doctor_name="Dr. Jane Okafor",
                    hospital_name="Northside Medical Group")
@@ -3097,6 +3873,52 @@ async def main():
         check(bool(rw.hospital_mismatch(_sess(_R, _turn))) == _want,
               f"wrong-organisation check ({_why}): {_turn[:38]!r}")
 
+    # ── ...and later evidence has to be able to correct it ───────────────────
+    # This returned on the FIRST differing claim, so a mismatch raised at
+    # pickup could never be resolved however the rest of the call went.
+    #
+    # call-20260820-1440: caller answered "Hi, this is North Medical Group",
+    # record said "Northside Medical Group", the save was blocked with
+    # "NEED: which place this call actually reached". The agent asked. The
+    # caller answered "This is Northside Medical Group." Nothing consumed it —
+    # the agent escalated a second later with a reason the caller had just
+    # contradicted, and a genuine branch (Mission Bay Clinic, 1825 Fourth
+    # Street, grounding clean) was thrown away.
+    #
+    # What this deliberately does NOT do is decide whether "North" and
+    # "Northside" are the same name. That is unanswerable from a transcript and
+    # normalising them would be inventing data. It answers only the question
+    # the rejection asked.
+    #
+    # And it is NOT "the last utterance wins" — which would be its own
+    # bad-data bug. The negatives below are the point of the change.
+    for _want, _why, _turns in [
+        (False, "confirmed as the recorded org after the mismatch",
+         ("Hi, this is North Medical Group, this is Varun.",
+          "It's the Mission Bay Clinic, 1825 Fourth Street.",
+          "This is Northside Medical Group.")),
+        (True,  "never corrected",
+         ("Thank you for calling the Methodist Medical Center.",
+          "She's at the downtown site.")),
+        # NAMING the record is not IDENTIFYING as it. Both of these contain
+        # "Northside" and neither may clear a real mismatch.
+        (True,  "a denial that names the record does not clear it",
+         ("Thank you for calling the Methodist Medical Center.",
+          "We're not Northside Medical Group.")),
+        (True,  "a passing mention does not clear it",
+         ("Thank you for calling the Methodist Medical Center.",
+          "Dr. Okafor isn't at Northside any more.")),
+        # Right place first, different org later, is a TRANSFER, not a
+        # correction — so the confirmation must come after the claim to count.
+        (True,  "confirmation BEFORE a differing claim does not clear it",
+         ("You've reached Northside Medical Group.",
+          "This is Methodist Medical Center.")),
+        (False, "no organisation named at all is not a mismatch",
+         ("Yes, speaking.", "She's at the Mission Bay clinic.")),
+    ]:
+        check(bool(rw.hospital_mismatch(_sess(_R, *_turns))) == _want,
+              f"organisation state ({_why})")
+
     # Verbatim repeats. The agent said "Of course, take your time." twice in one
     # call, and the cause was not the model ignoring the no-repetition rule — the
     # prompt ordered that exact string: 'say ONLY "Of course, take your time."'.
@@ -3423,6 +4245,67 @@ async def main():
     _ok, _n = await _play_policy(3.0, allow_when_done=True)
     check(_ok is True and _n == 1,
           "the goodbye is still allowed while audio plays out")
+
+    # ── ...and the gate above never fired on the case that mattered ──────────
+    # Found 2026-08-20. _create_response is the one place a reply is created BY
+    # US, and the ordinary turn is not created by us — OpenAI's server VAD
+    # makes it and the first this process sees is audio arriving. So the
+    # playback gate has been correct, tested, and unreachable for the common
+    # path since the day it shipped.
+    #
+    # call-20260820-1230, from the flush log: block 5 sent at 71.90s ran to
+    # 76.95s; block 6 began sending at 76.30s. Twilio queues rather than mixes,
+    # so the callee heard 7.35 unbroken seconds and spent it saying "Hello?",
+    # "campus", "Hello," into a line that never paused. Blocks 7/8 repeated it
+    # 0.45s apart.
+    #
+    # The fix cannot SLEEP: this runs in the OpenAI event pump, which must keep
+    # reading for barge-in, response.done and tool calls. It queues silence to
+    # Twilio instead, which lands the gap in the caller's ear and blocks
+    # nothing here.
+    _sil = base64.b64decode(rw._TWILIO_SILENCE_FRAME)
+    check(len(_sil) == 160 and set(_sil) == {0xFF},
+          "the breath frame is 20ms of mu-law silence", f"{len(_sil)} bytes")
+    class _BreathWS:
+        def __init__(self): self.sent = []
+        async def send_text(self, s): self.sent.append(json.loads(s))
+    _bs = rw.RealtimeSession("CA0000000000000000000000breath",
+                             Doctor(doctor_name="Dr. Q"))
+    _bs.stream_sid = "MZtest"
+    _bw = _BreathWS()
+    await rw._send_breath(_bw, _bs, rw._STACK_BREATH_S)
+    check(len(_bw.sent) == int(rw._STACK_BREATH_S * 1000 / 20),
+          "the breath is queued as 20ms media frames",
+          f"{len(_bw.sent)} frames for {rw._STACK_BREATH_S}s")
+    check(all(m["event"] == "media" and m["streamSid"] == "MZtest"
+              for m in _bw.sent),
+          "and addressed to the live stream")
+    # No stream, no frames — never send media to a stream that is not up.
+    _bs2 = rw.RealtimeSession("CA000000000000000000000breth2",
+                              Doctor(doctor_name="Dr. Q"))
+    _bw2 = _BreathWS()
+    await rw._send_breath(_bw2, _bs2, rw._STACK_BREATH_S)
+    check(not _bw2.sent, "no breath before the stream exists")
+
+    # The gap must be long enough to read as a turn ending. OpenAI's VAD needs
+    # realtime_silence_ms to call the CALLER done; the callee gets at least the
+    # same to recognise their opening.
+    check(rw._STACK_BREATH_S >= settings.realtime_silence_ms / 1000.0,
+          "the gap is at least as long as the VAD's own end-of-turn window",
+          f"{rw._STACK_BREATH_S}s vs {settings.realtime_silence_ms/1000.0}s")
+
+    # And the wiring, which is the half that has been wrong before. The clock
+    # for the new audio must come from the QUEUE's end plus the gap, not from
+    # time.monotonic() — using "now" under-reports the queue by exactly the
+    # overlap that caused the bug, and _playback_ends_at is derived from it.
+    _src_stack = _plb.Path(rw.__file__).read_text(encoding="utf-8")
+    _hook = _src_stack[_src_stack.find("if _first_delta_sent_at is None:"):][:3600]
+    check("_send_breath" in _hook and "sess._playback_ends_at" in _hook,
+          "the first-delta site consults the queue and inserts the gap")
+    check("_first_delta_sent_at = (sess._playback_ends_at" in _hook,
+          "and dates the new audio from the queue's end, not from now")
+    check("not sess.done" in _hook,
+          "closing is exempt, as it is in _create_response")
 
     # The matrix above tests the HELPER. It does not test the WIRING, and that
     # is the half that matters: setting the closing site's overrides to False

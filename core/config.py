@@ -186,7 +186,28 @@ class Settings(BaseSettings):
 
     # Cap on a single spoken response. The agent is meant to say one or two short
     # sentences per turn; without a cap a runaway response is billed as audio out.
-    realtime_max_response_tokens: int = 400
+    #
+    # RAISED 400 -> 1500 on 2026-08-20. The cap counts AUDIO tokens as well as
+    # text, which is easy to forget: audio runs ~20 tok/s of speech, so 400 is
+    # not "a long paragraph", it is roughly one ordinary spoken turn plus its
+    # transcript. On call-20260820-1230 it truncated a live response mid-turn:
+    #
+    #   [12:31:28] AGENT: I'm calling on behalf of Definitive Healthcare, and
+    #                     yes, this is an automated call. ...
+    #   [Realtime] ⚠️  response incomplete: max_output_tokens
+    #
+    # That was the answer to "are you a real person or is this a recording?" —
+    # the disclosure the prompt calls the one line you do not cross, and the
+    # one several US states regulate. A cap that can cut it off is the most
+    # expensive setting in this file.
+    #
+    # 1500 is picked against the longest LEGITIMATE turn, not against the
+    # average. That is the voicemail message: organisation, doctor, purpose,
+    # and an email address read out character by character — call it 25s of
+    # speech, ~500 audio tokens plus transcript, so ~650. 1500 clears it with
+    # margin while still bounding a runaway to roughly a minute of audio, which
+    # the barge-in and one-spoken-item guards would catch long before.
+    realtime_max_response_tokens: int = 1500
 
     # Transcription model for the written transcript. NOT in the conversational
     # path — the agent hears the caller's audio directly — but it IS what the

@@ -792,6 +792,24 @@ async def media_stream(ws: WebSocket, call_sid: str):
     # the media stream", and that is equally true whichever worker handles it.
     _media_opened.add(call_sid)
 
+    # How long Twilio + the tunnel took to open this socket after /answer
+    # returned the TwiML naming it.
+    #
+    # On call-20260820-1154 the callee heard nothing for 6.73s, of which 5.83s
+    # was "Twilio setup" — a single black-box number covering TwiML fetch,
+    # tunnel routing, TLS, and Twilio's own stream handshake. That is the
+    # largest term in the dead air and the least understood, and no baseline
+    # exists for it: pickup_to_greeting_s was only added the commit before.
+    #
+    # Splitting it here costs one subtraction and makes the next call answer
+    # the question that cannot be answered now — is the tunnel slow, or is
+    # Twilio? Deliberately NOT attributed in the wording: this measures the
+    # span, and which half owns it is what the number is for.
+    _ans = _answered_at.get(call_sid)
+    if _ans is not None:
+        print(f"[Twilio] Media socket open {time.monotonic() - _ans:.2f}s after "
+              f"/answer returned (Twilio TwiML fetch + tunnel + TLS)", flush=True)
+
     # ── Realtime: speech-to-speech only, no fallback ──────────────────────────
     # The old code fell back to the classic VAD→STT→LLM→TTS pipeline on any
     # realtime error. That silently changed which system was on the phone
