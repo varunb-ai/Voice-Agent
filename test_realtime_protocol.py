@@ -3957,6 +3957,49 @@ async def main():
         check(rw._is_location_ask(text) == expected,
               f"soft-ask detector: {expected!s:5} for {text[:44]!r}")
 
+    # ── Thanking someone FOR a location is not asking for one ────────────────
+    # _NOT_AN_ASK stripped the acknowledgement WORD and left the noun it
+    # governs, so "Thanks for the location." became " for the location." and
+    # counted as an ask. call-20260820-1915: seven location_asks against a
+    # limit of four, and the verbatim-ask nudge telling the agent to "stop
+    # stapling it on" about a sentence that asks nothing. Harmless that call —
+    # holds had reset the budget — but an inflated count ends a call early on
+    # one without holds.
+    #
+    # The distinction is grammatical: the noun is the acknowledgement's OBJECT,
+    # not part of a fresh request.
+    for _t, _want in [
+        # the live bug and its family
+        ("Thanks for the location.", False),
+        ("Thanks for that location.", False),
+        ("Thank you for the address.", False),
+        ("Appreciate the branch info.", False),
+        ("Thanks for the branch name — take care.", False),
+        ("Thanks for that Mission Bay address.", False),
+        # AN ACKNOWLEDGEMENT THAT GOES ON TO ASK IS STILL AN ASK. This is what
+        # the residue test exists for and the fix must not eat it.
+        ("Thanks — I still need the branch name.", True),
+        ("Got it, I'm just trying to find the practice location.", True),
+        ("Thanks for the address. I still need the branch name.", True),
+        # ...and it must not jump a clause boundary. Without the negative
+        # lookahead the two-word gap swallowed "and which" and the question
+        # after it — a missed ask lets the agent pester someone, which is the
+        # expensive direction.
+        ("Great — and which campus is that, do you know.", True),
+        ("Thanks — so which branch is that.", True),
+        ("Perfect, and what location does she use.", True),
+        ("Got it. But which site is she at.", True),
+        ("Thanks for that — which branch though.", True),
+        # A REQUEST WHOSE VERB SITS FURTHER FROM THE ACKNOWLEDGEMENT. The
+        # two-word gap is the ceiling for an object; widen it and this gets
+        # swallowed whole ("can you confirm the branch" is four words), and
+        # a swallowed ask is an ask the budget never counts.
+        ("Thanks — can you confirm the branch.", True),
+        ("Got it. Do you happen to have the branch name.", True),
+    ]:
+        check(rw._is_location_ask(_t) == _want,
+              f"ack-takes-object: {_want!s:5} for {_t[:44]!r}")
+
     # Escalation reasons that assert a fact about the doctor must be grounded.
     # A live call recorded escalate(reason="doctor deceased") after the caller
     # said only "he's not working right now".

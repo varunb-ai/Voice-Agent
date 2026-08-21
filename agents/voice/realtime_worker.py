@@ -467,6 +467,32 @@ _NOT_AN_ASK = re.compile(
     r"take care|goodbye|bye now|i'?ll (note|record|pass)|i have that|"
     r"that'?s all|no (problem|worries))\b", re.I)
 
+# An acknowledgement together with the location noun it takes as its OBJECT.
+#
+# _NOT_AN_ASK strips the acknowledgement WORD and leaves the noun it governs,
+# so "Thanks for the location." became " for the location." — still a location
+# noun, still counted as an ask. Observed on call-20260820-1915: seven
+# location_asks against a limit of four, and the verbatim-ask nudge firing to
+# tell the agent to "stop stapling it on" about a sentence that asks nothing.
+# It cost nothing that call — holds had reset the budget — but an inflated
+# count ends a call early on a call without holds.
+#
+# The distinguishing feature is grammatical, not vocabulary: in the failing
+# family the noun is the acknowledgement's object, not part of a fresh request.
+# So consume the phrase whole, before the residue test runs.
+#
+# THE NEGATIVE LOOKAHEAD IS LOAD-BEARING. Without it the two-word gap jumps a
+# clause boundary — "Great — and which campus is that" had "and which" eaten
+# and the real question with it, which is the expensive direction: a missed ask
+# lets the agent pester someone. Words that open a new clause end the object.
+_ACK_TAKES_VALUE = re.compile(
+    r"\b(thanks|thank you|appreciate|got it|perfect|great)\b"
+    r"[,\s—\-]*"
+    r"(?:for|on|about)?[,\s]*"
+    r"(?:the|that|this|your|those)?\s*"
+    r"(?:(?!(?:and|but|so|which|what|where|who|if|when|still|need)\b)\w+\s+){0,2}"
+    r"(?:branch|location|office|campus|site|address)\b", re.I)
+
 # Reading back a value the caller already gave.
 _CONFIRMS_VALUE = re.compile(
     r"\b(i have that as|i'?ve got that|i'?ll note|noted as|recorded as|"
@@ -552,8 +578,12 @@ def _is_location_ask(text: str) -> bool:
     if "?" in text:
         return True
     # An acknowledgement that goes on to ask for something is still an ask, so
-    # only a turn that is ENTIRELY acknowledgement is exempt.
-    stripped = _NOT_AN_ASK.sub("", text)
+    # only a turn that is ENTIRELY acknowledgement is exempt. Take the
+    # acknowledgement's own object with it first — see _ACK_TAKES_VALUE — or
+    # "Thanks for the location." leaves a location noun behind and reads as a
+    # request for the thing it is thanking them for.
+    stripped = _ACK_TAKES_VALUE.sub("", text)
+    stripped = _NOT_AN_ASK.sub("", stripped)
     return bool(_LOCATION_NOUN.search(stripped))
 
 
