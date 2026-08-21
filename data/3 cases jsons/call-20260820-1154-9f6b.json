@@ -1,0 +1,166 @@
+{
+  "call_id": "call-20260820-1154-9f6b",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": "Mission Bay Clinic, 1825 Fourth Street",
+  "resolved": true,
+  "doctor_record": {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": null,
+    "branch": "Mission Bay Clinic, 1825 Fourth Street",
+    "city": null,
+    "source": "voice",
+    "status": "partially_verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "specialization"
+    ],
+    "enriched_at": "2026-08-20T06:25:36.390816+00:00",
+    "enriched_by": "call-20260820-1154-9f6b"
+  },
+  "duration_seconds": 95,
+  "cost_usd": 0.14967,
+  "template": "forage_data_collection",
+  "grounding": "verified against caller transcript",
+  "suppressed_echoes": null,
+  "dropped_second_items": [
+    "Sure, no rush."
+  ],
+  "response_failures": null,
+  "pickup_to_greeting_s": 6.73,
+  "reply_latency": {
+    "turns": 6,
+    "median": 1.73,
+    "worst": 2.31,
+    "vad_hold_s": 0.7
+  },
+  "conversation": {
+    "location_asks": 4,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 26,
+    "agent_turns": 7,
+    "caller_turns": 6,
+    "caller_questions": 3,
+    "question_turns": 2,
+    "stapled_questions": 1,
+    "staple_rate": 0.33,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "limit": 4,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 6,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 700,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 7,
+    "input_audio": 3488,
+    "input_audio_cached": 2688,
+    "output_audio": 663,
+    "input_text": 41255,
+    "input_text_cached": 35264,
+    "output_text": 682,
+    "cache_hit_rate": 0.8482
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Definitive Healthcare about a doctor listing, do you know which branch Dr. Okafor works out of?",
+      "timestamp": "11:54:04",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "I'm Varun, sorry, who's calling again?",
+      "timestamp": "11:54:21",
+      "audio_rms": 0.0018946148920804262
+    },
+    {
+      "role": "agent",
+      "text": "No worries \u2014 I\u2019m David, calling on behalf of Definitive Healthcare.",
+      "timestamp": "11:54:23",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay, what do you want?",
+      "timestamp": "11:54:31",
+      "audio_rms": 0.000244140625
+    },
+    {
+      "role": "agent",
+      "text": "I\u2019m just trying to find which branch Dr. Okafor works at, that\u2019s all I need.",
+      "timestamp": "11:54:33",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay, are you a patient? Is it regarding the patient or something urgent?",
+      "timestamp": "11:54:47",
+      "audio_rms": 0.000244140625
+    },
+    {
+      "role": "agent",
+      "text": "No, nothing urgent \u2014 it\u2019s just a listing check. I heard Northside, but which branch is that, like the actual branch name or the street address?",
+      "timestamp": "11:54:49",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Sorry, not that. Give a minute. I'll check and confirm.",
+      "timestamp": "11:55:02",
+      "audio_rms": 0.000244140625
+    },
+    {
+      "role": "agent",
+      "text": "Sure, no rush.",
+      "timestamp": "11:55:03",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Hi, I need to schedule an appointment for my annual check-up.",
+      "timestamp": "11:55:09",
+      "audio_rms": 0.1229630634188652
+    },
+    {
+      "role": "agent",
+      "text": "Whenever you\u2019re ready.",
+      "timestamp": "11:55:10",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay, right, it's the Mission Bay Clinic, 1825 4th Street.",
+      "timestamp": "11:55:29",
+      "audio_rms": 0.03976931422948837
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 thanks for that branch name and address, I\u2019m all set.",
+      "timestamp": "11:55:30",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Mission Bay Clinic, 1825 Fourth Street.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260820-1154-9f6b.wav",
+  "recorded_at": "2026-08-20T11:54:01.287927"
+}
