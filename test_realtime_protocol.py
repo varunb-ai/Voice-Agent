@@ -4115,6 +4115,85 @@ async def main():
               Doctor(doctor_name="Dr. X", hospital_name="Y"))._discard_blocked is False,
           "the discarded-answer block starts unfired")
 
+    # ── THE TRANSCRIPT DECIDES, NOT THE MODEL'S WORDING ──────────────────────
+    # _candidate_location used to run only when the reason matched
+    # _NO_LOCATION_CLAIMS — a phrase whitelist checked against text the model
+    # composes freely. call-20260821-1152: the caller said "She works at
+    # Mission Bay clinic in San Francisco, but I'm not sure which location that
+    # is", the model escalated with "caller could not provide...", and the list
+    # holds "did not provide" but not "could not provide". One word, guard
+    # silent, and a branch that grounds cleanly — it saved on the call eight
+    # minutes earlier — was thrown away.
+    #
+    # POLARITY IS THE FIX. An inclusion list fails toward a lost answer; an
+    # exemption list fails toward one blocked turn against a one-shot flag.
+    def _dsess(*turns, rms=0.15):
+        return double(
+            doctor=double(hospital_name="Northside Medical Group",
+                          doctor_name="Dr. Jane Okafor"),
+            org_name="Definitive Healthcare", agent_name="David",
+            turns=[double(role="caller", text=t, audio_rms=rms) for t in turns])
+
+    for _want, _label, _reason, _turns in [
+        # a usable location was supplied -> the escalation must be BLOCKED
+        (True,  "valid branch", "caller does not know",
+         ("She works at the Mission Bay clinic.",)),
+        (True,  "branch + city", "caller does not know",
+         ("She works at Mission Bay clinic in San Francisco.",)),
+        (True,  "THE LIVE CALL: location + hedge, still usable",
+         "caller could not provide a specific branch name or address for "
+         "Mission Bay Clinic in San Francisco",
+         ("Hi, I'm Varun. just a moment, let me clarify that.",
+          "She works at Mission Bay clinic in San Francisco, but I'm not sure "
+          "which location that is.")),
+        (True,  "branch given, agent claims none",
+         "caller never provided a location", ("It's the Northgate campus.",)),
+        # WORDING VARIANTS over the same supplied location. Every one of these
+        # is a phrasing the model can reach for and only two were on the list.
+        (True,  "wording: could not provide", "could not provide a branch",
+         ("She works at the Mission Bay clinic.",)),
+        (True,  "wording: did not provide", "caller did not provide it",
+         ("She works at the Mission Bay clinic.",)),
+        (True,  "wording: unable to obtain", "unable to obtain the branch",
+         ("She works at the Mission Bay clinic.",)),
+        (True,  "wording: declined to specify", "declined to specify the site",
+         ("She works at the Mission Bay clinic.",)),
+        (True,  "wording: no usable detail", "no usable detail was given",
+         ("She works at the Mission Bay clinic.",)),
+
+        # LEGITIMATE escalations — these must stay ALLOWED.
+        (False, "caller refuses", "caller refused, policy",
+         ("We don't give that out, sorry.",)),
+        (False, "caller does not know", "caller does not know",
+         ("I honestly don't know where she works.",)),
+        (False, "no location ever named",
+         "caller engaged but never provided a location",
+         ("Yes, speaking.", "Okay.", "Sure, no problem.")),
+        (False, "doctor left", "doctor no longer works here",
+         ("She left the practice last year.",)),
+        (False, "only our OWN record echoed back", "caller does not know",
+         ("This is Northside Medical Group, how can I help?",)),
+        (False, "location only as a QUESTION", "caller does not know",
+         ("Is she in San Francisco? I really couldn't say.",)),
+        # WRONG ORGANISATION. A place IS named — it is the wrong organisation
+        # itself — so a transcript-only rule would block this and strand the
+        # agent. hospital_mismatch exempts it structurally.
+        (False, "wrong organisation named", "reached the wrong organisation",
+         ("Thank you for calling the Methodist Medical Center.",)),
+        # CALL-SHAPE EXITS with a location present. Found in the existing suite
+        # rather than in my own matrix: a voicemail greeting names the practice
+        # and a wrong number names the bakery, so ignoring the reason entirely
+        # would strand the agent on exactly the calls it must be able to end.
+        (False, "voicemail, location present", "voicemail",
+         ("You've reached the Northgate campus, leave a message.",)),
+        (False, "wrong number, location present", "wrong number",
+         ("This is the bakery on Mission Bay campus, love.",)),
+        (False, "no response, location present", "no response",
+         ("She's at the Northgate campus.",)),
+    ]:
+        check(bool(rw._discarded_location(_reason, _dsess(*_turns))) == _want,
+              f"discard gate: {'block' if _want else 'allow':5} — {_label}")
+
     print("\n" + "=" * 66)
     print("  OpenAI handshake — a transient stall must not cost the call")
     print("=" * 66)

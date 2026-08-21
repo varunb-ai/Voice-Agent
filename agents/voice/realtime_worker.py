@@ -1288,12 +1288,44 @@ _NO_LOCATION_CLAIMS = (
 )
 
 
+# Reasons that describe the SHAPE of the call rather than what the caller said.
+# A place name in the transcript says nothing about whether they are true — a
+# voicemail greeting names the practice, a wrong number names the bakery — and
+# blocking these strands the agent on a call it must be able to end.
+#
+# NOTE THE POLARITY, because it is the whole point. _NO_LOCATION_CLAIMS was an
+# INCLUSION list: check only these wordings, and a wording not on it means a
+# discarded answer and a lost call. This is an EXEMPTION list: a wording not on
+# it means we CHECK, and the cost of a miss is one blocked turn against a
+# one-shot flag. Same shape of list, opposite direction of failure.
+_CALL_SHAPE_EXITS = (
+    "wrong number", "voicemail", "declined to share", "no response",
+    "non-medical", "not a medical",
+)
+
+
 def _discarded_location(reason: str, sess: "RealtimeSession") -> str:
     """Block an escalation claiming nothing was given when something was.
 
     Returns a rejection description, or "" to allow the escalation.
+
+    THE TRANSCRIPT DECIDES, NOT THE MODEL'S WORDING. This used to run
+    _candidate_location only when the reason matched _NO_LOCATION_CLAIMS — a
+    phrase whitelist checked against text the model composes freely. On
+    call-20260821-1152 the caller said "She works at Mission Bay clinic in San
+    Francisco, but I'm not sure which location that is", the model escalated
+    with "caller could not provide...", and the list holds "did not provide"
+    but not "could not provide". One word, guard silent, and a branch that
+    grounds cleanly — it saved on the previous call — was thrown away.
+    Enumerating the model's phrasings cannot work; _is_location_ask was
+    inverted for the same reason and says so in its own docstring.
     """
-    if not any(m in reason.lower() for m in _NO_LOCATION_CLAIMS):
+    if any(m in reason.lower() for m in _CALL_SHAPE_EXITS):
+        return ""
+    # Reaching the WRONG ORGANISATION is a legitimate exit even when a place
+    # was named, and the place named is usually the wrong organisation itself.
+    # Detected structurally rather than by another phrase list.
+    if hospital_mismatch(sess):
         return ""
     return _candidate_location(sess)
 
