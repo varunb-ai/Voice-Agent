@@ -2,7 +2,44 @@
   {
     "doctor_name": "Dr. Jane Okafor",
     "hospital_name": "Northside Medical Group",
-    "specialization": null,
+    "specialization": "Cardiology",
+    "branch": "Riverside campus, 7th Street",
+    "city": null,
+    "source": "voice",
+    "status": "verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-25T08:56:54.754855+00:00",
+    "enriched_by": "call-20260825-1425-5810",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yeah, that's right. Dr. Okafor is a renowned cardiologist.",
+        "detail": "Cardiology"
+      },
+      "branch": {
+        "value": "Riverside campus, 7th Street"
+      },
+      "accepting": {
+        "value": "yes",
+        "heard": "Yeah she's"
+      },
+      "scheduling": {
+        "value": "yes",
+        "heard": "Yes, you can book online or call us."
+      },
+      "referral": {
+        "value": "depends",
+        "heard": "Actually, only if you have insurance with a particular company, then only it required.",
+        "depends_on": "insurance with a particular company"
+      }
+    }
+  },
+  {
+    "doctor_name": "Dr. Priya Raman",
+    "hospital_name": "Summit Medical Center",
+    "specialization": "Neurosurgery",
     "branch": null,
     "city": null,
     "source": "website",
@@ -10,10 +47,62 @@
     "status_before": "discovered",
     "confidence": 0,
     "missing_for_complete": [
-      "specialization",
       "branch"
     ],
     "enriched_at": null,
-    "enriched_by": "call-20260821-1152-968c"
+    "enriched_by": "call-20260825-1429-88cb",
+    "collected_fields": {
+      "identity": {
+        "value": "not_here",
+        "heard": "Yeah, yeah, we have a Dr. Raman, but she's a dermatologist, not a neuro.",
+        "detail": "They have a Dr. Raman but she's a dermatologist, not"
+      }
+    }
+  },
+  {
+    "doctor_name": "Dr. Marcus Bell",
+    "hospital_name": "Riverside Health",
+    "specialization": "Dermatology",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260825-1428-31da",
+    "collected_fields": {
+      "identity": {
+        "value": "not_here",
+        "heard": "No, we don't have a Dr. Bell here. This is Riverside Health, but he's not one of ours.",
+        "detail": "Dr. Bell, \u2014 they he's not one"
+      }
+    }
+  },
+  {
+    "doctor_name": "Dr. Alan Reyes",
+    "hospital_name": "Lakeview Medical",
+    "specialization": "Oncology",
+    "branch": "Eastside Clinic",
+    "city": null,
+    "source": "voice",
+    "status": "partially_verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-25T09:09:18.927143+00:00",
+    "enriched_by": "call-20260825-1437-8f1b",
+    "collected_fields": {
+      "branch": {
+        "value": "Eastside Clinic"
+      },
+      "accepting": {
+        "value": "no",
+        "heard": "No, he is not taking new patients right now."
+      }
+    }
   }
 ]

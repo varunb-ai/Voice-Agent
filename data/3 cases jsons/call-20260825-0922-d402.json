@@ -1,0 +1,149 @@
+{
+  "call_id": "call-20260825-0922-d402",
+  "doctor_name": "Dr. Priya Raman",
+  "hospital_name": "Summit Medical Center",
+  "branch": "Mid-town office on 7th Street",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "branch",
+    "accepting"
+  ],
+  "missing": [],
+  "fields": {
+    "branch": {
+      "value": "Mid-town office on 7th Street"
+    },
+    "accepting": {
+      "value": "waitlist",
+      "heard": "No, no, we are full right now, but I can put you on the list where you will be the number 21."
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Priya Raman",
+    "hospital_name": "Summit Medical Center",
+    "specialization": null,
+    "branch": "Mid-town office on 7th Street",
+    "city": null,
+    "source": "voice",
+    "status": "partially_verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "specialization"
+    ],
+    "enriched_at": "2026-08-25T03:53:37.155359+00:00",
+    "enriched_by": "call-20260825-0922-d402",
+    "collected_fields": {
+      "branch": {
+        "value": "Mid-town office on 7th Street"
+      },
+      "accepting": {
+        "value": "waitlist",
+        "heard": "No, no, we are full right now, but I can put you on the list where you will be the number 21."
+      }
+    }
+  },
+  "duration_seconds": 38,
+  "cost_usd": 0.086188,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript",
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.62,
+  "reply_latency": {
+    "turns": 2,
+    "median": 2.18,
+    "worst": 2.39,
+    "detector_lag_s": 0.45
+  },
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 13,
+    "agent_turns": 3,
+    "caller_turns": 2,
+    "caller_questions": 0,
+    "question_turns": 2,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 2,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 5,
+    "input_audio": 1202,
+    "input_audio_cached": 1024,
+    "output_audio": 324,
+    "input_text": 37501,
+    "input_text_cached": 29952,
+    "output_text": 280,
+    "cache_hit_rate": 0.8004
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to check a provider listing \u2014 I'm not calling to book anything. Do you know which branch Dr. Raman works out of?",
+      "timestamp": "09:23:01",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, hi David, that's the midtown office on 7th Street.",
+      "timestamp": "09:23:15",
+      "audio_rms": 0.09170903265476227
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 thanks for that. Is Dr. Raman currently taking new patients?",
+      "timestamp": "09:23:18",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, no, we are full right now, but I can put you on the list where you will be the number 21.",
+      "timestamp": "09:23:29",
+      "audio_rms": 0.10034286975860596
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for the location and the waitlist info. Take care.",
+      "timestamp": "09:23:31",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Summit Medical Center to verify Dr. Priya Raman's branch. Branch confirmed: Mid-town office on 7th Street.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260825-0922-d402.wav",
+  "recorded_at": "2026-08-25T09:22:58.218463"
+}

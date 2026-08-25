@@ -1,0 +1,161 @@
+{
+  "call_id": "call-20260821-1659-1bc1",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": null,
+  "resolved": false,
+  "doctor_record": {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": null,
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "specialization",
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260821-1659-1bc1"
+  },
+  "duration_seconds": 58,
+  "cost_usd": 0.189244,
+  "template": "forage_data_collection",
+  "grounding": "verified against caller transcript",
+  "suppressed_echoes": [
+    {
+      "kind": "verbatim hint run",
+      "raw": "Location words: campus, clinic, medical center, satellite office, north, south, east, west, downtown, midtown, uptown, suite, boulevard, avenue, parkway, drive, street.",
+      "kept": ""
+    }
+  ],
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": [
+    "No worries \u2014 which location or site does Dr. Okafor see patients at?",
+    "Sorry, I didn\u2019t catch that name \u2014 could you say it again, and spell it if it\u2019s a name?"
+  ],
+  "owed_substance_recovered": 1,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.64,
+  "reply_latency": {
+    "turns": 6,
+    "median": 1.71,
+    "worst": 2.46,
+    "vad_hold_s": 0.7
+  },
+  "conversation": {
+    "location_asks": 3,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 17,
+    "agent_turns": 5,
+    "caller_turns": 5,
+    "caller_questions": 1,
+    "question_turns": 4,
+    "stapled_questions": 0,
+    "staple_rate": 0.0,
+    "back_to_back_asks": 2,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "limit": 4,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 6,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 700,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 9,
+    "input_audio": 3674,
+    "input_audio_cached": 2432,
+    "output_audio": 717,
+    "input_text": 49919,
+    "input_text_cached": 36992,
+    "output_text": 841,
+    "cache_hit_rate": 0.7356
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Definitive Healthcare about a doctor listing, do you know which branch Dr. Okafor works out of?",
+      "timestamp": "16:59:10",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Hello David, yes, I know.",
+      "timestamp": "16:59:21",
+      "audio_rms": 0.12938278913497925
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 could you tell me the name of the branch where Dr. Okafor works?",
+      "timestamp": "16:59:27",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "He is working at the main branch in Los Angeles.",
+      "timestamp": "16:59:38",
+      "audio_rms": 0.14333200454711914
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 could you share the actual branch name or the street address in Los Angeles?",
+      "timestamp": "16:59:40",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "The police station",
+      "timestamp": "16:59:43",
+      "audio_rms": 0.06854548305273056
+    },
+    {
+      "role": "agent",
+      "text": "Sorry, I didn\u2019t catch that.",
+      "timestamp": "16:59:45",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "suite",
+      "timestamp": "16:59:46",
+      "audio_rms": 0.015467556193470955
+    },
+    {
+      "role": "agent",
+      "text": "Could you say it again, and spell it if it's a name?",
+      "timestamp": "16:59:48",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "\u0c2a\u0c3f\u0c32\u0c4d\u0c32\u0c3f\u0c15\u0c21\u0c41\u0c24\u0c41\u0c28\u0c4d\u0c28\u0c41\u0c02\u0c26\u0c41 \u0c1a\u0c42\u0c36\u0c3e\u0c35\u0c3e? suite.",
+      "timestamp": "16:59:55",
+      "audio_rms": 0.0910889208316803
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260821-1659-1bc1.wav",
+  "recorded_at": "2026-08-21T16:59:07.185763"
+}

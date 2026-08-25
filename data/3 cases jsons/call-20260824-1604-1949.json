@@ -1,0 +1,131 @@
+{
+  "call_id": "call-20260824-1604-1949",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": "Riverside Campus",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "branch",
+    "accepting"
+  ],
+  "missing": [],
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": null,
+    "branch": "Riverside Campus",
+    "city": null,
+    "source": "voice",
+    "status": "partially_verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "specialization"
+    ],
+    "enriched_at": "2026-08-24T10:35:22.652672+00:00",
+    "enriched_by": "call-20260824-1604-1949"
+  },
+  "duration_seconds": 32,
+  "cost_usd": 0.075612,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript",
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.91,
+  "reply_latency": {
+    "turns": 2,
+    "median": 1.73,
+    "worst": 2.19,
+    "detector_lag_s": 0.43
+  },
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 14,
+    "agent_turns": 3,
+    "caller_turns": 2,
+    "caller_questions": 0,
+    "question_turns": 2,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 1,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 2,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 4,
+    "input_audio": 750,
+    "input_audio_cached": 640,
+    "output_audio": 347,
+    "input_text": 27283,
+    "input_text_cached": 20480,
+    "output_text": 226,
+    "cache_hit_rate": 0.7534
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Definitive Healthcare to check a provider listing \u2014 I'm not calling to book anything. Do you know which branch Dr. Okafor works out of?",
+      "timestamp": "16:04:53",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, she's at the Riverside campus.",
+      "timestamp": "16:05:06",
+      "audio_rms": 0.13397088646888733
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 is Dr. Okafor currently taking new patients?",
+      "timestamp": "16:05:08",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes she is.",
+      "timestamp": "16:05:15",
+      "audio_rms": 0.14626330137252808
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that \u2014 let me quickly pin down what that means for scheduling.",
+      "timestamp": "16:05:17",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Riverside Campus.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260824-1604-1949.wav",
+  "recorded_at": "2026-08-24T16:04:49.740507"
+}

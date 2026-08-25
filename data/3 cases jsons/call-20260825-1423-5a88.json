@@ -1,0 +1,120 @@
+{
+  "call_id": "call-20260825-1423-5a88",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": null,
+  "resolved": false,
+  "outcome": "none",
+  "collected": [],
+  "missing": [
+    "identity"
+  ],
+  "fields": {},
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": "Cardiology",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260825-1423-5a88",
+    "collected_fields": {}
+  },
+  "duration_seconds": 27,
+  "cost_usd": 0.064551,
+  "template": "provider_verification",
+  "grounding": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.61,
+  "reply_latency": {
+    "turns": 1,
+    "median": 1.16,
+    "worst": 1.16,
+    "detector_lag_s": 0.41
+  },
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 12,
+    "agent_turns": 2,
+    "caller_turns": 1,
+    "caller_questions": 0,
+    "question_turns": 2,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 1,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 2,
+    "input_audio": 214,
+    "input_audio_cached": 192,
+    "output_audio": 281,
+    "input_text": 16128,
+    "input_text_cached": 8064,
+    "output_text": 120,
+    "cache_hit_rate": 0.5052
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "14:23:56",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, it's a good time.",
+      "timestamp": "14:24:08",
+      "audio_rms": 0.11646559834480286
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is this Dr. Okafor, Cardiology\u2019s office at Northside Medical Group?",
+      "timestamp": "14:24:10",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch could not be confirmed. Not collected: identity.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260825-1423-5a88.wav",
+  "recorded_at": "2026-08-25T14:23:53.027218"
+}

@@ -190,12 +190,30 @@ def main() -> None:
     ap.add_argument("--doctor",   required=True,  help="Doctor name")
     ap.add_argument("--hospital", required=True,  help="Hospital name")
     ap.add_argument("--to",       required=True,  help="Hospital phone number e.g. +919876543210")
+    # OPTIONAL, AND THE DISAMBIGUATOR WHEN PRESENT. Confirmed with the
+    # client-side contact 2026-08-25: two doctors of the same name at one
+    # hospital is the ordinary case, and the specialty is how the receptionist
+    # knows which is meant — both client scripts open "Dr. [Name], [Specialty]".
+    #
+    # It also closes a gap open since this CLI was written:
+    # Doctor.REQUIRED_FOR_COMPLETE names specialization, nothing ever supplied
+    # it, so every doctor the voice agent resolved failed is_complete() on that
+    # one field and was filed PARTIALLY_VERIFIED however good the call was —
+    # exactly what missing_for_complete()'s docstring has described for weeks.
+    ap.add_argument("--specialty", default=None,
+                    help="Doctor's specialty, e.g. Cardiology. Optional, but it "
+                         "is how a receptionist tells two doctors of the same "
+                         "name apart, and without it a resolved record cannot "
+                         "reach COMPLETE.")
     ap.add_argument("--port",     default=8000,   type=int)
     args = ap.parse_args()
 
-    doctor = Doctor(doctor_name=args.doctor, hospital_name=args.hospital)
+    doctor = Doctor(doctor_name=args.doctor, hospital_name=args.hospital,
+                    specialization=args.specialty)
 
     print(f"\n  Doctor   : {doctor.doctor_name}")
+    if doctor.specialization:
+        print(f"  Specialty: {doctor.specialization}")
     print(f"  Hospital : {doctor.hospital_name}")
     print(f"  To       : {args.to}")
     print(f"  Server   : {settings.server_public_url}\n")

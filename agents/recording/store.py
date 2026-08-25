@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 from core.models import CallRecord, TranscriptTurn
@@ -20,13 +19,24 @@ def _to_record(snap: dict, call_id: str, audio_path: str | None,
         doctor_name=snap.get("doctor", ""),
         hospital_name=snap.get("hospital"),
         branch=snap.get("branch"),
-        resolved=bool(snap.get("branch")),
+        # A SECOND DEFINITION of success lived here — "a branch was recorded" —
+        # independent of the one save_branch asserted and of anything a template
+        # declares. It agreed with the old behaviour by coincidence and would
+        # have disagreed with the first template that collects two fields.
+        # The verdict is now derived once, by the call's objective, and written
+        # to memory after every tool call; this reads it. The branch fallback is
+        # for a snapshot that predates that write, not a rule of its own.
+        resolved=bool(snap.get("resolved", bool(snap.get("branch")))),
         duration_seconds=duration_seconds,
         cost_usd=cost_usd,
         transcript=turns,
         summary=summary,
         audio_path=audio_path,
-        recorded_at=datetime.utcnow(),
+        # NOT passed explicitly. CallRecord's own default_factory already uses
+        # datetime.now(timezone.utc) — this used to override it with
+        # datetime.utcnow(), which returns a NAIVE datetime and silently
+        # un-fixes the exact bug models.py's comment says it was fixing, for
+        # every record that goes through here.
     )
 
 

@@ -1,0 +1,144 @@
+{
+  "call_id": "call-20260825-1429-88cb",
+  "doctor_name": "Dr. Priya Raman",
+  "hospital_name": "Summit Medical Center",
+  "branch": null,
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "identity"
+  ],
+  "missing": [],
+  "fields": {
+    "identity": {
+      "value": "not_here",
+      "heard": "Yeah, yeah, we have a Dr. Raman, but she's a dermatologist, not a neuro.",
+      "detail": "They have a Dr. Raman but she's a dermatologist, not"
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Priya Raman",
+    "hospital_name": "Summit Medical Center",
+    "specialization": "Neurosurgery",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260825-1429-88cb",
+    "collected_fields": {
+      "identity": {
+        "value": "not_here",
+        "heard": "Yeah, yeah, we have a Dr. Raman, but she's a dermatologist, not a neuro.",
+        "detail": "They have a Dr. Raman but she's a dermatologist, not"
+      }
+    }
+  },
+  "duration_seconds": 38,
+  "cost_usd": 0.086911,
+  "template": "provider_verification",
+  "grounding": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.67,
+  "reply_latency": {
+    "turns": 2,
+    "median": 1.06,
+    "worst": 1.16,
+    "detector_lag_s": 0.4
+  },
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 20,
+    "agent_turns": 3,
+    "caller_turns": 2,
+    "caller_questions": 0,
+    "question_turns": 2,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 1,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 2,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 3,
+    "input_audio": 587,
+    "input_audio_cached": 384,
+    "output_audio": 392,
+    "input_text": 24238,
+    "input_text_cached": 16128,
+    "output_text": 243,
+    "cache_hit_rate": 0.6651
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "14:29:57",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah sure",
+      "timestamp": "14:30:08",
+      "audio_rms": 0.15075987577438354
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 is this Dr. Raman, Neurosurgery\u2019s office at Summit Medical Center?",
+      "timestamp": "14:30:09",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, yeah, we have a Dr. Raman, but she's a dermatologist, not a neuro.",
+      "timestamp": "14:30:23",
+      "audio_rms": 0.17670685052871704
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for clarifying that \u2014 I just need to note what you said, then I\u2019ll get out of your way.",
+      "timestamp": "14:30:25",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Summit Medical Center to verify Dr. Priya Raman's branch. Branch could not be confirmed.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260825-1429-88cb.wav",
+  "recorded_at": "2026-08-25T14:29:53.631946"
+}

@@ -46,6 +46,23 @@ from fastapi import WebSocket
 from core.config import settings, persona_for_voice
 from core.models import Doctor, DoctorStatus, Source, TranscriptTurn
 from agents.voice.memory import CallMemory
+from agents.voice.objectives import (
+    ACCEPTING_ASK,
+    AnswerKind,
+    IDENTITY_ASK,
+    states_in_its_own_right,
+    REFERRAL_ASK,
+    SCHEDULING_ASK,
+    CallObjective,
+    LOCATION_NOUN as _LOCATION_NOUN,
+    Outcome,
+    clauses as _clauses,
+    default_objective,
+    describe as _describe_objective,
+    expected_answers,
+    norm_quotes as _norm_quotes,
+    sentences as _sentences,
+)
 from agents.voice.templates import get_template
 from agents.voice.tools import run_tool, TOOL_SCHEMAS
 from agents.voice.audio_utils import resample, _mulaw_decode, _mulaw_encode
@@ -195,8 +212,8 @@ def _utterance_slice(sess: "RealtimeSession",
     the chunk position if the timestamps land out of range.
     """
     if start_ms is None or end_ms is None or end_ms <= start_ms:
-        return b"".join(sess._caller_pcm[fallback_chunk_pos:])
-    buf = b"".join(sess._caller_pcm)
+        return b"".join(sess._caller_oai_pcm[fallback_chunk_pos:])
+    buf = b"".join(sess._caller_oai_pcm)
     bpms = _wire_bytes_per_ms()
     # Where OpenAI's input buffer begins inside ours. Zero until the greeting
     # finishes, which is also the only window in which no caller turn exists.
@@ -206,7 +223,7 @@ def _utterance_slice(sess: "RealtimeSession",
     # Out of range means the buffers have drifted; the fallback is wrong too,
     # but it is wrong in the direction of measuring MORE audio rather than none.
     if lo >= len(buf) or hi <= lo:
-        return b"".join(sess._caller_pcm[fallback_chunk_pos:])
+        return b"".join(sess._caller_oai_pcm[fallback_chunk_pos:])
     return buf[lo:min(hi, len(buf))]
 
 
@@ -273,15 +290,48 @@ def _loudest_window_rms(arr: np.ndarray, window_s: float = 0.3) -> float:
 # A caller turn that carries nothing to work with: a greeting, an
 # acknowledgement, or a request to repeat. Not an answer, and — crucially —
 # not evidence that the caller HEARD the question either.
-_FILLER_REPLY = re.compile(
-    r"^(?:\W*(?:hello|hullo|hi|hey|yes|yeah|yep|yup|ok|okay|sure|right|alright|"
-    r"mm+|hm+|uh+|um+|er+|ah+|oh+|go ahead|that'?s fine|i see|fine|"
-    r"sorry|pardon|come again|say again|what|huh|"
-    r"are you there|still there|can you hear me)\W*)+$", re.I)
+#
+# SPLIT IN TWO on 2026-08-24, and the split is the fix. The single list held
+# "yes|yeah|yep|yup" alongside "hello|okay|mm", so `_is_filler_reply("Yes.")`
+# was True and `_caller_answered_since` skipped that turn: the ask budget kept
+# counting as though nobody had spoken and the give-up directive fired. "No."
+# was not in the list and returned False. Only the POSITIVE answer was
+# discarded — the one the client is calling to collect.
+#
+# That is correct for a location ask (a bare "yes" is not a place) and wrong for
+# a yes/no field, and no template can change it because the judgement is made
+# here, on the words alone. It now depends on what was ASKED — see
+# objectives.expected_answers.
+_ACK_WORDS = (r"hello|hullo|hi|hey|ok|okay|sure|right|alright|"
+              r"mm+|hm+|uh+|um+|er+|ah+|oh+|go ahead|that'?s fine|i see|fine|"
+              r"sorry|pardon|come again|say again|what|huh|"
+              r"are you there|still there|can you hear me")
+# ACKNOWLEDGEMENT ONLY, and these stay filler even when a yes/no answer is
+# what we asked for. "Mm-hm" to "are you accepting new patients?" is an
+# affirmative in real speech, and it is ALSO the exact text of our own
+# backchannel clips — mm-hm, okay, right, sure — coming back up the line off a
+# speakerphone. _BACKCHANNEL_ECHO_MARGIN_S says why that cannot be told apart
+# after the fact: "There would be no way to tell our own echo from a real
+# backchannel". Letting one of those four strings satisfy a field would let the
+# agent answer its own question. So the affirmative set below is the EXPLICIT
+# one only.
+_ACK_REPLY = re.compile(rf"^(?:\W*(?:{_ACK_WORDS})\W*)+$", re.I)
+# A bare affirmative, possibly padded with acknowledgements ("Yes, okay."). The
+# four words are exactly the ones the old single list held, so the location-ask
+# verdict on any given turn is unchanged.
+_AFFIRM_REPLY = re.compile(
+    rf"^(?:\W*(?:yes|yeah|yep|yup|{_ACK_WORDS})\W*)+$", re.I)
+_HAS_AFFIRM = re.compile(r"\b(yes|yeah|yep|yup)\b", re.I)
 
 
-def _is_filler_reply(text: str, agent_name: str = "") -> bool:
+def _is_filler_reply(text: str, agent_name: str = "",
+                     expects: Optional[frozenset] = None) -> bool:
     """True if this caller turn answers nothing and asks nothing.
+
+    `expects` is the set of answer kinds the pending ask entitles them to give
+    (`objectives.expected_answers`). None means no ask is in view, and then this
+    behaves exactly as it always did — a bare "yes" is filler — because the
+    only ask this agent has ever made is for a place.
 
     "Hello." on call-20260818-1338 was treated as a non-answer and the agent
     re-asked — but it is more than a non-answer, it is a signal the caller did
@@ -295,23 +345,69 @@ def _is_filler_reply(text: str, agent_name: str = "") -> bool:
         # "Hello, David." is still just hello. Strip the name we introduced
         # ourselves with before judging, or every greeting reads as content.
         t = re.sub(rf"\b{re.escape(agent_name)}\b", " ", t, flags=re.I)
-    return bool(_FILLER_REPLY.match(t))
+    if _ACK_REPLY.match(t):
+        return True
+    if _AFFIRM_REPLY.match(t) and _HAS_AFFIRM.search(t):
+        # A bare "Yes." IS the answer to a closed-set ask and is NOT a place.
+        return not (expects and AnswerKind.CHOICE in expects)
+    # "No.", "Nope.", "Not sure.", "We're full — you'd be number twenty-one."
+    # were never filler and still are not. They are answers to a yes/no field
+    # and a refusal to a location ask, and both of those are information.
+    return False
+
+
+def _pending_expectation(sess: "RealtimeSession",
+                         before_idx: int) -> Optional[frozenset]:
+    """What the agent's most recent ask, at or before `before_idx`, asked for.
+
+    None when there is no agent turn to read — a caller turn arriving before we
+    have said anything is judged as it always was.
+    """
+    for t in reversed(sess.turns[:max(before_idx, 0)]):
+        if t.role == "agent" and t.text.strip():
+            return expected_answers(t.text, _objective_of(sess))
+    return None
+
+
+def _objective_of(sess: "RealtimeSession") -> CallObjective:
+    """The objective this call is working to.
+
+    getattr, because the guards in this module are routinely handed a namespace
+    carrying only the four attributes they read — see `double()` in the test
+    suite — and a guard that raises on a test double is a guard that stops being
+    tested.
+    """
+    obj = getattr(sess, "objective", None)
+    return obj if isinstance(obj, CallObjective) else default_objective()
 
 
 def _caller_answered_since(sess: "RealtimeSession", since_idx: int) -> bool:
-    """Did the caller say anything substantive after turn `since_idx`?"""
+    """Did the caller say anything substantive after turn `since_idx`?
+
+    Substantive is relative to the ask. The ask lives at `since_idx - 1` (the
+    budget records the index AFTER appending the agent turn), so the pending
+    expectation is read from there rather than from the words in isolation.
+    """
+    expects = _pending_expectation(sess, since_idx)
     for t in sess.turns[since_idx:]:
         if (t.role == "caller" and t.text.strip() != "[...]"
-                and not _is_filler_reply(t.text, sess.agent_name)):
+                and not _is_filler_reply(t.text, sess.agent_name, expects)):
             return True
     return False
 
 
-# How many times the agent may re-ask into silence before those re-asks start
-# costing budget again. Without a bound, a caller who only ever says "hello"
-# would let the agent ask forever: the budget would never advance and nothing
-# would end the call.
-_MAX_UNANSWERED_REASKS = 2
+
+# _MAX_UNANSWERED_REASKS is GONE, and its disappearance is the shape of the
+# 2026-08-24 budget change rather than a deletion.
+#
+# It existed because the budget counted asks the caller HAD answered, so an ask
+# nobody answered spent nothing and a caller who only ever said "hello" would
+# have kept the call alive forever. Two unanswered re-asks were therefore forced
+# to count anyway, purely for liveness.
+#
+# The budget now counts the unanswered ones — that is the whole change — so the
+# forcing has nothing left to do: an unanswered re-ask spends budget on the
+# first one, not the third. See settings.realtime_max_unanswered_asks.
 
 # How many times the caller may question the agent back before those exchanges
 # start costing budget again. Three because a front desk screening a cold call
@@ -329,10 +425,11 @@ def _caller_vetted_since(sess: "RealtimeSession", since_idx: int) -> bool:
     one refusal, and this is False — the budget should advance normally then.
     """
     seen = False
+    expects = _pending_expectation(sess, since_idx)
     for t in sess.turns[since_idx:]:
         if t.role != "caller" or t.text.strip() == "[...]":
             continue
-        if _is_filler_reply(t.text, sess.agent_name):
+        if _is_filler_reply(t.text, sess.agent_name, expects):
             continue
         if not _caller_is_vetting(t.text, sess):
             return False
@@ -362,6 +459,24 @@ _BACKCHANNEL_AFTER_S = 2.8
 # At most one per caller utterance, and never twice inside this window — two in
 # quick succession is a tic, not listening.
 _BACKCHANNEL_COOLDOWN_S = 9.0
+
+# How long after a backchannel finishes playing its echo may still arrive back
+# up the line. A callee on speakerphone hears our "mm-hm" out of their handset
+# speaker and their own mic picks it up, delayed by the acoustic path plus
+# Twilio's buffering.
+#
+# This window exists because realtime_echo_gate CANNOT cover it. That gate is
+# consulted only under `sess.agent_speaking`, and a backchannel deliberately
+# does not set that flag — it must not, or it would break barge-in and turn
+# detection. So during a clip there is no gate in the path at all, whatever
+# REALTIME_ECHO_GATE is set to.
+#
+# The failure it prevents is invisible from the transcript, which is why it is
+# a guard and not something to watch for: the clips are "mm-hm", "okay",
+# "right", "sure", and a caller genuinely saying "Okay." is the same string.
+# There would be no way to tell our own echo from a real backchannel after the
+# fact — so it has to be stopped at the audio, not detected in the text.
+_BACKCHANNEL_ECHO_MARGIN_S = 0.4
 
 # Shortest gap allowed between two location asks. On call-20260811-1649 the
 # agent asked at 16:49:31, the caller said "Yes, speaking" while it was still
@@ -494,9 +609,23 @@ _ACK_TAKES_VALUE = re.compile(
     r"(?:branch|location|office|campus|site|address)\b", re.I)
 
 # Reading back a value the caller already gave.
+# READING A VALUE BACK IS NOT ASKING FOR ONE, and the list has to cover the
+# agent QUOTING the caller as well as the agent filing the value. On
+# call-20260824-2014 the agent said "I heard you say she's taking the new
+# patients." — a read-back by any reading — and because that phrasing was
+# missing here it scored as an ASK. The grounding anchor moved past every
+# caller turn that had answered, the evidence window emptied, and the guard
+# stood down and accepted a status it had refused three times. The agent talked
+# its own claim into the record.
 _CONFIRMS_VALUE = re.compile(
     r"\b(i have that as|i'?ve got that|i'?ll note|noted as|recorded as|"
-    r"i'?ll put (that|it) down|so that'?s)\b", re.I)
+    r"i'?ll put (that|it) down|so that'?s|i heard you say|"
+    r"you said|what i heard|let me read (that|it) back|"
+    # NOT a bare "to confirm". "I'm trying to confirm which branch she works
+    # out of" is an ASK, and swallowing it would stop the budget counting the
+    # commonest phrasing the agent has. The read-back sense always quotes
+    # THEM — "I heard you say", "you said" — and that is the load-bearing part.
+    r"i'?ll record (that|it))\b", re.I)
 
 # Reporting that the location was NOT obtained. Names a location noun and reads
 # as an ask to the inverted detector, but it is the opposite — it is the agent
@@ -508,23 +637,19 @@ _REPORTS_FAILURE = re.compile(
     r"\b(was ?n'?t able|were ?n'?t able|was not able|could ?n'?t|could not|"
     r"can'?t|cannot|unable|did ?n'?t manage|no luck)\b", re.I)
 
-_LOCATION_NOUN = re.compile(
-    r"\b(branch|location|office|campus|site|address|practis\w*|practic\w*)\b", re.I)
-
-
-# The model writes TYPOGRAPHIC apostrophes — "wasn’t", "it’s", "that’s" — and
-# every pattern in this file spells them ASCII ("n'?t", "that'?s"). So the
-# detectors were blind to the agent's own most common output. Found on
-# call-20260818-1338: "I wasn’t able to get the specific branch today" was
-# counted as a location ask because _REPORTS_FAILURE could not see the word
-# "wasn’t". Ten patterns in this file contain an apostrophe.
-_SMART_QUOTES = str.maketrans({"’": "'", "‘": "'",
-                               "“": '"', "”": '"'})
-
-
-def _norm_quotes(text: str) -> str:
-    """ASCII-ise typographic quotes so the patterns can match what is said."""
-    return (text or "").translate(_SMART_QUOTES)
+# _LOCATION_NOUN, _norm_quotes, _sentences and _clauses now live in
+# agents/voice/objectives.py and are imported at the top of this file under
+# these same private names. They moved because the ask-shape detection there
+# has to recognise a location noun and split a turn into clauses EXACTLY as the
+# detectors here do — the branch field's probe and `_is_location_ask` are two
+# readings of one pattern, and a second copy would drift the way tools.py's 41
+# hand-copied prompt phrases drifted before they were derived instead.
+#
+# Why _norm_quotes exists at all, kept here because it is the reason not to
+# "simplify" it away: the model writes TYPOGRAPHIC apostrophes — "wasn’t",
+# "it’s" — and every pattern in this file spells them ASCII ("n'?t"). On
+# call-20260818-1338 "I wasn’t able to get the specific branch today" was
+# counted as a location ask because _REPORTS_FAILURE could not see "wasn’t".
 
 
 # The agent telling the caller the location is recorded, or that the call is
@@ -552,8 +677,14 @@ def _claims_saved(text: str) -> bool:
     return bool(_CLAIMS_SAVED.search(_norm_quotes(text or "")))
 
 
-def _is_location_ask(text: str) -> bool:
-    """Is this agent turn asking where the doctor practises?
+def _is_ask_for(text: str, probe) -> bool:
+    """Is this agent turn asking for the thing `probe` recognises?
+
+    The body of what used to be _is_location_ask, with the noun pattern passed
+    in. Parametrised rather than copied when a second field arrived: the
+    acknowledgement, read-back and closing exemptions below were each added
+    after a live call miscounted, and a second copy of them would have to
+    relearn every one of those calls.
 
     Counts statement-form asks as well as questions. A request phrased politely
     is still a request, and the person on the other end experiences it as one.
@@ -564,12 +695,12 @@ def _is_location_ask(text: str) -> bool:
     "trying to find out"). Enumerating phrasings cannot work: the model has more
     ways to ask than anyone can list.
 
-    So it is inverted. Naming a location IS an ask unless the turn is plainly
+    So it is inverted. Naming the thing IS an ask unless the turn is plainly
     acknowledging or closing. This over-counts a little, which is the safe
     direction for a budget whose purpose is to stop the agent pestering people.
     """
     text = _norm_quotes(text)
-    if not _LOCATION_NOUN.search(text):
+    if not probe.search(text):
         return False
     # Reading a value back is not asking for one.
     if "?" not in text and (_CONFIRMS_VALUE.search(text)
@@ -584,11 +715,111 @@ def _is_location_ask(text: str) -> bool:
     # request for the thing it is thanking them for.
     stripped = _ACK_TAKES_VALUE.sub("", text)
     stripped = _NOT_AN_ASK.sub("", stripped)
-    return bool(_LOCATION_NOUN.search(stripped))
+    return bool(probe.search(stripped))
+
+
+def _is_location_ask(text: str) -> bool:
+    """Is this agent turn asking where the doctor practises?"""
+    return _is_ask_for(text, _LOCATION_NOUN)
+
+
+def _is_objective_ask(text: str, sess: "RealtimeSession") -> bool:
+    """Is this agent turn asking for ANY field the call is trying to collect?
+
+    THE GATE THAT FEEDS THE ASK BUDGET, and the one part of that budget that was
+    NOT objective-agnostic. The counters never knew about branches — they count
+    asks and answers — but nothing reached them except through
+    `_is_location_ask`, so on a template collecting a second field every ask
+    about that field was invisible: not counted as progress, not counted as
+    unanswered, and not bounded by anything. A caller who stonewalled the
+    new-patient question specifically would have kept the call alive with no
+    exit, which is the exact failure the budget was built for.
+
+    Each field's probe already exists — it is what tells expected_answers which
+    kind of answer an ask entitles the caller to give — so this reads the
+    objective rather than adding a second list of nouns to keep in step.
+    """
+    if _is_location_ask(text):
+        return True
+    for f in _objective_of(sess).fields:
+        # PLACE is covered above, with the pattern the guards all share.
+        if f.kind is not AnswerKind.PLACE and _is_ask_for(text, f.probe):
+            return True
+    return False
+
+
+# The escalate reason for each give-up trigger. SEPARATE STRINGS, because the
+# old single condition had a single reason — "caller engaged but never provided
+# a location" — and it was already the wrong sentence half the time it went
+# out: a caller who said nothing at all did not "engage", and a reason in the
+# record is read later as fact by someone with no way to check it. That is the
+# failure _discarded_location exists to catch, and it is checked against BOTH
+# of these (neither appears in _CALL_SHAPE_EXITS, so both are examined).
+GIVE_UP_REASONS = {
+    "no_progress": "caller engaged but never provided a location",
+    "unanswered":  "caller did not answer after repeated asks",
+}
+
+# The invariant fragment of each directive — no counts, no wording that a
+# rewrite would move. It exists so the test suite can assert this directive is
+# ABSENT from a call that must not have given up, without holding a copy of the
+# sentence: an absence assertion against a hand-copied literal starts passing
+# for free the moment the real text changes, and that is the one failure this
+# check is for.
+#
+# NOT interpolated into the directive below — the source-directive scanner
+# (test_realtime_protocol.py's "every injected directive is found") locates
+# every open-quote-paren-system-colon literal by regex and requires real
+# lowercase TEXT immediately after it; an f-string placeholder sitting right
+# after the quote gives it nothing to match and the directive goes uncounted.
+# So these stay written out as literal words in give_up_directive, and the
+# test suite proves the two copies still agree — a drift between them fails
+# LOUDLY there instead of the marker silently going stale.
+GIVE_UP_MARKERS = {
+    "no_progress": "you have now asked for the location",
+    "unanswered":  "they have not answered",
+}
+
+
+def give_up_directive(sess: "RealtimeSession", trigger: str) -> str:
+    """The mid-call directive that ends a call the budget has run out on.
+
+    A FUNCTION, not an inline f-string, so the test suite asserts on the text
+    that actually goes out instead of on a copy of it. The check that the budget
+    did not burn on a front desk's screening questions is an assertion that this
+    directive is ABSENT, and an absence assertion against a hand-copied literal
+    passes for free the day the wording changes — see the find/prove/judge rule.
+
+    "Thank them briefly, say goodbye" produced exactly that: "Thanks for your
+    time, goodbye." The callee is never told the call is ending because the
+    agent could not get what it came for, so they get no last chance to supply
+    it — and people often do, once they hear something was missed. So: name the
+    outcome, own it rather than blame them, then close.
+    """
+    reason = GIVE_UP_REASONS.get(trigger, GIVE_UP_REASONS["no_progress"])
+    _mem = getattr(sess, "memory", None)
+    missing = (_objective_of(sess).missing_spoken(_mem) if _mem is not None
+               else "") or "the branch"
+    if trigger == "unanswered":
+        opening = (f"(system: you have asked {sess._unanswered_asks} times "
+                   f"and they have not answered. ")
+    else:
+        opening = (f"(system: you have now asked for the location "
+                   f"{sess._asks_without_progress} times and have not been "
+                   f"given one. ")
+    return (
+        opening
+        + f"Stop asking. Say plainly that you were not able to get "
+          f"{missing} today — phrase it as something you could not do, not as "
+          f"something they failed to give — then thank them and say goodbye. "
+          f"Do not ask again, and do not sound annoyed. Call escalate with "
+          f"reason '{reason}'.)"
+    )
 
 
 def _ask_budget_outcome(turns: list, sent_at: Optional[int],
-                        sent: bool, escalated: bool) -> dict:
+                        sent: bool, escalated: bool,
+                        trigger: str = "no_progress") -> dict:
     """What happened after the give-up directive was injected.
 
     The count alone is not enough. Thanking them and escalating in one turn is
@@ -599,7 +830,8 @@ def _ask_budget_outcome(turns: list, sent_at: Optional[int],
     instead of asking nicely in a user turn.
     """
     if not sent or sent_at is None:
-        return {"limit": settings.realtime_max_location_asks,
+        return {"unanswered_limit": settings.realtime_max_unanswered_asks,
+                "no_progress_limit": settings.realtime_max_asks_without_progress,
                 "directive_sent": False, "verdict": "not needed"}
 
     after = [t for t in turns[sent_at:] if t.role == "agent"]
@@ -615,7 +847,12 @@ def _ask_budget_outcome(turns: list, sent_at: Optional[int],
         verdict = f"OBEYED — took {len(after)} turns, no further asks"
 
     return {
-        "limit": settings.realtime_max_location_asks,
+        "unanswered_limit": settings.realtime_max_unanswered_asks,
+        "no_progress_limit": settings.realtime_max_asks_without_progress,
+        # WHICH ceiling ended the call, in the artifact. Without it the two
+        # failures — they stopped talking, versus they talked and never told —
+        # are one number afterwards, and they call for opposite fixes.
+        "trigger": trigger,
         "directive_sent": True,
         "agent_turns_after": len(after),
         "asked_again_after": asked_again,
@@ -625,56 +862,23 @@ def _ask_budget_outcome(turns: list, sent_at: Optional[int],
     }
 
 
-# Abbreviations whose full stop does not end a sentence. Without this, "Which
-# branch is Dr. Okafor at?" splits into "Which branch is Dr." + "Okafor at?",
-# which reads as a statement-request followed by a question — so the double-ask
-# detector fired on nearly every turn, since almost every turn names the doctor.
-_ABBREV = re.compile(
-    r"\b(Dr|Mr|Mrs|Ms|Prof|St|Ave|Blvd|Rd|Ste|Dept|Inc|Co|approx|no)\.\s",
-    re.I)
-# A visible sentinel. The empty string is wrong (replacing "" inserts
-# the replacement between every character) and a control byte is worse:
-# invisible in source, and a literal 0x08 has landed in this file twice.
-_ABBREV_MARK = "@@DOT@@"
-
-
-def _sentences(text: str) -> list:
-    """Split into sentences without treating "Dr." as the end of one."""
-    protected = _ABBREV.sub(lambda m: m.group(0).replace(".", _ABBREV_MARK), text)
-    parts = re.split(r"(?<=[.!?])\s+", protected.strip())
-    return [p.replace(_ABBREV_MARK, ".").strip() for p in parts if p.strip()]
-
-
-def _clauses(text: str) -> list:
-    """Sentences, split again at dashes, semicolons and colons.
-
-    The repeat detector counted SENTENCES and reported 0 for a call containing
-    a 45-character exact repeat. call-20260818-1613:
-
-        turn 1: "...about a doctor listing — which branch is Dr. Okafor
-                 working out of?"
-        turn 3: "I can hear you now — which branch is Dr. Okafor working
-                 out of?"
-
-    Neither turn has an internal sentence break, so each was one "sentence",
-    the two differed, and nothing was counted. But the repeated part is the
-    clause after the dash — and that is not a coincidence of this call. The
-    prompt's own turn shape is "React, THEN say the thing, folded into ONE
-    sentence", which produces exactly `reaction — ask`. The ask is therefore
-    the unit that gets repeated, and it almost never sits at a sentence
-    boundary.
-
-    A metric that reports a clean number for a dirty call is worse than no
-    metric: repeated_sentences is one of the figures used to compare calls, so
-    every comparison drawn from it was weaker than it looked.
-    """
-    out = []
-    for s in _sentences(text):
-        for part in re.split(r"\s*[—–-]{1,2}\s+|\s*[;:]\s+", s):
-            part = part.strip()
-            if part:
-                out.append(part)
-    return out
+# _sentences and _clauses moved to objectives.py (imported above). The reason
+# _clauses exists is worth keeping where the detectors that depend on it live:
+# the repeat detector counted SENTENCES and reported 0 for a call containing a
+# 45-character exact repeat. call-20260818-1613:
+#
+#     turn 1: "...about a doctor listing — which branch is Dr. Okafor
+#              working out of?"
+#     turn 3: "I can hear you now — which branch is Dr. Okafor working
+#              out of?"
+#
+# Neither turn has an internal sentence break, so each was one "sentence", the
+# two differed, and nothing was counted. The repeated part is the clause after
+# the dash, and that is not a coincidence of this call: the prompt's own turn
+# shape is "React, THEN say the thing, folded into ONE sentence", which produces
+# exactly `reaction — ask`. The ask is the unit that gets repeated, and it almost
+# never sits at a sentence boundary. It is also the unit whose SHAPE decides
+# what answer the caller is entitled to give — see objectives.expected_answers.
 
 
 def _norm_clause(text: str) -> str:
@@ -1006,7 +1210,7 @@ def conversation_metrics(turns: list) -> dict:
 
       stapled_questions  — agent asked a question in the same turn it answered
                            one of theirs. Six of these in one 111s call.
-      back_to_back_asks  — agent asked in two consecutive turns.
+      back_to_back_asks  — agent asked again WITHOUT BEING ANSWERED in between.
       repeated_sentences — same agent sentence said more than once.
     """
     agent = [t for t in turns if t.role == "agent"]
@@ -1015,6 +1219,26 @@ def conversation_metrics(turns: list) -> dict:
 
     for i, turn in enumerate(turns):
         if turn.role != "agent":
+            # A CALLER ANSWER BREAKS THE RUN, and until 2026-08-24 it did not:
+            # this loop skipped straight past caller turns, so prev_agent_asked
+            # carried across them and any two AGENT turns that both asked
+            # something counted — however well the call was going.
+            #
+            # call-20260824-1604 scored 1 on a flawless exchange: greeting asked
+            # for the branch, the caller gave it, the agent asked the second
+            # scripted question. That was tolerable while the script had one
+            # question, because a second ask usually WAS a re-ask. On a
+            # four-question script every healthy call trips it on every adjacent
+            # pair, and a metric that fires on the good case is worse than no
+            # metric — it is the number people stop reading.
+            #
+            # The defect actually worth counting is asking again into silence,
+            # so silence is what has to persist the run. Filler is silence:
+            # "Hello." after a barge-in truncation is the case the ask budget
+            # was built around.
+            if turn.role == "caller" and turn.text.strip() != "[...]" \
+                    and not _is_filler_reply(turn.text):
+                prev_agent_asked = False
             continue
         asks = "?" in turn.text
         prev_caller = next((turns[j] for j in range(i - 1, -1, -1)
@@ -1455,6 +1679,39 @@ def _echo_gate_allows(raw: bytes) -> bool:
     return False   # "drop"
 
 
+def _above_echo_floor(raw: bytes) -> bool:
+    """Is this frame loud enough to be a person rather than our own echo?
+
+    Deliberately NOT routed through realtime_echo_gate. That setting decides
+    whether a caller may interrupt the agent mid-sentence, which is a product
+    question; this decides whether a frame is our own noise coming back, which
+    is an acoustic one. Tying them together would mean REALTIME_ECHO_GATE=pass
+    — the shipped default, chosen so callers can always interrupt — silently
+    switched the echo guard off too.
+    """
+    arr = _wire_to_pcm16(raw)
+    if arr.size == 0:
+        return False
+    return float(np.sqrt(np.mean(arr ** 2))) >= settings.realtime_echo_rms
+
+
+def _is_own_backchannel_echo(sess: "RealtimeSession", raw: bytes) -> bool:
+    """Withhold this inbound frame as our own backchannel coming back?
+
+    Split out of the media loop so it can be driven directly. The loop cannot:
+    a source-level check on the call site keeps passing when the branch is
+    wrapped in `if False`, which is the shape that has hidden five disabled
+    guards on this codebase already.
+
+    Both conditions are load-bearing. The window alone would eat real speech —
+    the caller is mid-utterance by construction, since a clip only fires
+    _BACKCHANNEL_AFTER_S into their turn. The floor alone would run for the
+    whole call.
+    """
+    return (time.time() < sess._backchannel_mute_until
+            and not _above_echo_floor(raw))
+
+
 # ── Tool schema conversion ────────────────────────────────────────────────────
 
 def _realtime_tools() -> list[dict]:
@@ -1740,6 +1997,355 @@ def _drop_lost_substance(spoken: str, dropped: str) -> bool:
     return len(new) >= 2 and len(new) / len(d) >= 0.5
 
 
+def _ungrounded_detail(args: dict, sess: "RealtimeSession", key: str) -> list:
+    """Content words in the model's free-text qualifier that nobody said.
+
+    `detail` (and `depends_on`) cannot be fixed by SELECTION the way `heard`
+    can: there is no single caller turn that is the qualifier, because the
+    field is a summary by construction — "you'd be number 21", "book online or
+    call the front desk". Nothing in the transcript is the right thing to copy
+    in wholesale.
+
+    So this one is the fallback the selection avoided: check it. Word level,
+    not substring, because a summary legitimately reorders and drops words —
+    demanding a verbatim substring would reject every honest summary. What it
+    catches is the failure actually observed: the model inserting a NOUN nobody
+    said. On call-20260824-2116 the qualifier read "Book online or call the
+    front desk" when the caller had said only "you need to book through online
+    or call" — "desk" appears nowhere in the call.
+
+    Same collapse as the branch check, so "front-desk" and "front desk" are the
+    same word to it, and the same stopword list, so ordinary English does not
+    have to be grounded.
+    """
+    value = str(args.get(key) or "").strip()
+    if not value:
+        return []
+    heard = _asserted_caller_text(sess)
+    if not heard.strip():
+        return []
+    out: list = []
+    # SPLIT ON NON-LETTERS, not on whitespace. Stripping punctuation off a
+    # whitespace token leaves "front-desk" whole, and `.isalpha()` is False for
+    # it, so a hyphenated invention was skipped without ever being compared \u2014
+    # and "front-desk" is exactly the shape of the word this has to catch.
+    for w in re.findall(r"[a-z']+", value.lower()):
+        w = w.strip("'")
+        if (not w or len(w) <= 2 or w in _UNGROUNDED_STOPWORDS
+                or w in _DETAIL_FUNCTION_WORDS or w in out):
+            continue
+        if _grounded_loosely(w, heard):
+            continue
+        # A meaning word stands on its CLASS, not on itself. The caller who
+        # said "don't" made the negation; the caller who said "as long as"
+        # made the condition. Which word the model reached for afterwards is
+        # not evidence of anything.
+        cls = _meaning_class(w)
+        if cls and _class_present(cls, heard):
+            continue
+        out.append(w)
+    return out
+
+
+# Words whose removal would change what the sentence CLAIMS rather than how it
+# reads — grouped into CLASSES, and the grouping is the fix.
+#
+# These were a flat set, checked word by word against the transcript, and that
+# made the guard fire hardest on exactly the answers the client most wants. A
+# model paraphrasing the connective is the single most predictable thing it
+# does:
+#
+#   caller "as long as they've got the right insurance"
+#   model  "only if they have the right insurance"      -> EMPTIED
+#   caller "they need a referral from their primary"
+#   model  "only with a referral from their primary care doctor" -> EMPTIED
+#
+# and the same on the other side:
+#
+#   caller "we don't take new patients until January"
+#   model  "not taking new patients until January"      -> EMPTIED
+#
+# In every one of those the caller DID negate, or DID make it conditional. The
+# model reached for a different word for the same move. Asking whether the
+# CALLER SAID "only" is the wrong question; the question is whether the caller
+# expressed conditionality at all.
+#
+# So membership is checked per CLASS: a meaning word counts as grounded when
+# ANY member of its class appears in what the caller asserted. An invented
+# condition — "only if insured" on a call where nothing was conditional — still
+# has no class-mate to stand on, and still drops the whole qualifier.
+_MEANING_CLASSES: dict = {
+    # Reversing the polarity of the claim.
+    "negation": frozenset({
+        "not", "never", "without", "cannot", "cant", "dont", "doesnt",
+        "isnt", "arent", "wont", "wouldnt", "couldnt", "nor", "none",
+        "neither", "no", "nope", "stopped", "closed", "refuse", "refused",
+    }),
+    # Making the claim conditional — the shape CAQH is after: "yes, but only if
+    # you have insurance with this particular company". Necessity words belong
+    # here too: "they need a referral" and "only with a referral" are the same
+    # move, and a model will swap one for the other without hesitating.
+    "condition": frozenset({
+        "only", "unless", "except", "provided", "depends", "depending",
+        "whether", "case", "long", "need", "needs", "needed", "require",
+        "requires", "required", "must", "if", "when", "certain", "some",
+    }),
+}
+
+
+# Auxiliaries, copulas and light verbs. Skipped outright in a QUALIFIER, the
+# way _UNGROUNDED_STOPWORDS are skipped everywhere: their presence or absence
+# says nothing about whether the model invented anything, and checking them
+# produced "only if they the right insurance" — a sentence mangled by the
+# removal of "have" because the caller had said "got".
+_DETAIL_FUNCTION_WORDS = frozenset({
+    "are", "is", "was", "were", "been", "being", "have", "has", "had",
+    "having", "does", "did", "doing", "will", "would", "can", "could",
+    "shall", "should", "get", "gets", "got", "with", "from", "their",
+    "them", "they", "your", "you", "our", "its", "it", "that", "this",
+    "these", "those", "there", "here", "and", "but", "for", "the", "any",
+    "all", "one", "also", "just", "then", "than", "who", "which", "what",
+    "about", "into", "onto", "over", "under", "been",
+})
+
+
+def _stem(word: str) -> str:
+    """Crude stem, so an inflection is not mistaken for an invention.
+
+    "we don't TAKE new patients" and "not TAKING new patients" are the same
+    verb, and reporting "taking" as a word nobody said cost the qualifier on
+    call-20260825. Suffix-stripped and de-silent-e'd, so take/takes/taking all
+    reduce to "tak".
+
+    Used ONLY for the free-text qualifier. Branch grounding keeps its exact
+    comparison: a stem match is a loosening, and the branch field is where a
+    loosening costs a wrong address in the directory.
+    """
+    w = word.lower().strip("'")
+    for suf in ("ings", "ing", "ers", "er", "ies", "ied", "es", "ed", "s"):
+        if len(w) > len(suf) + 2 and w.endswith(suf):
+            w = w[: -len(suf)]
+            break
+    return w[:-1] if len(w) > 3 and w.endswith("e") else w
+
+
+def _grounded_loosely(word: str, heard: str) -> bool:
+    """Grounded allowing for inflection. Qualifier fields only.
+
+    Two steps, because suffix-stripping only reaches inflections of one lemma.
+    "cardiology" and "cardiologists" are the same fact in different parts of
+    speech, and no amount of trimming -s and -ing turns one into the other —
+    on call-20260825-1226 the caller said "cardiologists", the model wrote
+    "cardiology", and the identity qualifier was emptied over the difference.
+    A shared long prefix catches that family without reaching anything else:
+    the words have to agree for six characters, which ordinary English pairs
+    almost never do by accident.
+
+    Qualifier fields ONLY. A prefix rule is a real loosening, and the branch
+    field is where a loosening costs a wrong address.
+    """
+    if _grounded_in(word, heard):
+        return True
+    target = _stem(word)
+    spoken = re.findall(r"[a-z']+", heard.lower())
+    if any(_stem(w) == target for w in spoken):
+        return True
+    return len(word) >= 6 and any(
+        len(w) >= 6 and w[:6] == word[:6] for w in spoken)
+
+
+def _meaning_class(word: str) -> str:
+    """Which meaning class this word belongs to, or "" for ordinary content."""
+    w = word.replace("'", "").lower()
+    for name, members in _MEANING_CLASSES.items():
+        if w in members:
+            return name
+    return ""
+
+
+def _class_present(name: str, heard: str) -> bool:
+    """Did the caller make this KIND of move, in any words at all?
+
+    Whole-word membership, not the substring test the content words use: "if"
+    inside "different" is not a condition, and a class check that fired on it
+    would ground every qualifier ever written.
+    """
+    spoken = {w.replace("'", "") for w in re.findall(r"[a-z']+", heard.lower())}
+    return bool(spoken & _MEANING_CLASSES[name])
+
+
+def _strip_ungrounded_detail(args: dict, sess: "RealtimeSession",
+                             key: str) -> tuple:
+    """Drop the words nobody said, KEEP the rest. Returns (dropped, reason).
+
+    Discarding the whole string was the first rule and it traded badly. On
+    call-20260825-0922 the caller said "you will be the number 21", the model
+    wrote "you would be number 21", and one mismatched verb tense — will against
+    would — emptied the field and took "number 21" with it. On a waitlist call
+    the queue position is the most valuable thing in the record; losing it to a
+    tense is not a defensible price for tidiness.
+
+    So the ungrounded words go and the remainder stays. Three things bound that:
+
+      * A NEGATOR IS NEVER STRIPPED. See _MEANING_WORDS. Removing one rewrites
+        the claim instead of trimming it, so an ungrounded negator drops the
+        whole qualifier — the one case where discarding is still right.
+      * DIGITS ARE NEVER STRIPPED, because they are never checked: the token
+        pattern is alphabetic, so "21" is not a candidate and cannot be dropped.
+        That is what carries a queue position through.
+      * A REMAINDER WITH NOTHING IN IT IS NOT KEPT. If stripping leaves no digit
+        and no content word, the field is emptied — but RECORDED as emptied,
+        never silently, because a quietly blank field reads exactly like a
+        caller who volunteered nothing.
+    """
+    value = str(args.get(key) or "").strip()
+    if not value:
+        return (), ""
+    dropped = _ungrounded_detail(args, sess, key)
+    if not dropped:
+        return (), ""
+
+    # A meaning word only reaches `dropped` when its ENTIRE CLASS was absent
+    # from the transcript — see _ungrounded_detail. So this is no longer "the
+    # model used a word they did not", it is "the model made a move they never
+    # made": invented a negation, or invented a condition. That still rewrites
+    # the claim rather than trimming it, and still drops the whole qualifier.
+    risky = [w for w in dropped if _meaning_class(w)]
+    if risky:
+        args[key] = ""
+        return tuple(dropped), (
+            "dropped whole - " + ", ".join(repr(w) for w in risky)
+            + " changes what it claims, and trimming a negator rewrites the "
+              "sentence")
+
+    # Keep each whitespace word unless its alphabetic core was ungrounded, so
+    # punctuation and digits ride along with the words that survive.
+    kept = []
+    for word in value.split():
+        core = "".join(re.findall(r"[a-z']+", word.lower())).strip("'")
+        if core and core in dropped:
+            continue
+        kept.append(word)
+    remainder = " ".join(kept).strip()
+    # Trim the danglers a deletion leaves behind. Removing "desk" from "call
+    # the front desk" leaves "call the", which is not wrong so much as visibly
+    # broken, and a reviewer who sees that stops trusting the field. Only
+    # trailing function words go, and only from the end — nothing in the middle
+    # is touched, so this cannot change what the remainder says.
+    while True:
+        _stripped = remainder.rstrip(" .,;:-")
+        _tail = _stripped.rsplit(" ", 1)[-1].lower() if " " in _stripped else ""
+        if _tail in {"the", "a", "an", "or", "and", "of", "to", "for", "with",
+                     "from", "at", "in", "on", "by", "your", "their"}:
+            remainder = _stripped[: _stripped.rfind(" ")].rstrip(" .,;:-")
+            continue
+        remainder = _stripped
+        break
+
+    informative = bool(re.search(r"\d", remainder)) or any(
+        w for w in re.findall(r"[a-z']+", remainder.lower())
+        if len(w) > 2 and w not in _UNGROUNDED_STOPWORDS)
+    if not informative:
+        args[key] = ""
+        return tuple(dropped), "dropped whole - nothing informative survived"
+
+    args[key] = remainder
+    return tuple(dropped), "trimmed to " + repr(remainder)
+
+
+def _collapse(text: str) -> str:
+    """Letters and digits only — word boundaries removed, SEQUENCE preserved.
+
+    call-20260824-2113: the caller said "east side clinic" and the model saved
+    "Eastside Clinic". `clinic` is a grounding stopword, so `eastside` was the
+    only content word left, and it is not a substring of "east side" — the
+    space breaks it. Rejected four times, twice while the caller was repeating
+    themselves verbatim, and the call recorded "could not obtain the location"
+    about a cooperative person who answered immediately and confirmed it.
+
+    THIS IS NOT FUZZY MATCHING, and the difference is the whole reason it is
+    allowed where a similarity threshold was not. There is no score and no
+    tolerance: every letter must still appear in the same order. It cannot
+    rescue "Riverside" from "resides at" — measured, along with every other
+    fabrication on record — because those differ in their letters, not in where
+    the spaces fall. The (a)/(b) ambiguity that made fuzzy matching unusable
+    needs two readings of the same string, and an exact character sequence
+    admits only one.
+
+    The model normalising "east side" to "Eastside" is a reasonable thing to do
+    with a place name, and the same collapse covers north side/Northside, mid
+    town/Midtown, Saint Mary's/St Mary's — a large fraction of real US branch
+    names. Measured across all 36 resolved calls: zero rows change.
+
+    DIGITS ARE NOT ROUTED THROUGH THIS. The digit rule keeps its own exact
+    comparison of digit RUNS, so "1855" still cannot ground on "1825"; that
+    guard exists because a house number nobody said reached the directory, and
+    nothing here loosens it.
+    """
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _grounded_in(term: str, heard: str) -> bool:
+    """Did the caller say this term, allowing for where the spaces fell?"""
+    return term in heard or _collapse(term) in _collapse(heard)
+
+
+def _rode_along(args: dict, sess: "RealtimeSession") -> list:
+    """Content words in the saved value that the caller was never heard to say.
+
+    NOT A BLOCK — `_ungrounded_terms` has already decided whether to accept the
+    value, and this changes none of that. It answers the narrower question the
+    accept does not: WHICH PARTS were actually corroborated.
+
+    The two are different because grounding deliberately accepts on ONE content
+    word. "Mission Bay Clinic" grounds if "bay" was said; the digit rule was
+    added when that tolerance put a house number nobody said into the directory,
+    and this is the alphabetic half of the same hole. On call-20260824-2014 the
+    transcriber rendered "Riverside campus" as "She resides at campus", the
+    model retried with "Riverside Campus, 1825 4th Street", and it was accepted
+    on the street number — correctly, the caller really had said that — while
+    "Riverside" itself was never corroborated by anything. The row went to the
+    directory stamped "verified against caller transcript", which was true of
+    the address and false of the name.
+
+    Blocking that would be wrong: the value was RIGHT, and refusing it costs a
+    real answer, which is this project's expensive direction. Recording it costs
+    nothing and makes the row's provenance answerable — a reviewer can ask which
+    rows contain a token nobody was heard to say, which is exactly the question
+    you want to be able to ask after a transcription failure.
+    """
+    heard = _asserted_caller_text(sess)
+    if not heard.strip():
+        return []
+    out: list = []
+    for field in ("branch", "city"):
+        value = (args.get(field) or "").strip()
+        if not value:
+            continue
+        # Same tokenizer as _ungrounded_detail, for the same reason: a
+        # whitespace split leaves "Mid-Town" as one non-alpha token and skips it.
+        for w in re.findall(r"[a-z']+", value.lower()):
+            w = w.strip("'")
+            if (w and w not in _UNGROUNDED_STOPWORDS
+                    and len(w) > 2 and not _grounded_in(w, heard)
+                    and w not in out):
+                out.append(w)
+    return out
+
+
+def _asserted_caller_text(sess: "RealtimeSession") -> str:
+    """Everything the caller ASSERTED, lowercased, as one blob.
+
+    Extracted so the grounding check and the rode-along report read the same
+    evidence. Two copies of "what did the caller actually tell us" is two
+    answers to that question the first time one of them is edited.
+    """
+    return " ".join(
+        t.text.lower() for t in sess.turns
+        if t.role == "caller" and t.text.strip() != "[...]"
+        and _turn_asserts(t.text, sess))
+
+
 def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
     """Return a description of any branch/city term the caller never said.
 
@@ -1786,8 +2392,7 @@ def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
     # whole because the hint-echo check below asks a different question
     # ("was this term only ever a bare echo on dead air"), which a
     # question-shaped turn answers just as well as a statement.
-    heard = " ".join(t.text.lower() for t in _usable
-                     if _turn_asserts(t.text, sess))
+    heard = _asserted_caller_text(sess)
     if not heard.strip():
         # Nothing transcribed, or nothing ASSERTED — cannot judge either
         # way, so do not block. Same conservative direction as before.
@@ -1819,7 +2424,23 @@ def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
         #
         # So numbers get no tolerance at all. Every digit run in the value must
         # appear verbatim in what the caller actually said.
+        # A NUMBER SAID AS A WORD IS STILL THAT NUMBER. This is normalisation,
+        # not tolerance: the rule's zero-tolerance is about numbers the caller
+        # never GAVE, not about which notation they arrived in.
+        #
+        # call-20260825-1226: the caller said "Riverside Campus Seventh Street"
+        # twice, the model wrote "7th", and the digit rule reported "number 7
+        # not in what the caller said" — three refusals, and the branch that
+        # finally saved was a bare "Riverside" with the campus and the street
+        # both lost. The map was already there and already knew seventh -> 7;
+        # only the caller's side of the comparison was not consulting it. The
+        # reverse direction — value spelled out, caller said digits — has been
+        # handled since the spelled-number bypass was closed, so this is the
+        # missing half of a check that was always meant to be symmetric.
         _said_nums = set(re.findall(r"\d+", heard))
+        _said_nums |= {str(_NUMBER_WORD_VALUE[w])
+                       for w in re.findall(r"[a-z]+", heard)
+                       if w in _NUMBER_WORD_VALUE}
         _value_nums = set(re.findall(r"\d+", value))
         _invented = sorted(_value_nums - _said_nums)
         if _invented:
@@ -1870,17 +2491,359 @@ def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
         # One content word appearing is enough — transcription is imperfect and
         # we would rather let a real answer through than block it. See the digit
         # rule above for where this tolerance had to stop.
-        if not any(w in heard for w in content):
+        if not any(_grounded_in(w, heard) for w in content):
             missing.append(f"{field}={value!r}")
             continue
         # It appears. Check it did not appear ONLY as a bare echo on dead air.
         _support = [t for t in _usable
-                    if any(w in t.text.lower() for w in content)]
+                    if any(_grounded_in(w, t.text.lower()) for w in content)]
         _level = _caller_speech_level(sess)
         if _support and all(_is_hint_echo(t, content, _level) for t in _support):
             missing.append(
                 f"{field}={value!r} (only heard as a bare term on silent audio)")
     return " and ".join(missing)
+
+
+def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
+                       arg: str, probe, classifier, states,
+                       label: str) -> str:
+    """Grounding for a closed-set field. Empty string means it checks out.
+
+    PARAMETRISED OVER THE VOCABULARY, not copied per field. `probe` is the
+    pattern that recognises the ask this answer belongs to — it is what anchors
+    the search, and it is the same Field.probe the objective and the ask budget
+    already use, so a template cannot end up with three different opinions
+    about what counts as asking the question.
+
+    WHY THIS IS NOT `classify_choice(heard)` OVER THE CALLER BLOB, which is the
+    obvious reading of "do for CHOICE what _ungrounded_terms does for PLACE".
+    That would be strictly weaker than the location check, not equivalent, for
+    three reasons that all come from the same place: a location is a
+    high-entropy proper noun and a status is two bits.
+
+    1. THE BLOB IS THE WRONG SCOPE. "Northgate" appearing anywhere in a call is
+       evidence somebody said Northgate. "Yes" appearing anywhere is evidence of
+       nothing — callers say it constantly for other reasons. "Yes, speaking."
+       at pickup would ground a YES for a call where the accepting question was
+       never answered at all. So the evidence must come from the turns AFTER we
+       asked, not from the call.
+    2. THE BARE-TERM CONJUNCT COLLAPSES. _is_hint_echo requires two signals to
+       fail together: the turn is nothing but the term, AND the audio carried no
+       signal. For a location the first is a real discriminator, because a
+       genuine answer usually arrives with surrounding words. A genuine status
+       answer IS "Yes." — bare is the normal shape — so that conjunct is
+       satisfied by every true answer and the audio measurement is doing all of
+       the work alone. Which means it needs the rms check MORE than the location
+       check does, not less: it is the only signal left.
+    3. THE TRANSCRIBER FABRICATES EXACTLY THIS. 0.7s of near-silence produced a
+       whole receptionist greeting on call-20260820-1732, and the hint that did
+       it has since been cut — but the old hint's own "Likely phrases: yes,
+       speaking" came back four times on call-20260813-1409. A phantom "Yes." on
+       dead air is squarely inside what this transcriber does, and unlike a
+       phantom place name there is no distinctiveness left to catch it.
+
+    So: anchored to the ask, asserted rather than asked back, classified to the
+    state being claimed, and rejected when its only support is a bare token on
+    silent audio. When there was no ask to anchor to, the turn must additionally
+    be ABOUT new patients — see the check below, which is where reason 1 would
+    otherwise creep back in.
+    """
+    status = str(args.get(arg) or "").strip().lower()
+    if status not in states:
+        return ""      # tools.py rejects this on its own terms; not our call.
+
+    # ANCHORED. Only turns after the most recent ASK about THIS field count.
+    #
+    # `_is_ask_for`, not a bare probe match, and the difference is a false
+    # accept. The probe recognises the TOPIC; an agent turn can be about the
+    # topic while asking nothing — a read-back, an acknowledgement, a closing
+    # line. On call-20260824-2014 the agent's own "I heard you say she's taking
+    # the new patients" matched the probe, advanced the anchor past every
+    # caller turn that had answered, and left the window empty; the guard then
+    # took its own "no evidence since the ask" branch and ACCEPTED a status it
+    # had just refused three times. The model cannot be allowed to move the
+    # goalposts by talking, which is the same principle as _ungrounded_terms
+    # excluding the agent's words from `heard`.
+    since = 0
+    asked = False
+    for i, t in enumerate(sess.turns):
+        if t.role == "agent" and _is_ask_for(t.text or "", probe):
+            since = i + 1
+            asked = True
+    usable = [t for t in sess.turns[since:]
+              if t.role == "caller" and t.text.strip() != "[...]"]
+    if not usable:
+        # NOTHING TRANSCRIBED SINCE WE ASKED — stand down, do not block. Same
+        # conservative direction as every other guard here: absence of
+        # transcript is not evidence of fabrication, and a transcript can lag
+        # the tool call that follows it.
+        return ""
+
+    # ASSERTED, not asked back. "Is she accepting new patients?" repeated by a
+    # receptionist checking what we want is not them telling us. Same predicate
+    # the location check uses, for the same reason.
+    asserted = [t for t in usable if _turn_asserts(t.text, sess)]
+    if not asserted:
+        # THEY SPOKE AND NONE OF IT WAS AN ANSWER. This is NOT the same as the
+        # silence above and must not share its verdict.
+        #
+        # The location guard can afford to stand down here, because a saved
+        # branch still has to survive the blob check — its words must appear in
+        # what the caller said, so there is a second gate underneath. A status
+        # has no second gate: it is two bits, tools.py accepts any of the four
+        # by definition, and this function is the only thing standing between a
+        # model's guess and the directory. Standing down when the caller has
+        # demonstrably only asked questions back would mean any status could be
+        # saved at that moment, which is precisely the fabrication case.
+        said = "; ".join(t.text.strip()[:60] for t in usable[-2:])
+        return (f"{label}={status!r} — since you asked, they have only asked "
+                f"back, not answered | THEY SAID: {said!r}")
+
+    matching = []
+    for t in asserted:
+        heard_state = classifier(t.text)
+        if heard_state is None or heard_state.value != status:
+            continue
+        # NEVER ASKED -> THE TURN MUST BE ABOUT NEW PATIENTS.
+        #
+        # Without an ask there is no anchor, so `since` is 0 and every caller
+        # turn from pickup onwards is in scope — which reopens reason 1 above
+        # in the one case it bites hardest. "Yes, speaking." is the single most
+        # common opening utterance in this corpus (it is the phrase the retired
+        # transcription hint echoed four times on call-20260813-1409), it
+        # classifies as YES on a bare affirmative, and with no ask to anchor
+        # against it would ground a new-patient status nobody was ever asked
+        # for. The permissive branch was contradicting this function's own
+        # docstring.
+        #
+        # Volunteering the answer is still honoured, which is what the anchor
+        # was relaxed for in the first place: a receptionist who says "we're
+        # not taking new patients right now" while you are still on the branch
+        # question has told you, and that turn is ABOUT the thing. A bare "yes"
+        # is not. The cost of being wrong here is one turn — the agent asks,
+        # they repeat, it grounds normally — against a wrong directory row that
+        # nobody can spot afterwards.
+        # NEVER ASKED -> THE TURN MUST STAND ON ITS OWN.
+        #
+        # This tested whether the turn contained the ASK's vocabulary, and that
+        # was the wrong question. On call-20260825-0915 the caller said "we are
+        # full right now, but I can put you on the list. You would be number
+        # 21." — a textbook waitlist answer — while the agent was still asking
+        # about the BRANCH, so nothing had matched ACCEPTING_ASK and the
+        # never-asked path applied. That sentence contains none of "accepting",
+        # "taking new" or "new patients", so the vocabulary test threw it out.
+        # Refused twice, and the queue position the client most wanted never
+        # reached the record.
+        #
+        # What the rule was actually defending against is a BARE AFFIRMATIVE
+        # with no anchor: "Yes, speaking." at pickup classifies YES on its
+        # opening token alone and asserts nothing about new patients. So test
+        # for that directly — strip the leading yes and see whether what remains
+        # still says the same thing. A turn that states the condition in its own
+        # words survives; one that was only ever a "yes" does not.
+        if not asked and not states_in_its_own_right(
+                t.text, status, classifier):
+            continue
+        matching.append(t)
+    if not matching:
+        said = "; ".join(t.text.strip()[:60] for t in asserted[-3:])
+        return (f"{label}={status!r} — nothing the caller said since you asked "
+                f"reads as that answer | THEY SAID: {said!r}")
+
+    # The only support is a bare token on audio that carried nothing. For this
+    # field that is the whole test, not a tiebreak — see 2. above.
+    level = _caller_speech_level(sess)
+    tokens = [w for t in matching
+              for w in re.findall(r"[a-z']+", t.text.lower())]
+    if all(_is_hint_echo(t, tokens, level) for t in matching):
+        return (f"{label}={status!r} — only heard as a bare word on silent "
+                f"audio, which is what a transcription artefact looks like")
+
+    # ── SELECTION, NOT VALIDATION ───────────────────────────────────────────
+    # `heard` is supposed to be what the caller said. It arrives model-authored
+    # and, until now, entirely unchecked — while all three tool schemas told the
+    # model it was "checked against the call transcript". On
+    # call-20260824-2116 the model inserted clauses nobody uttered:
+    #
+    #   caller : "Yeah, definitely, you can reach out to them."
+    #   heard  : "Yeah, definitely, they're taking new patients also. You can
+    #             reach out to them."
+    #   caller : "Yeah, you need to book through online or call. Please do that."
+    #   heard  : "...call FROM THE FRONT DESK. Please do that."
+    #
+    # A fabricated quote is worse than a wrong status, because it reads as
+    # verbatim to whoever audits the row and there is nothing in the record to
+    # say it is not.
+    #
+    # So the model's string is not checked — it is DISCARDED. This function has
+    # already identified the caller turn that corroborated the status; that
+    # turn's real text is what gets stored, and the model's version becomes
+    # irrelevant rather than merely suspect. Checking would leave the failure
+    # mode in place with a detector in front of it; selection removes it.
+    #
+    # WHICH matching turn, when there are several.
+    #
+    # Last-wins was the first rule and it is wrong. On call-20260825-0915 the
+    # caller circled back and the VAD split their final answer, so the last
+    # turn classifying as WAITLIST was the fragment "The status waitlist is" —
+    # a mid-sentence scrap that went into the record as the quotation
+    # justifying the state, while "we are full right now, but I can put you on
+    # the list. You would be number 21." sat further up.
+    #
+    # FIRST-WINS IS NOT THE ANSWER EITHER, and the reason is worth stating
+    # because it is the tempting flip: a fragment can just as easily arrive
+    # first, and on a call where the caller corrects themselves the earliest
+    # match would be the superseded answer.
+    #
+    # LONGEST WINS, and the justification is that there is no correctness
+    # dimension left to trade. `matching` is already filtered to turns whose
+    # classification EQUALS the state being saved — every candidate asserts the
+    # same thing — so recency buys nothing, and the only remaining question is
+    # which of several agreeing sentences is the fullest statement of it. A
+    # truncated fragment is short by construction; a complete answer carries its
+    # qualifiers with it, which is also how "number 21" survives into the record
+    # rather than being summarised away.
+    #
+    # Ties go to the later turn: same length, same claim, prefer the one they
+    # most recently stood behind.
+    args["heard"] = max(
+        enumerate(matching),
+        key=lambda pair: (len(pair[1].text.strip()), pair[0]),
+    )[1].text.strip()
+    return ""
+
+
+# Every closed-set save tool, with the argument carrying its value, the guard
+# that grounds it, the NEED fragment for a rejection, and where the verdict is
+# recorded. A TABLE rather than three near-identical elif branches: the three
+# differ only in vocabulary, and the branch that handles one is the branch that
+# must handle the next — which is exactly the drift that let the ask budget be
+# generalised in the counters but not in the gate feeding them.
+_CHOICE_SAVE_TOOLS: dict = {}
+
+
+# The three closed-set fields, each bound to the ask that anchors it. Wrappers
+# rather than call-site keyword soup: the pairing of a field with its probe and
+# its vocabulary is a fact about the field, and stating it once here is what
+# stops a caller passing ACCEPTING_ASK while classifying with the referral
+# vocabulary and getting a guard that can never fire.
+def _ungrounded_status(args: dict, sess: "RealtimeSession") -> str:
+    """Grounding for the new-patient status."""
+    from agents.voice.objectives import CHOICE_STATES, classify_choice
+    return _ungrounded_choice(args, sess, arg="status", probe=ACCEPTING_ASK,
+                              classifier=classify_choice, states=CHOICE_STATES,
+                              label="status")
+
+
+# A doctor named in speech: "Dr. Kapoor", "Doctor Smith", "Dr Okafor's".
+_NAMED_DOCTOR = re.compile(r"\b(?:dr\.?|doctor)\s+([a-z][a-z'-]{2,})", re.I)
+
+
+def _surnames_named(text: str) -> list:
+    """Every surname the caller attached to a doctor title, lowercased."""
+    return [m.group(1).lower().rstrip("'s").rstrip("'")
+            for m in _NAMED_DOCTOR.finditer(_norm_quotes(text or ""))]
+
+
+def _wrong_doctor_named(text: str, sess: "RealtimeSession") -> str:
+    """A surname in this turn that is NOT the doctor on record. "" if fine.
+
+    THE CHECK THE IDENTITY FIELD EXISTED FOR AND DID NOT HAVE. On
+    call-20260825-1226 the record said Dr. Okafor, the caller said "that's
+    right, Dr. Kapoor is one of our cardiologists", and identity saved
+    CONFIRMED — because the guard classified the affirmative and never looked
+    at the name. Okafor and Kapoor are not the same person. The field exists to
+    answer "are we talking about the right doctor", and it answered yes about a
+    different one.
+
+    STRICT, AND DELIBERATELY THE OPPOSITE OF THE BRANCH RULE. Branch grounding
+    is lenient because refusing a real answer costs a lost row; here leniency
+    costs a row CONFIRMED against the wrong person, attached to a real
+    practice, which is the worst output this system has. So a named surname
+    must match the one in CALL CONTEXT — collapsed for spacing and hyphens,
+    which preserves the letter sequence, and nothing fuzzier. If the
+    transcriber mangled our doctor's name we refuse a correct confirmation:
+    that is the right way round, because "the ASR mangled it" and "they named
+    someone else" produce the same string and only one of them is safe to
+    assume.
+
+    Silence about the name is not a mismatch. A caller who says "yes, speaking"
+    names nobody, and this returns "" — the classification stands on its own.
+    """
+    named = _surnames_named(text)
+    if not named:
+        return ""
+    from agents.voice.templates import clean_doctor_name
+    _full = clean_doctor_name(getattr(sess.doctor, "doctor_name", "") or "")
+    ours = (_full.split()[-1] if _full.split() else _full).lower()
+    if not ours:
+        return ""
+    if any(_collapse(n) == _collapse(ours) for n in named):
+        return ""
+    return ", ".join(sorted(set(named)))
+
+
+def _ungrounded_identity(args: dict, sess: "RealtimeSession") -> str:
+    """Grounding for whether we reached the right doctor. Its own vocabulary.
+
+    Plus the name check, which the vocabulary alone cannot do: an affirmative
+    is an affirmative whoever it is about, so confirming REQUIRES that no other
+    doctor was named in the same breath.
+    """
+    from agents.voice.objectives import IDENTITY_STATES, classify_identity
+
+    claimed = str(args.get("identity") or "").strip().lower()
+    if claimed == "confirmed":
+        # Only the turns that could be the evidence — after the ask, asserted.
+        for t in reversed(sess.turns):
+            if t.role != "caller" or t.text.strip() == "[...]":
+                continue
+            other = _wrong_doctor_named(t.text, sess)
+            if other:
+                sess.memory.update(wrong_doctor_named=other)
+                return (f"identity='confirmed' — they named {other!r}, and the "
+                        f"doctor on this call is different | THEY SAID: "
+                        f"{t.text.strip()[:70]!r}")
+            if _surnames_named(t.text):
+                break      # our doctor was named, and matched
+    return _ungrounded_choice(args, sess, arg="identity", probe=IDENTITY_ASK,
+                              classifier=classify_identity,
+                              states=IDENTITY_STATES, label="identity")
+
+
+def _ungrounded_scheduling(args: dict, sess: "RealtimeSession") -> str:
+    """Grounding for whether a new patient can actually be booked in."""
+    from agents.voice.objectives import CHOICE_STATES, classify_choice
+    return _ungrounded_choice(args, sess, arg="status", probe=SCHEDULING_ASK,
+                              classifier=classify_choice, states=CHOICE_STATES,
+                              label="scheduling")
+
+
+def _ungrounded_referral(args: dict, sess: "RealtimeSession") -> str:
+    """Grounding for the referral requirement. Its own vocabulary."""
+    from agents.voice.objectives import REFERRAL_STATES, classify_referral
+    return _ungrounded_choice(args, sess, arg="requirement", probe=REFERRAL_ASK,
+                              classifier=classify_referral,
+                              states=REFERRAL_STATES, label="referral")
+
+
+_CHOICE_SAVE_TOOLS.update({
+    "save_doctor_identity": (
+        "identity", _ungrounded_identity,
+        "their own words on whether this is the right doctor, or 'unsure'",
+        "identity_grounding"),
+    "save_new_patient_status": (
+        "status", _ungrounded_status,
+        "their own words on new patients, or 'unsure'", "status_grounding"),
+    "save_scheduling_status": (
+        "status", _ungrounded_scheduling,
+        "their own words on booking a new patient, or 'unsure'",
+        "scheduling_grounding"),
+    "save_referral_requirement": (
+        "requirement", _ungrounded_referral,
+        "their own words on referrals: always, depends on what, or 'unsure'",
+        "referral_grounding"),
+})
 
 
 # A caller turn is "quiet" relative to how loudly THIS caller has been
@@ -2081,6 +3044,50 @@ def _reads_as_hint_vocabulary(text: str, hint: str) -> bool:
     return bool(said & _hint_proper_nouns(hint))
 
 
+def _hint_vocabulary(hint: str) -> frozenset:
+    """Every word the transcriber was primed with, lowercased.
+
+    Derived from the live hint, never listed. The hint is the only thing that
+    decides what the transcriber CAN echo, so it has to be the only thing that
+    decides what we refuse to believe. A hardcoded list goes stale the moment
+    the hint is edited — which is exactly what happened to _hint_proper_nouns
+    when the health-system names came out of it, and why _RETIRED_HINT_TEXT
+    had to be pinned separately to keep that detector alive.
+    """
+    return frozenset(re.findall(r"[a-z]+", (hint or "").lower()))
+
+
+def _is_bare_hint_word(value: str, hint: str) -> bool:
+    """Is this candidate location one word straight out of our own prompt?
+
+    call-20260821-1705: the caller said "hmm". The transcriber had no lexical
+    content to decode, sampled its own conditioning prompt instead, and
+    returned "Suite." Re-decoding that same 0.55s four times returned
+    'campus', 'Suite,', the entire hint verbatim, and Urdu script — outputs
+    that disagree with each other on identical bytes, which is the proof that
+    nothing was being recovered from the audio.
+
+    Grounding cannot see this and never could: the fabricated word IS in the
+    transcript, so _ungrounded_terms checking the value against the transcript
+    is circular. Both gates that might have caught it were false for sound
+    reasons — the audio was real (rms 0.038, peak 0.134), and the hint's
+    location words are lowercase so a capitalisation-derived proper-noun set
+    cannot contain them. This is the one check that asks where the word came
+    from rather than whether it was said.
+
+    ONE bare word only, and that restraint is the whole safety of it.
+    "Downtown East", "Riverside Clinic", "Baptist Medical Center" and "1420
+    Beacon Street" every one contain a hint word and every one names a real
+    place; refusing a location for merely containing hint vocabulary would
+    reject most of the true ones. An echo arrives alone because the
+    transcriber sampled a single token, not a phrase.
+    """
+    words = re.findall(r"[A-Za-z0-9]+", value or "")
+    if len(words) != 1:
+        return False
+    return words[0].lower() in _hint_vocabulary(hint)
+
+
 def _strip_hint_run(text: str, hint: str) -> str:
     """Truncate `text` at the first verbatim run of >= _HINT_RUN_WORDS hint words.
 
@@ -2230,13 +3237,24 @@ class RealtimeSession:
         # Agent PCM: list of (time_offset_from_stream_start_seconds, pcm16_bytes)
         # Timestamps let us place agent audio at the right position on the timeline
         self._agent_pcm: list[tuple[float, bytes]] = []
-        # Caller PCM: continuous stream from Twilio — already timeline-aligned
+        # Caller PCM: continuous stream from Twilio — already timeline-aligned.
+        # EVERY inbound frame, so save() can lay a gapless caller channel
+        # against the agent blocks. Not safe to measure utterances against:
+        # see _caller_oai_pcm.
         self._caller_pcm: list[bytes] = []
-        # How far into _caller_pcm OpenAI's input buffer begins. Every frame is
-        # appended above from stream start (save() needs the whole call), but
-        # frames are only FORWARDED once listen_enabled is set, so OpenAI's
-        # audio_start_ms/audio_end_ms are zeroed at a different point than ours.
-        # Set once, at the moment listening is enabled. See _utterance_slice.
+        # The frames OpenAI actually received, and only those. Separate from
+        # _caller_pcm because the two answer different questions and the
+        # answers diverge: the recording wants every frame, the measurement
+        # wants OpenAI's own timeline. Merging them cost call-20260821-1856 —
+        # 173 frames withheld from OpenAI but kept for the recording put our
+        # index 3.46s ahead of OpenAI's ms clock, and the caller's real answers
+        # were deleted as fabrications. See the append site in the media loop.
+        self._caller_oai_pcm: list[bytes] = []
+        # How far into _caller_oai_pcm OpenAI's input buffer begins. Zero by
+        # construction now — nothing is forwarded before listen_enabled is set,
+        # and that buffer only receives forwarded frames — but kept, computed
+        # and asserted rather than assumed, because this is the third distinct
+        # cause of an audio-clock offset on this codebase.
         self._listen_start_bytes: int = 0
         # When the Twilio stream started (set on "start" event)
         self._stream_start_time: Optional[datetime] = None
@@ -2293,9 +3311,22 @@ class RealtimeSession:
         # >1 means the VAD split the caller's turn, which is the condition that
         # used to lose the measurement.
         self._utterance_segments: int = 0
-        # Asks for the location so far, and whether we have already told the
-        # model to stop. See realtime_max_location_asks.
-        self._location_asks: int = 0
+        # What the call is trying to collect, and what counts as done. Declared
+        # by the template; defaulted here so a session built without one (every
+        # unit check in the test suite) still has an objective to reason about.
+        self.objective: CallObjective = default_objective()
+        # ── The two ask counters ────────────────────────────────────────────
+        # CONSECUTIVE asks the caller did not answer. This is the budget: it is
+        # what ends a call, and it resets to zero the moment they say something,
+        # so four answered asks per doctor across several doctors never touch
+        # it. Replaces _location_asks, which counted asks that HAD been
+        # answered and ended call-20260821-1931 with the answer in hand.
+        self._unanswered_asks: int = 0
+        # Asks since anything was last COLLECTED. The liveness bound that the
+        # old counter was providing by accident — a caller who answers every
+        # ask and supplies nothing would otherwise never end the call, and
+        # there is no duration cap anywhere in this path.
+        self._asks_without_progress: int = 0
         # Exchanges where the caller questioned the agent back instead of
         # answering. Bounded by _MAX_VETTING_REASKS.
         self._vetting_reasks: int = 0
@@ -2317,10 +3348,6 @@ class RealtimeSession:
         # Initialising this to 0 made the opener score as an unanswered re-ask
         # and the budget started a turn behind.
         self._last_ask_turn_idx: int = -1
-        # Consecutive asks the caller never answered. Bounded by
-        # _MAX_UNANSWERED_REASKS so a caller who only ever says "hello" cannot
-        # keep the call alive forever.
-        self._unanswered_reasks: int = 0
         # When the deferred goodbye retry is due, or None. Set by the
         # response.done handler, acted on by the watchdog — the handler must not
         # sleep, because sleeping there stops the event pump.
@@ -2385,6 +3412,12 @@ class RealtimeSession:
         # When the caller stopped speaking (monotonic), cleared by the first
         # audio delta of the reply. See note_reply_latency.
         self._caller_stopped_at: Optional[float] = None
+        # How long the DETECTOR took to tell us the caller had stopped,
+        # measured from audio_end_ms rather than assumed per detector. This
+        # is the term that separates server_vad from semantic_vad, and it was
+        # a hardcoded guess in both directions before it was measured.
+        self._last_stop_lag_s: float = 0.0
+        self.detector_lags: list[float] = []
         # Every measured gap between a caller finishing and the agent's first
         # sound, in seconds. One number per turn beats one impression per call.
         self.reply_latencies: list[float] = []
@@ -2434,6 +3467,13 @@ class RealtimeSession:
         self._last_backchannel_at: float = 0.0
         self._last_backchannel_clip: Optional[str] = None
         self._backchannels_sent: int = 0
+        # Wall clock until which our own backchannel may still be audible on
+        # the callee's line. See _BACKCHANNEL_ECHO_MARGIN_S.
+        self._backchannel_mute_until: float = 0.0
+        # Frames withheld inside that window because they were too quiet to be
+        # the caller. Non-zero means the speakerphone echo is real and was
+        # caught; zero across a call means it never happened.
+        self._backchannel_echo_frames: int = 0
         # Answered-identity nudge, also one-shot for the same reason.
         self._identity_nudged: bool = False
         # Said the same sentence twice in a row, one-shot for the same reason.
@@ -2458,6 +3498,11 @@ class RealtimeSession:
         # appended to the conversation and there is no second lever, so its
         # effectiveness has to be measured rather than assumed.
         self._give_up_at_turn: Optional[int] = None
+        # Which ceiling ran out: "unanswered" (they stopped replying) or
+        # "no_progress" (they replied and never supplied). It selects the
+        # directive AND the escalate reason, so a call that ends this way
+        # records why in words that are true of it.
+        self._give_up_trigger: str = "no_progress"
 
         # Token usage tracking (from response.done events).
         # Cached tokens are counted SEPARATELY and billed at the cached rate —
@@ -2499,9 +3544,70 @@ class RealtimeSession:
         Bounded because a stray measurement would poison the median that goes
         in the artifact: anything past 30s is not a reply latency, it is a turn
         that never came, and the silence watchdog owns that failure.
+
+        The CEILING is the point. The floor used to exclude 0.0 too, which
+        cost nothing while server_vad added a fixed 0.7s to every sample and
+        silently dropped the fastest replies once semantic_vad set that term
+        to zero. The call site has already established the measurement is
+        real — it only runs when _caller_stopped_at was set — so a gap that
+        rounds to zero is a fast reply, not a stray.
         """
-        if 0.0 < seconds < 30.0:
+        if 0.0 <= seconds < 30.0:
             self.reply_latencies.append(seconds)
+
+    def collected_fields(self) -> dict:
+        """Every field the objective declares, with what this call learned.
+
+        THE VALUES WERE BEING DROPPED ON THE FLOOR. Until 2026-08-24 the call
+        artifact recorded `collected: ["branch","accepting","scheduling",
+        "referral"]` and `outcome: complete` and NOT ONE of the three status
+        values — they were written to CallMemory, which is a per-call scratchpad
+        with a one-hour TTL, and never copied into the record. A call that got
+        everything it came for wrote down THAT it had succeeded and not WHAT it
+        learned, which is a more complete defeat of a four-field script than any
+        fabricated quote.
+
+        Derived from the objective rather than from a hand-written list of keys,
+        so a template that adds a fifth field does not also have to remember to
+        add it here — that omission is exactly how the first three went missing.
+        """
+        out: dict = {}
+        for f in _objective_of(self).fields:
+            value = self.memory.get(f.memory_key)
+            if value is None:
+                continue
+            entry = {"value": value}
+            # Their own words, and the qualifier, where the tool records them.
+            for suffix in ("heard", "detail", "depends_on"):
+                extra = self.memory.get(f"{f.memory_key}_{suffix}")
+                if extra:
+                    entry[suffix] = extra
+            out[f.name] = entry
+        return out
+
+    def reset_ask_budget(self, why: str) -> None:
+        """The caller engaged, or something was collected: start the budget over.
+
+        THREE SITES USED TO DO THIS BY HAND and they disagreed about which
+        counters to clear — the escalation-block site reset the vetting count,
+        the hold site and the named-a-place site did not, for no stated reason.
+        Each of those resets fires precisely when the caller has just proved
+        they are engaging, which is the condition for clearing all of them.
+
+        Prints, because a guard that silently undoes another guard's work is how
+        the give-up directive came to fire on a call that had already been
+        answered twice.
+        """
+        if self._give_up_sent or self._unanswered_asks or self._asks_without_progress:
+            print(f"[Realtime] Ask budget reset — {why} "
+                  f"(was unanswered={self._unanswered_asks} "
+                  f"no-progress={self._asks_without_progress} "
+                  f"give_up={self._give_up_sent})", flush=True)
+        self._give_up_sent = False
+        self._give_up_at_turn = None
+        self._unanswered_asks = 0
+        self._asks_without_progress = 0
+        self._vetting_reasks = 0
 
     def add_turn(self, role: str, text: str,
                  audio_rms: Optional[float] = None) -> None:
@@ -2575,12 +3681,20 @@ class RealtimeSession:
             print("     response.create carries an `instructions` override.", flush=True)
         print("─" * 56 + "\n", flush=True)
 
-    def _enrich_doctor(self, branch: Optional[str], resolved: bool) -> dict:
+    def _enrich_doctor(self, branch: Optional[str], outcome: Outcome) -> dict:
         """Apply what this call learned to self.doctor, and describe the result.
 
         Mirrors the email agent's node_parse_done, which is the only other
         place a Doctor is enriched — same fields, same intent, so a record
         touched by voice and one touched by email stay comparable.
+
+        TAKES THE OUTCOME, NOT A BOOLEAN, and the difference is the point of the
+        2026-08-24 change. The write used to be gated on `resolved and branch`,
+        so a call-level verdict decided whether a FIELD got written — and since
+        save_branch was the only thing that could set that verdict, a call which
+        collected something else and no branch wrote nothing at all. A field
+        that passed every guard is worth recording whatever the call as a whole
+        managed; the outcome decides the STATUS, not whether the data lands.
 
         Status is NOT set to COMPLETE the way the email path does. COMPLETE
         means "all required fields present", and is_complete() requires a
@@ -2594,14 +3708,18 @@ class RealtimeSession:
         """
         doc = self.doctor
         was = doc.status
-        if resolved and branch:
+        if branch:
             doc.branch = branch
             city = self.memory.get("city")
             if city:
                 doc.city = city
             # The first assignment of Source.VOICE anywhere in the programme.
             doc.source = Source.VOICE
-            doc.status = (DoctorStatus.VERIFIED if doc.is_complete()
+            # VERIFIED only when the call met its whole objective AND the record
+            # is otherwise usable. A partial call that got the branch still
+            # writes the branch — it just does not claim the record is verified.
+            doc.status = (DoctorStatus.VERIFIED
+                          if outcome is Outcome.COMPLETE and doc.is_complete()
                           else DoctorStatus.PARTIALLY_VERIFIED)
             doc.enriched_at = datetime.now(timezone.utc)
         elif not doc.branch:
@@ -2630,6 +3748,12 @@ class RealtimeSession:
             "missing_for_complete": missing,
             "enriched_at":    doc.enriched_at.isoformat() if doc.enriched_at else None,
             "enriched_by":    self.call_id,
+            # The non-branch fields, on the row the client actually reads. The
+            # Doctor model has no column for them and inventing one here would
+            # put a second schema in the directory, so they travel as a nested
+            # dict beside the columns that do exist — visible, and clearly not
+            # pretending to be validated Doctor fields.
+            "collected_fields": self.collected_fields(),
         }
 
     def _write_doctor_directory(self, doctor_record: dict) -> None:
@@ -2738,19 +3862,33 @@ class RealtimeSession:
         data_dir = json_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
         branch  = self.memory.get("branch")
-        resolved = bool(self.memory.get("resolved"))
+        # RE-DERIVED HERE, not read as a fact somebody else asserted. The
+        # objective is the authority on what this call was for; memory holds a
+        # copy written after each tool call for the readers that only know
+        # about `resolved`, and recomputing means a call that ended without a
+        # final tool call still reports truthfully.
+        objective = _objective_of(self)
+        outcome  = objective.outcome(self.memory)
+        resolved = objective.is_success(self.memory)
+        collected = list(objective.collected(self.memory))
+        missing   = list(objective.missing(self.memory))
         # Write what the call learned back onto the record it came from. Until
         # now nothing did: a resolved call wrote a CallRecord and the Doctor
         # that started it was never touched, so Source.VOICE was assigned to
         # nothing anywhere in the repo. The programme's purpose is enriching a
         # client directory, and the enrichment was ending at the call log.
-        doctor_record = self._enrich_doctor(branch, resolved)
+        doctor_record = self._enrich_doctor(branch, outcome)
         # clean_doctor_name strips "Dr." so we don't get "Dr. Dr. John"
         from agents.voice.templates import clean_doctor_name
         doctor_display = clean_doctor_name(self.doctor.doctor_name)
+        # Reports the BRANCH on its own terms. It used to say "Branch could not
+        # be confirmed" whenever `resolved` was false, which for a partial call
+        # would be a false sentence sitting next to the branch it denies.
         summary = (
             f"Called {self.doctor.hospital_name} to verify Dr. {doctor_display}'s branch. "
-            + (f"Branch confirmed: {branch}." if resolved else "Branch could not be confirmed.")
+            + (f"Branch confirmed: {branch}." if branch
+               else "Branch could not be confirmed.")
+            + (f" Not collected: {', '.join(missing)}." if missing else "")
         )
 
         # Clean up transcript:
@@ -2867,6 +4005,22 @@ class RealtimeSession:
             "hospital_name":  self.doctor.hospital_name,
             "branch":         branch,
             "resolved":       resolved,
+            # THREE-VALUED, next to the boolean rather than instead of it. Every
+            # existing reader wants `resolved`; none of them can express "got
+            # the branch, never got the accepting status", which is the shape
+            # the next script produces on a good call that ran out of patience.
+            "outcome":        outcome.label,
+            "collected":      collected,
+            "missing":        missing,
+            # WHAT it learned, not merely THAT it learned something. `collected`
+            # is a list of field NAMES; without this the values never left
+            # CallMemory and the artifact could not answer "is this practice
+            # taking new patients", which is the question the call was placed to
+            # answer. Carries each field's value, the caller's own words as
+            # selected from the transcript, and any qualifier that survived
+            # grounding.
+            "fields":         self.collected_fields(),
+            "success_at":     objective.success_at.label,
             # The enrichment this call produced, as applied to the Doctor. Kept
             # in the call artifact as well as doctors.json so a row in the
             # directory can always be traced to the call that wrote it.
@@ -2896,6 +4050,14 @@ class RealtimeSession:
             # Second-spoken-item audio withheld before it reached the caller.
             # Non-null here means the model tried to talk over itself.
             "dropped_second_items": self.dropped_second_items or None,
+            # Backchannels played, and inbound frames withheld while one was
+            # still audible. The second number is the whole reason the first
+            # can be trusted: our clips are "mm-hm"/"okay"/"right"/"sure", and
+            # a caller genuinely saying "Okay." transcribes identically, so
+            # echo could never be found in the transcript afterwards. Non-zero
+            # means speakerphone echo is real on this line and was stopped.
+            "backchannels_sent": self._backchannels_sent or None,
+            "backchannel_echo_frames": self._backchannel_echo_frames or None,
             # Of those, how many carried the substance of the turn and were
             # said on the next one instead of lost.
             "owed_substance_recovered": self._owed_recovered or None,
@@ -2918,7 +4080,11 @@ class RealtimeSession:
                           if self.reply_latencies else None,
                 "worst":  round(max(self.reply_latencies), 2)
                           if self.reply_latencies else None,
-                "vad_hold_s": round(settings.realtime_silence_ms / 1000.0, 2),
+                # Measured, not assumed: median time the detector took to
+                # report the stop. vad_hold_s used to be silence_ms echoed
+                # back, which told you the setting, never the behaviour.
+                "detector_lag_s": (round(median(self.detector_lags), 2)
+                                   if self.detector_lags else None),
             } if self.reply_latencies else None,
             # Countable conversational failures. Prose rules against these have
             # been ignored across three prompt versions; measuring them makes
@@ -2930,7 +4096,8 @@ class RealtimeSession:
             # Recorded so the budget is evaluated, not trusted.
             "ask_budget": _ask_budget_outcome(
                 self.turns, self._give_up_at_turn,
-                self._give_up_sent, bool(self.memory.get("escalated"))),
+                self._give_up_sent, bool(self.memory.get("escalated")),
+                self._give_up_trigger),
             # Recorded even when it does not fire, so there is data on how often
             # a callee names themselves at all — the check is untestable until
             # real hospital numbers are dialled.
@@ -3016,6 +4183,8 @@ class RealtimeSession:
                 "hospital":         self.doctor.hospital_name,
                 "branch":           branch,
                 "resolved":         resolved,
+                "outcome":          outcome.label,
+                "missing":          missing,
                 "grounding":        self.memory.get("grounding"),
                 "duration_seconds": duration,
                 "cost_usd":         round(cost_usd, 6),
@@ -3033,7 +4202,9 @@ class RealtimeSession:
             self._write_doctor_directory(doctor_record)
         except Exception as e:
             log.error("Failed to write doctor directory: %s", e, exc_info=True)
-        log.info("Realtime call saved: %s (resolved=%s branch=%s)", self.call_id, resolved, branch)
+        log.info("Realtime call saved: %s (%s resolved=%s branch=%s)",
+                 self.call_id, _describe_objective(objective, self.memory),
+                 resolved, branch)
 
         # ── End-of-call summary ────────────────────────────────────────
         _W = 60
@@ -3045,6 +4216,13 @@ class RealtimeSession:
         print(f"  Duration : {duration}s", flush=True)
         if resolved:
             print(f"  Result   : ✅ RESOLVED — Branch: {branch}", flush=True)
+        elif outcome is Outcome.PARTIAL:
+            # PRINTED AS PARTIAL, not as a failure. A call that collected some
+            # of what it came for and is filed as NOT RESOLVED is the defect
+            # this outcome exists to stop, and the console is where it would be
+            # believed first.
+            print(f"  Result   : ◐ PARTIAL — got {', '.join(collected)}; "
+                  f"missing {', '.join(missing)}", flush=True)
         else:
             reason = self.memory.get("escalate_reason", "unknown")
             print(f"  Result   : ⚠️  NOT RESOLVED — {reason}", flush=True)
@@ -3095,12 +4273,13 @@ class RealtimeSession:
             for _why, _n in sorted(_seen_why.items(), key=lambda kv: -kv[1]):
                 print(f"        {_n}x  {_why[:88]}", flush=True)
         if self.reply_latencies:
-            _vad = settings.realtime_silence_ms / 1000.0
+            _vad = (median(self.detector_lags) if self.detector_lags
+                    else 0.0)
             print(f"    reply gap            "
                   f"median {median(self.reply_latencies):.2f}s, "
                   f"worst {max(self.reply_latencies):.2f}s "
                   f"({len(self.reply_latencies)} turns)", flush=True)
-            print(f"      of which VAD hold  {_vad:.2f}s — the rest is "
+            print(f"      of which detector  {_vad:.2f}s — measured, then "
                   f"inference plus the round trip", flush=True)
         # Is the hint-echo guard's benefit-of-the-doubt exemption a corner case
         # or the common path? Only counting answers that.
@@ -3502,14 +4681,29 @@ async def _twilio_to_oai(
                         # Twilio already speaks the session's format. Store the
                         # μ-law bytes as-is and forward the payload untouched.
                         raw_bytes = base64.b64decode(payload)
-                        sess._caller_pcm.append(raw_bytes)
+                        _oai_bytes = raw_bytes
                         oai_payload = payload
                     else:
                         raw_bytes = base64.b64decode(payload)
                         pcm_24k = (resample(_mulaw_decode(raw_bytes), _TWILIO_SR, _OAI_SR) * 32767).astype(np.int16)
-                        sess._caller_pcm.append(pcm_24k.tobytes())
-                        oai_payload = base64.b64encode(pcm_24k.tobytes()).decode()
+                        _oai_bytes = pcm_24k.tobytes()
+                        oai_payload = base64.b64encode(_oai_bytes).decode()
+                    # THE RECORDING. Every inbound frame, unconditionally, so
+                    # save() gets a gapless timeline. Deliberately NOT the
+                    # buffer OpenAI's timestamps index into — see the mirror
+                    # append at the send below.
+                    sess._caller_pcm.append(_oai_bytes)
                     if not sess.listen_enabled.is_set():
+                        continue
+                    # Our own backchannel, coming back off a speakerphone.
+                    # Energy, not a hard mute: the caller is BY DEFINITION
+                    # mid-utterance here (a clip only fires 2.8s into their
+                    # turn), so muting outright would cut real speech. Their
+                    # measured level on the Twilio channel is 0.079-0.240
+                    # against a threshold of 0.020 — real speech passes with
+                    # a wide margin, an attenuated "mm-hm" does not.
+                    if _is_own_backchannel_echo(sess, raw_bytes):
+                        sess._backchannel_echo_frames += 1
                         continue
                     if sess.agent_speaking and not _echo_gate_allows(raw_bytes):
                         # Only reached under REALTIME_ECHO_GATE=drop|energy.
@@ -3529,6 +4723,22 @@ async def _twilio_to_oai(
                         # line echo on their own — an empirical question one
                         # call answers.
                         continue
+                    # THE MIRROR. Appended here, at the send, and nowhere else
+                    # — so a frame is in this buffer if and only if OpenAI
+                    # received it. Every `continue` above is a frame OpenAI
+                    # never saw, and any of them appending would put our index
+                    # ahead of OpenAI's ms clock by exactly that much.
+                    #
+                    # That is not hypothetical. On call-20260821-1856 the
+                    # backchannel echo guard withheld 173 frames while
+                    # _caller_pcm still took them: 3.46s of drift, after which
+                    # _utterance_slice read past the end of every utterance
+                    # into mu-law silence and reported rms=0.000244 — the same
+                    # fingerprint _utterance_slice's own docstring names. The
+                    # quarantine then deleted the caller's real answers
+                    # ("She's in San Francisco.", "clinic") as fabrications and
+                    # the call ended unresolved with the answer in hand.
+                    sess._caller_oai_pcm.append(_oai_bytes)
                     await oai_ws.send(json.dumps({
                         "type":  "input_audio_buffer.append",
                         "audio": oai_payload,
@@ -3623,6 +4833,11 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                 sess._last_backchannel_at = time.time()
                 sess._last_backchannel_clip = _payload
                 sess._backchannels_sent += 1
+                # Shut the echo window BEFORE the clip goes out, and size it
+                # from the clip's own length — 8000 bytes/s of 8kHz mu-law.
+                sess._backchannel_mute_until = (
+                    time.time() + len(base64.b64decode(_payload)) / 8000.0
+                    + _BACKCHANNEL_ECHO_MARGIN_S)
                 try:
                     await twilio_ws.send_text(json.dumps({
                         "event": "media", "streamSid": sess.stream_sid,
@@ -3840,6 +5055,14 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     except json.JSONDecodeError:
         args = {}
 
+    # What the call had collected BEFORE this tool ran, so the no-progress
+    # ceiling can be reset by progress rather than by a guess about which tool
+    # constitutes progress. save_branch is not the only way a field arrives —
+    # a template may point a field at a note_* key — and hard-coding the tool
+    # name here is how the success condition ended up inside save_branch in the
+    # first place.
+    _collected_before = set(_objective_of(sess).collected(sess.memory))
+
     # Grounding check. On a live call the model called save_branch
     # with {'branch': 'Riverside Clinic', 'city': 'Atlanta'} when
     # the caller had said only "Hello" and "Okay, next slide,
@@ -3861,16 +5084,68 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
         #
         # So record it. A save that could not be verified must not
         # be indistinguishable downstream from one that was.
+        # THE CALLER ANSWERED. Whatever happens to the value below, the model
+        # only reaches here because it believed it heard a place — so the ask
+        # budget, which exists to stop the agent pestering someone who will not
+        # engage, has no business counting this call against them.
+        #
+        # It did, and it cost call-20260821-1931. The caller said "Mission Bay
+        # Clinic, 1825 4th Street"; the live transcript mangled it to "Ford
+        # Street"; grounding rejected the model's correct reading of it; the
+        # agent asked again, that re-ask hit the 4-ask limit, and the give-up
+        # directive fired. The caller then repeated the address cleanly — and
+        # _ungrounded_terms passes on that transcript, verified — but the agent
+        # had already been told to stop, so it said goodbye instead of
+        # retrying. The recovery path existed and the budget closed it.
+        #
+        # Safe because the two budgets measure different things and only this
+        # one is being reset: a model that keeps offering bad values is still
+        # bounded by _MAX_SAVE_REJECTIONS, which counts up while this counts
+        # down. Charging a rejected save to both is double jeopardy, and the
+        # person paying it is the caller who answered.
+        if str(args.get("branch") or "").strip():
+            sess.reset_ask_budget("caller named a place")
         heard_any = any(t.role == "caller" and t.text.strip() != "[...]"
                         for t in sess.turns)
+        # QUALIFIED, not just asserted. Grounding accepts on one content word,
+        # so "verified against caller transcript" was being stamped on values
+        # whose distinctive part nobody was heard to say — see _rode_along.
+        _rode = _rode_along(args, sess)
         sess.memory.update(
-            grounding="verified against caller transcript" if heard_any
+            grounding=("verified against caller transcript"
+                       + (f" EXCEPT {', '.join(repr(w) for w in _rode)}, "
+                          f"which the caller was never transcribed saying"
+                          if _rode else "")) if heard_any
             else "SKIPPED — no caller speech was transcribed on this "
                  "call, so the saved location could not be checked "
                  "against anything the caller actually said"
         )
+        if _rode:
+            sess.memory.update(rode_along=_rode)
+            print(f"[Realtime] ⚠️  grounded on other words — "
+                  f"{', '.join(repr(w) for w in _rode)} never appeared in the "
+                  f"caller transcript", flush=True)
         ungrounded = _ungrounded_terms(args, sess)
-        if ungrounded:
+        # FIRST, because it is the only gate that can see this one. A bare
+        # hint word passes grounding (it is in the transcript), passes the
+        # address check, and passes the organisation check — all three were
+        # measured false on call-20260821-1705 while "Suite" sat in args.
+        _val = str(args.get("branch") or "")
+        if _is_bare_hint_word(_val, getattr(sess, "transcribe_hint", "") or ""):
+            sess.memory.update(untrusted_location=_val)
+            result = {
+                "ok": False,
+                "error": (
+                    f"NOT SAVED — {_val!r} is one generic location word, not "
+                    f"the name of a place | LIKELY a transcription artifact "
+                    f"on a turn that carried no speech "
+                    f"| NEED: the site name in full, as they said it"
+                ),
+            }
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                  f"🎣 HINT ECHO BLOCKED: {_val!r} came from our own "
+                  f"transcription prompt", flush=True)
+        elif ungrounded:
             # Terse fragment, not an English imperative. The old
             # wording ("Never save a location you were not told.
             # Ask them for it...") was fluent prose, so relaying it
@@ -3947,7 +5222,45 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
                   f"🏥 WRONG ORGANISATION: {mismatch}", flush=True)
         else:
-            result = run_tool(name, sess.memory, args)
+            result = run_tool(name, sess.memory, args, sess.objective)
+    elif name in _CHOICE_SAVE_TOOLS:
+        # THE CALLER ANSWERED, whatever becomes of the value — same reasoning as
+        # the save_branch reset above. The model only reaches here because it
+        # believed it heard a state, so the budget that exists to stop the agent
+        # pestering someone who will not engage has no business counting it.
+        _arg, _guard, _need, _gkey = _CHOICE_SAVE_TOOLS[name]
+        if str(args.get(_arg) or "").strip():
+            sess.reset_ask_budget(f"caller answered: {name}")
+        ungrounded_choice = _guard(args, sess)
+        if ungrounded_choice:
+            sess.memory.update(**{_gkey: f"BLOCKED — {ungrounded_choice}"})
+            # Terse fragments, no fluent imperative. A rejection the model can
+            # paraphrase into a grammatical sentence is a rejection it will read
+            # out loud — see _reject's docstring in tools.py, which exists
+            # because a live call relayed one to a receptionist verbatim.
+            result = {"ok": False, "error": (
+                f"NOT SAVED — {ungrounded_choice} | NEED: {_need}")}
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                  f"🚫 UNGROUNDED ANSWER BLOCKED: {name}({args})", flush=True)
+        else:
+            sess.memory.update(**{_gkey: "verified against caller transcript"})
+            # THE QUALIFIER IS DROPPED, NOT THE SAVE. The status is grounded and
+            # worth recording; a summary carrying a word nobody said is not, and
+            # refusing the whole call over it would throw away a verified answer
+            # to protect a footnote. Recorded either way — a field silently
+            # emptied is the same invisibility the fabricated version had.
+            for _dkey in ("detail", "depends_on"):
+                _was = args.get(_dkey)
+                _bad, _what = _strip_ungrounded_detail(args, sess, _dkey)
+                if _bad:
+                    sess.memory.update(**{
+                        f"{_gkey}_{_dkey}_as_written": _was,
+                        f"{_gkey}_dropped_words": list(_bad)})
+                    print(f"[Realtime] ⚠️  {_dkey}: "
+                          f"{', '.join(repr(w) for w in _bad)} never "
+                          f"appeared in the caller transcript — {_what}",
+                          flush=True)
+            result = run_tool(name, sess.memory, args, sess.objective)
     elif name == "escalate":
         # Clearing sess._give_up_sent stops us RE-SENDING the
         # directive; it cannot unsay it. Once injected, the model has
@@ -3997,10 +5310,7 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
                         "wait.)")
             # The budget put us here, and it was wrong: they were engaging
             # the whole time. Reset it or the very next ask escalates again.
-            sess._give_up_sent = False
-            sess._give_up_at_turn = None
-            sess._location_asks = 0
-            sess._vetting_reasks = 0
+            sess.reset_ask_budget("escalation blocked — caller is engaging")
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
                   f"{_line}: {last_caller[:60]!r}", flush=True)
             await oai_ws.send(json.dumps({
@@ -4054,9 +5364,20 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
                   f"🚫 UNGROUNDED ESCALATION BLOCKED: {args}",
                   flush=True)
         else:
-            result = run_tool(name, sess.memory, args)
+            result = run_tool(name, sess.memory, args, sess.objective)
     else:
-        result = run_tool(name, sess.memory, args)
+        result = run_tool(name, sess.memory, args, sess.objective)
+
+    # Something new was collected: the no-progress ceiling starts over, whether
+    # the call is finished or has another field (or another doctor) to go. This
+    # is the reset that makes one ceiling work for a multi-field, multi-doctor
+    # call without the counter having to know either number.
+    _gained = set(_objective_of(sess).collected(sess.memory)) - _collected_before
+    if _gained:
+        sess.reset_ask_budget("collected " + ", ".join(sorted(_gained)))
+        print(f"[Realtime] 🎯 {_describe_objective(_objective_of(sess), sess.memory)}",
+              flush=True)
+
     # Report what the tool ACTUALLY did. This used to print
     # "✅ BRANCH SAVED" unconditionally, without looking at the
     # result — so a live call logged
@@ -4181,10 +5502,34 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     elif name == "note_info":
         print(f"[{ts}] {'📝 NOTE           ' if ok else '⛔ NOTE REJECTED  '}: {args}",
               flush=True)
+    elif name in _CHOICE_SAVE_TOOLS:
+        _short = name.replace("save_", "").replace("_status", "")
+        if ok:
+            print(f"\n[{ts}] ✅ {_short.upper():<14}: {args}", flush=True)
+        else:
+            print(f"\n[{ts}] ⛔ {_short.upper():<14}: REJECTED {args}", flush=True)
+            print(f"          reason: {result.get('error', '')}", flush=True)
     else:
         print(f"[{ts}] 🔧 TOOL           : {name}({args}) → {result}", flush=True)
 
-    if name in ("save_branch", "escalate") and result.get("ok"):
+    # WHEN THE CALL IS OVER, asked of the objective rather than of the tool.
+    #
+    # This was `name in ("save_branch", "escalate")`, which made a successful
+    # save_branch the end of the call by definition — correct only for as long
+    # as the branch was the only thing any call collected. On a template that
+    # also collects the new-patient status it would hang up the moment the
+    # branch landed, before the second question was ever asked, and the artifact
+    # would record a PARTIAL call with no sign that we cut it short ourselves.
+    #
+    # COMPLETE, deliberately, not `is_success`. `success_at` says what counts as
+    # a reportable success when the call is over; it must not decide when to
+    # stop asking. A template that accepts a partial as success still wants the
+    # rest of what it came for.
+    if name == "escalate" and result.get("ok"):
+        sess.done = True
+    elif (result.get("ok")
+            and (name == "save_branch" or name in _CHOICE_SAVE_TOOLS)
+            and _objective_of(sess).outcome(sess.memory) is Outcome.COMPLETE):
         sess.done = True
 
     await oai_ws.send(json.dumps({
@@ -4527,12 +5872,22 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
                 "type": "conversation.item.create",
                 "item": {"type": "message", "role": "user",
                          "content": [{"type": "input_text", "text": (
+                             # The word this directive exists to suppress used
+                             # to be IN it: "answering only the 'urgent' half"
+                             # arrived in context immediately before the model
+                             # spoke, priming the exact reflex it was written
+                             # to correct. On call-20260821-1952 the caller
+                             # asked only about a patient and got both answers
+                             # stapled together — "No, nothing urgent — it's
+                             # just about the listing. No, no patient is
+                             # involved here." Two nos, two answers, one
+                             # question. Says what to answer now, and nothing
+                             # about what not to.
                              "(system: they asked whether this is about a "
                              "patient. Say plainly that it is NOT — no patient "
-                             "is involved — before anything else. Answering "
-                             "only the 'urgent' half leaves them guessing, and "
-                             "at a medical office that question decides how "
-                             "they handle the call.)")}]},
+                             "is involved — before anything else. At a medical "
+                             "office that question decides how they handle the "
+                             "call.)")}]},
             }))
 
         if (_IDENTITY_ASK.search(text) and not sess.done
@@ -4587,13 +5942,7 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         if is_hold_request(text) and not sess.done:
             # Stand the watchdog down for the whole hold, not just this turn.
             sess._hold_until = time.time() + _HOLD_GRACE_S
-            if sess._give_up_sent or sess._location_asks:
-                print(f"[Realtime] Caller is going to check — "
-                      f"give-up cancelled, ask count reset "
-                      f"(was {sess._location_asks})", flush=True)
-            sess._give_up_sent = False
-            sess._give_up_at_turn = None
-            sess._location_asks = 0
+            sess.reset_ask_budget("caller is going to check")
         # Replace the most recent "[...]" placeholder with real text
         _utt_rms, _utt_segs = sess.take_utterance_rms()
         if _utt_segs > 1:
@@ -4798,7 +6147,7 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         # The repetition was a symptom of having no way out, not a
         # phrasing failure, and no wording of a phrasing rule fixes
         # it. A budget does.
-        if _is_location_ask(text) and not sess.done:
+        if _is_objective_ask(text, sess) and not sess.done:
             # An ask the caller never answered must not spend the
             # budget. On call-20260818-1338 the agent asked three
             # times in twenty seconds with only "Hello." in
@@ -4816,37 +6165,65 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
             # again that nobody had answered. Time is a proxy;
             # "did they answer" is the actual question, and the
             # transcript already knows.
+            # WHICH ASKS SPEND THE BUDGET, INVERTED 2026-08-24.
+            #
+            # This used to increment on every ask the caller HAD answered, and
+            # give up at four. Four answered asks is a call going well: it is
+            # the new script's happy path exactly — branch, accepting new
+            # patients, referral requirement, what it depends on — and that is
+            # per doctor, with several doctors per call now in scope. The
+            # mechanism had already ended a live call where the caller gave a
+            # complete correct answer twice (call-20260821-1931).
+            #
+            # So the budget counts the asks they did NOT answer, consecutively,
+            # and resets on any reply. Nothing about it needs to know how many
+            # doctors or fields a call covers, because progress is what clears
+            # it — see reset_ask_budget and _asks_without_progress.
+            #
+            # COUPLED TO _is_filler_reply. "Did they answer" is now judged
+            # against what was ASKED: a bare "Yes." answers "are you accepting
+            # new patients?" and does not answer "which branch?". Before that
+            # change this inversion would have been strictly worse than what it
+            # replaced — every "Yes." would have read as silence, and the
+            # counter that ends the call is the one reading it.
             _first_ask = sess._last_ask_turn_idx < 0
             _answered = _first_ask or _caller_answered_since(
                 sess, sess._last_ask_turn_idx)
-            _forced = sess._unanswered_reasks >= _MAX_UNANSWERED_REASKS
             # They replied, but with a question rather than an answer. That is
             # a front desk deciding whether to engage, not a caller refusing,
-            # and it must not spend the budget — see _caller_is_vetting.
-            # Bounded the same way the silence case is: a caller who only ever
-            # asks questions would otherwise keep the call alive forever.
+            # and it must not spend either counter — see _caller_is_vetting.
+            # Bounded, or a caller who only ever asks questions would keep the
+            # call alive indefinitely.
             _vetted = (not _first_ask
                        and sess._vetting_reasks < _MAX_VETTING_REASKS
                        and _caller_vetted_since(sess, sess._last_ask_turn_idx))
             if _vetted:
                 sess._vetting_reasks += 1
+                sess._unanswered_asks = 0
                 print(f"[Realtime] They asked a question back rather than "
                       f"answering ({sess._vetting_reasks}/"
-                      f"{_MAX_VETTING_REASKS}) — not spending budget "
-                      f"({sess._location_asks}/"
-                      f"{settings.realtime_max_location_asks} used)",
+                      f"{_MAX_VETTING_REASKS}) — spending nothing "
+                      f"(unanswered={sess._unanswered_asks}/"
+                      f"{settings.realtime_max_unanswered_asks}, "
+                      f"no-progress={sess._asks_without_progress}/"
+                      f"{settings.realtime_max_asks_without_progress})",
                       flush=True)
-            elif _answered or _forced:
-                sess._location_asks += 1
-                sess._unanswered_reasks = 0
+            elif _answered:
+                # An answered ask costs the budget nothing. It still counts
+                # toward the no-progress ceiling: engaging is not the same as
+                # supplying, and that ceiling is the only thing left that ends
+                # a call where they talk and never tell.
+                sess._unanswered_asks = 0
+                sess._asks_without_progress += 1
             else:
-                sess._unanswered_reasks += 1
-                print(f"[Realtime] Re-ask into an unanswered question "
-                      f"({sess._unanswered_reasks}/{_MAX_UNANSWERED_REASKS}) "
-                      f"— not spending budget "
-                      f"({sess._location_asks}/"
-                      f"{settings.realtime_max_location_asks} used)",
-                      flush=True)
+                sess._unanswered_asks += 1
+                sess._asks_without_progress += 1
+                print(f"[Realtime] Ask into silence "
+                      f"({sess._unanswered_asks}/"
+                      f"{settings.realtime_max_unanswered_asks} unanswered, "
+                      f"{sess._asks_without_progress}/"
+                      f"{settings.realtime_max_asks_without_progress} "
+                      f"without progress)", flush=True)
             sess._last_ask_turn_idx = len(sess.turns)
             # The SAME WORDS, again.
             #
@@ -4922,13 +6299,29 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                         }],
                     },
                 }))
-            if (sess._location_asks >= settings.realtime_max_location_asks
-                    and not sess._give_up_sent):
+            # TWO TRIGGERS, TWO TRUE REASONS. The old one had a single
+            # condition and a single escalate reason — "caller engaged but
+            # never provided a location" — which was already the wrong
+            # sentence for a caller who had said nothing at all, and
+            # _discarded_location exists because a false reason in the record
+            # is indistinguishable from a true one to whoever reads it.
+            _out_of_budget = (sess._unanswered_asks
+                              >= settings.realtime_max_unanswered_asks)
+            _no_progress = (sess._asks_without_progress
+                            >= settings.realtime_max_asks_without_progress)
+            if (_out_of_budget or _no_progress) and not sess._give_up_sent:
                 sess._give_up_sent = True
                 sess._give_up_at_turn = len(sess.turns)
-                print(f"[Realtime] {sess._location_asks} asks with no "
-                      f"location — telling the agent to stop and "
-                      f"escalate", flush=True)
+                sess._give_up_trigger = ("unanswered" if _out_of_budget
+                                         else "no_progress")
+                if _out_of_budget:
+                    print(f"[Realtime] {sess._unanswered_asks} asks with no "
+                          f"reply from the caller — telling the agent to stop "
+                          f"and escalate", flush=True)
+                else:
+                    print(f"[Realtime] {sess._asks_without_progress} asks with "
+                          f"nothing collected — telling the agent to stop and "
+                          f"escalate", flush=True)
                 await oai_ws.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {
@@ -4936,31 +6329,8 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                         "role": "user",
                         "content": [{
                             "type": "input_text",
-                            "text": (
-                                # "Thank them briefly, say goodbye"
-                                # produced exactly that: "Thanks for
-                                # your time, goodbye." The callee is
-                                # never told the call is ending
-                                # because the agent could not get
-                                # what it came for, so they get no
-                                # last chance to supply it — and
-                                # people often do, once they hear
-                                # something was missed. Name the
-                                # outcome, own it rather than blame
-                                # them, then close.
-                                f"(system: you have now asked for the "
-                                f"location {sess._location_asks} times "
-                                f"and have not been given one. Stop "
-                                f"asking. Say plainly that you were not "
-                                f"able to get the branch today — phrase "
-                                f"it as something you could not do, not "
-                                f"as something they failed to give — "
-                                f"then thank them and say goodbye. Do "
-                                f"not ask again, and do not sound "
-                                f"annoyed. Call escalate with reason "
-                                f"'caller engaged but never provided a "
-                                f"location'.)"
-                            ),
+                            "text": give_up_directive(
+                                sess, sess._give_up_trigger),
                         }],
                     },
                 }))
@@ -5042,7 +6412,7 @@ async def _oai_to_twilio(
                 _caller_speaking = True
                 sess._caller_speaking_since = time.time()
                 sess._backchannel_done_this_utterance = False
-                _speech_start_pcm_pos = len(sess._caller_pcm)  # fallback only
+                _speech_start_pcm_pos = len(sess._caller_oai_pcm)  # fallback only
                 # OpenAI's own offset into the buffer we feed it. The chunk
                 # position above is where the EVENT ARRIVED, which is up to a
                 # second late from India — see _utterance_slice.
@@ -5105,10 +6475,38 @@ async def _oai_to_twilio(
                 if _caller_speaking and sess.listen_enabled.is_set():
                     _caller_speaking = False
                     sess._caller_speaking_since = None
-                    # Start the clock on the reply. Only the greeting was ever
-                    # timed, so "the agent takes a while to answer" has been an
-                    # impression with no number attached on every call since.
-                    sess._caller_stopped_at = time.monotonic()
+                    # Start the clock on the reply — at the moment the CALLER
+                    # STOPPED TALKING, not the moment we heard about it.
+                    #
+                    # This event arrives after the detector has made up its
+                    # mind, and how long that takes is the difference between
+                    # the detectors, not a constant. Anchoring here and adding
+                    # a per-detector guess for the rest was wrong twice: 0.7s
+                    # charged to semantic_vad (which sends no silence timer)
+                    # inflated every gap on call-20260821-1856, and 0.0s
+                    # charged to it on call-20260821-1931 reported 0.81s while
+                    # the Twilio recording measures 3.67s — the instrument
+                    # moved the opposite way to the thing it measures.
+                    #
+                    # audio_end_ms says when the caller actually stopped,
+                    # indexed into the buffer we control. The mirror makes that
+                    # index exact, so the lag can be computed instead of
+                    # assumed: bytes buffered since that point, over the wire
+                    # rate. No detector-specific term survives.
+                    _lag_s = 0.0
+                    _end_ms = msg.get("audio_end_ms")
+                    if isinstance(_end_ms, (int, float)):
+                        _bps = _wire_bytes_per_ms() * 1000.0
+                        _end_byte = sess._listen_start_bytes + _end_ms * _wire_bytes_per_ms()
+                        _have = sum(len(c) for c in sess._caller_oai_pcm)
+                        if _bps > 0:
+                            # Clamped: a negative lag would mean the caller
+                            # stopped after audio we have not buffered yet, and
+                            # a huge one means the buffers disagree — neither is
+                            # a latency, and both must fall back to "now".
+                            _lag_s = max(0.0, min((_have - _end_byte) / _bps, 10.0))
+                    sess._caller_stopped_at = time.monotonic() - _lag_s
+                    sess._last_stop_lag_s = _lag_s
                     # Placeholder — filled in by the session's own inline
                     # transcription when conversation.item.input_audio_
                     # transcription.completed arrives. Nothing else fills it:
@@ -5352,13 +6750,17 @@ async def _oai_to_twilio(
                         # we own (realtime_silence_ms) and the rest is inference
                         # plus the round trip to a US datacentre, which is not.
                         elif sess._caller_stopped_at is not None:
-                            _after_vad = time.monotonic() - sess._caller_stopped_at
+                            # _caller_stopped_at is backdated to when the
+                            # caller actually stopped, so this IS the felt
+                            # gap. Nothing is added to it.
+                            _felt = time.monotonic() - sess._caller_stopped_at
                             sess._caller_stopped_at = None
-                            _vad = settings.realtime_silence_ms / 1000.0
-                            _felt = _vad + _after_vad
+                            _vad = sess._last_stop_lag_s
+                            sess.detector_lags.append(_vad)
+                            _after_vad = max(0.0, _felt - _vad)
                             sess.note_reply_latency(_felt)
                             print(f"[Realtime] Reply {_felt:.2f}s after the "
-                                  f"caller stopped ({_vad:.2f}s VAD hold + "
+                                  f"caller stopped ({_vad:.2f}s detector + "
                                   f"{_after_vad:.2f}s think/round-trip)",
                                   flush=True)
                         twilio_payload = (delta if _passthrough_enabled()
@@ -5642,7 +7044,7 @@ async def _oai_to_twilio(
                     # so its ms timestamps count from THIS point, not from
                     # stream start. Record where that is before any caller turn
                     # can exist — every utterance slice is measured from it.
-                    sess._listen_start_bytes = sum(len(c) for c in sess._caller_pcm)
+                    sess._listen_start_bytes = sum(len(c) for c in sess._caller_oai_pcm)
                     _lead_s = sess._listen_start_bytes / max(_wire_bytes_per_ms(), 1e-9) / 1000
                     print(f"[Realtime] Greeting done — now listening to caller "
                           f"(OpenAI's audio clock starts {_lead_s:.2f}s into ours)",
@@ -5738,6 +7140,33 @@ async def _oai_to_twilio(
                 # Suppress harmless errors
                 if code == "response_cancel_not_active":
                     pass
+                elif (code == "conversation_already_has_active_response"
+                      and sess.done):
+                    # THE SAME CONDITION _create_response ALREADY HANDLES, seen
+                    # from the server instead of from our own flag.
+                    #
+                    # `_response_active` is a lagging indicator by construction:
+                    # OpenAI's server VAD can create a response the instant the
+                    # caller speaks, and we do not know until that
+                    # `response.created` is read off the socket. The goodbye
+                    # retry is a separate task precisely so the pump keeps
+                    # reading (see _goodbye_retry_at), which closed the version
+                    # of this race caused by sleeping inside a handler — but it
+                    # cannot close the gap between the server deciding and us
+                    # hearing, and no client-side flag can.
+                    #
+                    # On call-20260824-2113 the caller said "Yes, I'm there"
+                    # in that gap. The retry lost the race, the server refused
+                    # it, and the call closed correctly anyway a second later
+                    # ("Take care.") — because a response being in flight is
+                    # exactly the case where the retry was unnecessary.
+                    #
+                    # So it is reported as what it is. Printing API ERROR for a
+                    # benign, expected, already-handled race is how a log
+                    # teaches people to ignore it.
+                    print("[Realtime] Goodbye retry raced OpenAI's own "
+                          "response and lost — the line is not silent, "
+                          "nothing to do", flush=True)
                 elif "input_audio_transcription" in msg_text or "unknown_parameter" in code:
                     print(f"[Realtime] Transcription not supported on this model — caller turns will show as '[...]'", flush=True)
                 else:

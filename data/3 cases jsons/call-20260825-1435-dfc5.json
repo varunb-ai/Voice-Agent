@@ -1,0 +1,138 @@
+{
+  "call_id": "call-20260825-1435-dfc5",
+  "doctor_name": "Dr. Alan Reyes",
+  "hospital_name": "Lakeview Medical",
+  "branch": null,
+  "resolved": false,
+  "outcome": "none",
+  "collected": [],
+  "missing": [
+    "identity"
+  ],
+  "fields": {},
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Alan Reyes",
+    "hospital_name": "Lakeview Medical",
+    "specialization": "Oncology",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260825-1435-dfc5",
+    "collected_fields": {}
+  },
+  "duration_seconds": 38,
+  "cost_usd": 0.119365,
+  "template": "provider_verification",
+  "grounding": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": [
+    "Got it \u2014 is this Dr. Reyes, Oncology, at Lakeview Medical?",
+    "Is this Dr. Reyes, Oncology, at Lakeview Medical?",
+    "Is this Dr. Reyes, Oncology, at Lakeview Medical?",
+    "Is this Dr. Reyes, Oncology, at Lakeview Medical?",
+    "Is this Dr. Reyes, Oncology, at Lakeview Medical?"
+  ],
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": 5,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.42,
+  "reply_latency": {
+    "turns": 1,
+    "median": 0.91,
+    "worst": 0.91,
+    "detector_lag_s": 0.43
+  },
+  "conversation": {
+    "location_asks": 0,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 21,
+    "agent_turns": 4,
+    "caller_turns": 1,
+    "caller_questions": 0,
+    "question_turns": 1,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 1,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 6,
+    "input_audio": 2498,
+    "input_audio_cached": 1920,
+    "output_audio": 839,
+    "input_text": 49652,
+    "input_text_cached": 48128,
+    "output_text": 442,
+    "cache_hit_rate": 0.9597
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "14:35:54",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, it's a good time, you can go ahead.",
+      "timestamp": "14:36:06",
+      "audio_rms": 0.15031683444976807
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 I just need to confirm the right doctor before anything else. Okay, let me say that part again clearly.",
+      "timestamp": "14:36:08",
+      "audio_rms": null
+    },
+    {
+      "role": "agent",
+      "text": "Okay, let me repeat that clearly so you can hear it. Let me say that line again so it's clear.",
+      "timestamp": "14:36:16",
+      "audio_rms": null
+    },
+    {
+      "role": "agent",
+      "text": "Let me repeat that clearly.",
+      "timestamp": "14:36:25",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Lakeview Medical to verify Dr. Alan Reyes's branch. Branch could not be confirmed. Not collected: identity.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260825-1435-dfc5.wav",
+  "recorded_at": "2026-08-25T14:35:50.642522"
+}

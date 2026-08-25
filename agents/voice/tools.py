@@ -1,9 +1,23 @@
 """Tool definitions the Voice Agent's LLM can call (Layer 4 — tool calling).
 
-Three tools:
-  save_branch  — doctor's branch/location confirmed → marks call resolved
+Seven tools:
+  save_branch  — records the doctor's branch/location (does NOT decide the
+                 call's outcome; see run_tool and agents/voice/objectives.py)
+  save_doctor_identity    — did we reach the right doctor at the right
+                 practice? Asked FIRST; everything else is gated on it.
+                 not_here and wrong_number are DIFFERENT outcomes
+  save_new_patient_status — records whether they are taking new patients, as one
+                 of four states (yes | no | waitlist | unsure), not a boolean
+  save_scheduling_status  — can a new patient actually get booked in; same four
+  save_referral_requirement — always | depends | no | unsure, plus what it
+                 depends on. Its own vocabulary: "depends" is the answer the
+                 client acts on and yes/no would throw it away
   note_info    — capture supplementary info (website, email, phone, return date …)
   escalate     — call cannot be completed → records reason
+
+Which of these a given call may use is the TEMPLATE's business, not this
+module's: a template declares the fields it collects (CallTemplate.objective)
+and the tool schemas it needs. Every tool is defined here regardless.
 
 Framework-neutral: works in the offline brain test and in all telephony workers.
 """
@@ -74,6 +88,181 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_doctor_identity",
+            "description": (
+                "Record whether you have reached the right doctor at the right "
+                "practice. ASK THIS FIRST — nothing else on the call means "
+                "anything until it is settled. Four states: "
+                "confirmed (right doctor, right practice), "
+                "not_here (you reached the practice but the doctor is not "
+                "there — left, never was, or a different site; the phone "
+                "number is fine and the listing is wrong), "
+                "wrong_number (you did not reach the practice at all), "
+                "unsure (whoever answered does not know)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "identity": {
+                        "type": "string",
+                        "enum": ["confirmed", "not_here", "wrong_number",
+                                 "unsure"],
+                        "description": ("One of: confirmed | not_here | "
+                                        "wrong_number | unsure"),
+                    },
+                    "heard": {
+                        "type": "string",
+                        "description": (
+                            "What the caller ACTUALLY SAID, quoted as closely "
+                            "as you can. It is REPLACED with the caller turn "
+                            "the transcript shows, so a paraphrase is "
+                            "discarded."
+                        ),
+                    },
+                    "detail": {
+                        "type": "string",
+                        "description": (
+                            "The specialty as they confirmed it, and anything "
+                            "qualifying the answer in their words — 'we have a "
+                            "Dr. Smith but he's a dermatologist', 'she moved to "
+                            "the north site last year'. The specialty belongs "
+                            "HERE: it is how they tell two doctors of the same "
+                            "name apart, so it is part of establishing WHICH "
+                            "doctor, not a separate fact."
+                        ),
+                    },
+                },
+                "required": ["identity", "heard"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_new_patient_status",
+            "description": (
+                "Record whether the doctor is currently accepting new patients. "
+                "Call this the moment they tell you, in THEIR words. "
+                "Four possible states — do not force an answer into yes or no: "
+                "yes (taking new patients), no (not taking them), "
+                "waitlist (full, but a list or queue exists — including when they "
+                "give a queue position like 'you'd be number 21'), "
+                "unsure (the person you are speaking to does not know)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["yes", "no", "waitlist", "unsure"],
+                        "description": "One of: yes | no | waitlist | unsure",
+                    },
+                    "heard": {
+                        "type": "string",
+                        "description": (
+                            "What the caller ACTUALLY SAID, quoted as closely as you "
+                            "can. Not your summary of it. It is REPLACED with the "
+                            "caller turn the transcript shows, so a paraphrase here "
+                            "is discarded rather than recorded."
+                        ),
+                    },
+                    "detail": {
+                        "type": "string",
+                        "description": (
+                            "Anything qualifying the status, in their words: a queue "
+                            "position, whether a referral is needed and what it depends "
+                            "on, how to request an appointment, when to call back."
+                        ),
+                    },
+                },
+                "required": ["status", "heard"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_scheduling_status",
+            "description": (
+                "Record whether a new patient can actually get an appointment "
+                "scheduled right now. Ask this ONLY when they are accepting new "
+                "patients. Four states: yes (they can book), no (they cannot), "
+                "waitlist (not now, but there is a list or queue), "
+                "unsure (the person you are speaking to does not know)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["yes", "no", "waitlist", "unsure"],
+                        "description": "One of: yes | no | waitlist | unsure",
+                    },
+                    "heard": {
+                        "type": "string",
+                        "description": (
+                            "What the caller ACTUALLY SAID, quoted as closely as "
+                            "you can. It is REPLACED with the caller turn the "
+                            "transcript shows, so a paraphrase is discarded."
+                        ),
+                    },
+                    "detail": {
+                        "type": "string",
+                        "description": (
+                            "Anything qualifying it, in their words: how far out "
+                            "the next opening is, who to call, when to try again."
+                        ),
+                    },
+                },
+                "required": ["status", "heard"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_referral_requirement",
+            "description": (
+                "Record whether a new patient needs a referral. Ask this ONLY "
+                "when they are accepting new patients. Four states, and the "
+                "conditionality is the point: always (every new patient needs "
+                "one), depends (only for some insurers or situations — put what "
+                "it depends on in `depends_on`), no (none needed), "
+                "unsure (the person you are speaking to does not know)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "requirement": {
+                        "type": "string",
+                        "enum": ["always", "depends", "no", "unsure"],
+                        "description": "One of: always | depends | no | unsure",
+                    },
+                    "heard": {
+                        "type": "string",
+                        "description": (
+                            "What the caller ACTUALLY SAID, quoted as closely as "
+                            "you can. It is REPLACED with the caller turn the "
+                            "transcript shows, so a paraphrase is discarded."
+                        ),
+                    },
+                    "depends_on": {
+                        "type": "string",
+                        "description": (
+                            "What it depends on, in THEIR words — the insurer, "
+                            "the plan, the reason for the visit. Required in "
+                            "practice when requirement is 'depends': that "
+                            "qualifier is the answer the client acts on."
+                        ),
+                    },
+                },
+                "required": ["requirement", "heard"],
             },
         },
     },
@@ -389,8 +578,163 @@ def save_branch(
             )
         memory.update(branch_needed_clarification=True)
 
-    memory.update(branch=branch, city=city, schedule=schedule, resolved=True)
+    # RECORDS THE FIELD. DOES NOT DECIDE THE CALL.
+    #
+    # This line used to also mark the whole call a success, and it was the only
+    # place in the programme that did. That made "the call succeeded" a claim
+    # one tool was entitled to make about the whole call: a call that
+    # established accepting-new-patients and referral requirements and no
+    # branch recorded as a failure, and every metric and guard reading that
+    # flag inherited the mistake.
+    #
+    # Success is now derived from the template's declared objective, in
+    # objectives.record_outcome, after ANY tool call — see run_tool below.
+    memory.update(branch=branch, city=city, schedule=schedule)
     return {"ok": True, "branch": branch, "city": city, "schedule": schedule}
+
+
+def save_doctor_identity(
+    memory: CallMemory,
+    identity: str,
+    heard: str = "",
+    detail: str | None = None,
+) -> dict:
+    """Did we reach the right doctor at the right practice? Ask this FIRST.
+
+    From the client-side contact: "If we don't know which doctor they're
+    talking about, accepting new patients makes no sense." Everything else the
+    script collects is gated on this coming back confirmed.
+
+    THE TWO NEGATIVES ARE NOT THE SAME OUTCOME. not_here means the number is
+    good and the doctor-to-hospital association on file is wrong — a directory
+    correction, and the most valuable negative result this programme can
+    produce. wrong_number means the number itself is wrong. Recording one as the
+    other sends somebody to re-verify a number that was never the problem.
+    """
+    from agents.voice.objectives import (
+        IDENTITY_STATUS_KEY, IdentityAnswer, classify_identity,
+    )
+    return _save_state(
+        memory, identity, heard, detail,
+        key=IDENTITY_STATUS_KEY,
+        valid={s.value for s in IdentityAnswer},
+        classifier=classify_identity,
+        options="confirmed | not_here | wrong_number | unsure",
+        detail_suffix="detail",
+    )
+
+
+def save_new_patient_status(
+    memory: CallMemory,
+    status: str,
+    heard: str = "",
+    detail: str | None = None,
+) -> dict:
+    """Record whether the doctor is taking new patients. Four states, not two.
+
+    THE VALUE IS VALIDATED THE SAME WAY A BRANCH IS, and for the same reason.
+    save_branch rejects a value the process cannot recognise rather than
+    writing it and hoping; a status field is a smaller target but the failure
+    is identical — Field.present() treats an unclassifiable CHOICE value as NOT
+    collected, so a tool that accepted "I'll have to check" would leave the
+    objective permanently PARTIAL while the log said it had been saved.
+
+    GROUNDING IS NOT DONE HERE. It needs the call transcript and the per-turn
+    audio measurements, neither of which this module has — same split as
+    save_branch, whose grounding lives in realtime_worker._ungrounded_terms.
+    See _ungrounded_status there for why a CHOICE field needs MORE than the
+    location check, not less.
+    """
+    from agents.voice.objectives import (
+        NEW_PATIENT_STATUS_KEY, ChoiceAnswer, classify_choice,
+    )
+    return _save_state(
+        memory, status, heard, detail,
+        key=NEW_PATIENT_STATUS_KEY,
+        valid={s.value for s in ChoiceAnswer},
+        classifier=classify_choice,
+        options="yes | no | waitlist | unsure",
+        detail_suffix="detail",
+    )
+
+
+def save_scheduling_status(
+    memory: CallMemory,
+    status: str,
+    heard: str = "",
+    detail: str | None = None,
+) -> dict:
+    """Can a new patient actually get on the books? Same four states as accepting.
+
+    Deliberately NOT a narrower yes/no. "Not until the new year" and "there's a
+    wait but you can get on the list" are the same shape of answer as the
+    accepting field's waitlist, and the client acts on both the same way.
+    """
+    from agents.voice.objectives import (
+        SCHEDULING_STATUS_KEY, ChoiceAnswer, classify_choice,
+    )
+    return _save_state(
+        memory, status, heard, detail,
+        key=SCHEDULING_STATUS_KEY,
+        valid={s.value for s in ChoiceAnswer},
+        classifier=classify_choice,
+        options="yes | no | waitlist | unsure",
+        detail_suffix="detail",
+    )
+
+
+def save_referral_requirement(
+    memory: CallMemory,
+    requirement: str,
+    heard: str = "",
+    depends_on: str | None = None,
+) -> dict:
+    """Is a referral needed, and is that unconditional?
+
+    ITS OWN VOCABULARY, not the accepting field's. The client's question is
+    "always, or does it depend?", so DEPENDS is a first-class state and the
+    qualifier beside it is the part their team acts on — squeezing this into
+    yes/no would discard the distinction the question exists to draw, the same
+    way recording a queue position as "no" would.
+    """
+    from agents.voice.objectives import (
+        REFERRAL_STATUS_KEY, ReferralAnswer, classify_referral,
+    )
+    return _save_state(
+        memory, requirement, heard, depends_on,
+        key=REFERRAL_STATUS_KEY,
+        valid={s.value for s in ReferralAnswer},
+        classifier=classify_referral,
+        options="always | depends | no | unsure",
+        detail_suffix="depends_on",
+    )
+
+
+def _save_state(memory: CallMemory, value: str, heard: str,
+                detail: str | None, *, key: str, valid: set,
+                classifier, options: str, detail_suffix: str) -> dict:
+    """Shared body for the closed-set save tools.
+
+    One implementation because all three do exactly the same three things —
+    canonicalise, reject what cannot be canonicalised, store the state beside
+    the wording it came from — and three copies of that would drift the way the
+    hand-copied prompt phrases above drifted. The vocabulary is the parameter.
+
+    GROUNDING IS NOT DONE HERE. It needs the transcript and the per-turn audio
+    measurements, neither of which this module has — same split as save_branch.
+    """
+    text = (value or "").strip().lower()
+    if text not in valid:
+        recognised = classifier(value or "")
+        if recognised is None:
+            return _reject(f"REJECTED {value!r}: not one of the states", options)
+        text = recognised.value
+    memory.update(**{
+        key: text,
+        f"{key}_heard": (heard or "").strip() or None,
+        f"{key}_{detail_suffix}": (detail or "").strip() or None,
+    })
+    return {"ok": True, "status": text, "detail": detail}
 
 
 def note_info(memory: CallMemory, key: str, value: str) -> dict:
@@ -399,19 +743,184 @@ def note_info(memory: CallMemory, key: str, value: str) -> dict:
 
 
 def escalate(memory: CallMemory, reason: str) -> dict:
-    memory.update(resolved=False, escalated=True, escalate_reason=reason)
+    # `resolved=False` was here and is gone for the same reason it left
+    # save_branch: escalating is a fact about how the call ENDED, not a verdict
+    # on what it collected. A call that saved the branch and then escalated
+    # because the accepting status could not be had is exactly the partial the
+    # objective now expresses — stamping resolved=False here would delete the
+    # half that worked, which is the failure direction this codebase pays for.
+    memory.update(escalated=True, escalate_reason=reason)
     return {"ok": True, "escalated": True}
 
 
 TOOL_IMPLS = {
-    "save_branch": save_branch,
-    "note_info":   note_info,
-    "escalate":    escalate,
+    "save_branch":               save_branch,
+    "save_doctor_identity":      save_doctor_identity,
+    "save_new_patient_status":   save_new_patient_status,
+    "save_scheduling_status":    save_scheduling_status,
+    "save_referral_requirement": save_referral_requirement,
+    "note_info":                 note_info,
+    "escalate":                  escalate,
 }
 
 
-def run_tool(name: str, memory: CallMemory, arguments: dict[str, Any]) -> dict:
+# Which FIELD each save tool writes, named by the tool's own argument, so a
+# gate can be looked up from a tool call. Spelled as memory keys imported from
+# objectives rather than as string literals here, for the reason
+# unwritable_fields() exists: a key hand-copied into a second module is a key
+# that drifts the first time somebody renames it.
+#
+# note_info and escalate are absent on purpose. note_info writes an arbitrary
+# note_* key and escalate writes no field at all, so neither has a field whose
+# gate could be consulted; both stay unconditionally dispatchable, which is what
+# lets a call that cannot confirm the doctor still record WHY.
+def _tool_field(objective: Any, name: str):
+    """The objective's Field that this tool writes, or None."""
+    from agents.voice.objectives import (
+        IDENTITY_STATUS_KEY, NEW_PATIENT_STATUS_KEY, SCHEDULING_STATUS_KEY,
+        REFERRAL_STATUS_KEY,
+    )
+    key = {
+        "save_branch":               "branch",
+        "save_doctor_identity":      IDENTITY_STATUS_KEY,
+        "save_new_patient_status":   NEW_PATIENT_STATUS_KEY,
+        "save_scheduling_status":    SCHEDULING_STATUS_KEY,
+        "save_referral_requirement": REFERRAL_STATUS_KEY,
+    }.get(name)
+    if key is None:
+        return None
+    return next((f for f in objective.fields if f.memory_key == key), None)
+
+
+def _append(memory: CallMemory, key: str, item: Any) -> None:
+    """Append to a list held in memory. update() has no append."""
+    memory.update(**{key: list(memory.get(key) or []) + [item]})
+
+
+def _defer_save(memory: CallMemory, name: str, field_name: str,
+                arguments: dict, gate_name: str) -> dict:
+    """Hold a value whose gate has not been settled yet, and say so.
+
+    NOT A DISCARD, and the distinction is the whole design. The caller really
+    did say "he's at the east side clinic"; refusing that outright would throw
+    away a real answer, which this project treats as its expensive direction of
+    failure — a wrong row can be found later, a discarded answer looks exactly
+    like a receptionist who would not say. So the value is held and applied the
+    moment the gate opens, and the model is TOLD it is held, so it does not go
+    back and ask a question that has already been answered.
+
+    Only the most recent value per field is kept. A second attempt at the same
+    field is the model correcting itself, not two answers to be replayed in
+    order, and replaying a superseded value would write the one they retracted.
+    """
+    held = [d for d in (memory.get("deferred_saves") or [])
+            if d.get("field") != field_name]
+    held.append({"tool": name, "field": field_name, "arguments": arguments,
+                 "gate": gate_name})
+    memory.update(deferred_saves=held)
+    return _reject(
+        f"NOT SAVED: {gate_name} unsettled — {field_name} cannot be filed "
+        f"against a doctor nobody has confirmed",
+        f"settle {gate_name} first. Value HELD, applied automatically. "
+        f"Nothing further needed from them on {field_name}.",
+    )
+
+
+def _flush_deferred(memory: CallMemory, objective: Any) -> None:
+    """Apply or drop held values now that a gate field has been answered.
+
+    Runs after every successful save, because any save may be the one that
+    opens a gate. A held value whose gate has CLOSED is dropped rather than
+    kept: identity=not_here means the doctor is not at this practice, so the
+    branch collected there belongs to nobody and no later turn can change that.
+
+    Both outcomes are RECORDED. A value that silently evaporates between the
+    caller saying it and the artifact being written is the same invisibility
+    every guard in this codebase has had to be retrofitted with — see
+    suppressed_echoes, dropped_second_items, and the emptied-qualifier note.
+    """
+    from agents.voice.objectives import GateVerdict, gate_state
+    held = list(memory.get("deferred_saves") or [])
+    if not held:
+        return
+    keep: list = []
+    for item in held:
+        field = objective.field_named(item.get("field") or "")
+        verdict, _gate, _value = gate_state(objective, memory, field)
+        if verdict is GateVerdict.PENDING:
+            keep.append(item)
+            continue
+        if verdict is GateVerdict.CLOSED:
+            _append(memory, "deferred_dropped",
+                    {**item, "why": f"{item.get('gate')}={_value}"})
+            continue
+        impl = TOOL_IMPLS.get(item.get("tool") or "")
+        if impl is None:
+            continue
+        # Validated NOW, not when it was held — the value never reached the
+        # tool, so save_branch's own checks have not run on it yet. A rejection
+        # here is recorded rather than swallowed: a held value that fails
+        # validation on replay is exactly as invisible as one that evaporates.
+        replayed = impl(memory, **(item.get("arguments") or {}))
+        if replayed.get("ok"):
+            _append(memory, "deferred_applied", item.get("field"))
+        else:
+            _append(memory, "deferred_dropped",
+                    {**item, "why": replayed.get("error") or "rejected on replay"})
+    memory.update(deferred_saves=keep)
+
+
+def run_tool(name: str, memory: CallMemory, arguments: dict[str, Any],
+             objective: Any = None) -> dict:
+    """Dispatch a tool call, then re-derive what the call has achieved.
+
+    THE SUCCESS CONDITION LIVES HERE, ONCE, and it is evaluated after every
+    tool — not asserted inside save_branch. `objective` defaults to the
+    configured template's, so the classic pipeline in brain.py and any test
+    that does not thread one through still get a correct verdict.
+
+    The re-derivation runs even when the tool REJECTED the value. That is
+    deliberate: a rejected save must not leave a stale `resolved` standing from
+    an earlier one, and `note_info` can complete a field the objective declares
+    against a note_* key.
+
+    THE GATE IS ENFORCED HERE TOO, and it had to move somewhere. `RequiredWhen`
+    decided whether a field was REQUIRED and nothing decided whether it could be
+    WRITTEN, so on call-20260825-1437 the branch and the accepting status were
+    filed for a doctor the call never confirmed — with `missing: ["identity"]`
+    recorded in the same artifact. This is the single point every tool call
+    passes through and the only one that has both the objective and the memory,
+    so it is where the gate can be read.
+    """
     impl = TOOL_IMPLS.get(name)
     if impl is None:
         return {"ok": False, "error": f"unknown tool: {name}"}
-    return impl(memory, **arguments)
+    from agents.voice.objectives import (
+        GateVerdict, default_objective, gate_state, record_outcome,
+    )
+    objective = objective or default_objective()
+
+    field = _tool_field(objective, name)
+    verdict, gate, gate_value = gate_state(objective, memory, field)
+    if verdict is GateVerdict.PENDING and field is not None and gate is not None:
+        result = _defer_save(memory, name, field.name, arguments, gate.name)
+    elif verdict is GateVerdict.CLOSED and field is not None and gate is not None:
+        # Nothing to hold. The gate is answered and answered against this
+        # field, so no later turn on this call can make the value belong to
+        # anybody — recording it would put a real practice's details under a
+        # doctor who is not there.
+        _append(memory, "deferred_dropped",
+                {"tool": name, "field": field.name, "arguments": arguments,
+                 "gate": gate.name, "why": f"{gate.name}={gate_value}"})
+        result = _reject(
+            f"REJECTED: {gate.name} came back {gate_value!r} — {field.name} "
+            f"does not apply",
+            f"nothing on {field.name}. Do not ask for it.",
+        )
+    else:
+        result = impl(memory, **arguments)
+        if result.get("ok"):
+            # This save may be the one that opened a gate.
+            _flush_deferred(memory, objective)
+    record_outcome(memory, objective)
+    return result
