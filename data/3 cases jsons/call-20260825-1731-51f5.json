@@ -1,0 +1,221 @@
+{
+  "call_id": "call-20260825-1731-51f5",
+  "doctor_name": "Dr. Alan Reyes",
+  "hospital_name": "Lakeview Medical",
+  "branch": "East Side Clinic",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "identity",
+    "branch",
+    "accepting"
+  ],
+  "missing": [],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Okay."
+    },
+    "branch": {
+      "value": "East Side Clinic"
+    },
+    "accepting": {
+      "value": "no",
+      "heard": "No, no, no, he's not taking anymore."
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Alan Reyes",
+    "hospital_name": "Lakeview Medical",
+    "specialization": "Oncology",
+    "branch": "East Side Clinic",
+    "city": null,
+    "source": "voice",
+    "status": "verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-25T12:02:16.019876+00:00",
+    "enriched_by": "call-20260825-1731-51f5",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Okay."
+      },
+      "branch": {
+        "value": "East Side Clinic"
+      },
+      "accepting": {
+        "value": "no",
+        "heard": "No, no, no, he's not taking anymore."
+      }
+    }
+  },
+  "duration_seconds": 74,
+  "cost_usd": 0.188665,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript",
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": [
+    {
+      "text": "Right \u2014 I\u2019m just trying to confirm I\u2019ve got the right place. Is this Dr. Reyes, Oncology, at Lakeview Medical?",
+      "verdict": "owed"
+    }
+  ],
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "transcript_waits": [
+    {
+      "waited_s": 1.53,
+      "outcome": "timeout"
+    }
+  ],
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": 1,
+  "stacked_replies": 1,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 3.02,
+  "reply_latency": {
+    "turns": 6,
+    "median": 1.44,
+    "worst": 5.32,
+    "detector_lag_s": 0.43
+  },
+  "conversation": {
+    "location_asks": 3,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 21,
+    "agent_turns": 7,
+    "caller_turns": 6,
+    "caller_questions": 2,
+    "question_turns": 5,
+    "stapled_questions": 1,
+    "staple_rate": 0.5,
+    "back_to_back_asks": 1,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 9,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 14,
+    "input_audio": 5897,
+    "input_audio_cached": 5184,
+    "output_audio": 869,
+    "input_text": 83996,
+    "input_text_cached": 75264,
+    "output_text": 949,
+    "cache_hit_rate": 0.8949
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "17:31:05",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Hi David Okay, who are you calling on behalf of?",
+      "timestamp": "17:31:16",
+      "audio_rms": 0.1605866253376007
+    },
+    {
+      "role": "agent",
+      "text": "I'm calling on behalf of Forage AI.",
+      "timestamp": "17:31:20",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Ok, ok. So What do you want?",
+      "timestamp": "17:31:26",
+      "audio_rms": 0.1330593377351761
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 I just need to confirm one detail about Dr. Reyes. Is this Dr. Reyes, Oncology, at Lakeview Medical?",
+      "timestamp": "17:31:33",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Ok.",
+      "timestamp": "17:31:37",
+      "audio_rms": 0.07177437841892242
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 do you know which branch Dr. Reyes is working out of?",
+      "timestamp": "17:31:42",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, Dr. Rayef is our oncologist.",
+      "timestamp": "17:31:44",
+      "audio_rms": 0.14157100021839142
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 which site of Lakeview Medical does Dr. Reyes see patients at?",
+      "timestamp": "17:31:46",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "He's at the east side clinic.",
+      "timestamp": "17:31:57",
+      "audio_rms": 0.11174227297306061
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that location \u2014 is Dr. Reyes currently taking new patients?",
+      "timestamp": "17:32:00",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, no, no, he's not taking anymore.",
+      "timestamp": "17:32:08",
+      "audio_rms": 0.10817249119281769
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for clarifying \u2014 I\u2019ll just note that and stay out of the scheduling details.",
+      "timestamp": "17:32:11",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Lakeview Medical to verify Dr. Alan Reyes's branch. Branch confirmed: East Side Clinic.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260825-1731-51f5.wav",
+  "recorded_at": "2026-08-25T17:31:01.279155"
+}

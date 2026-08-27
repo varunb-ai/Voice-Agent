@@ -264,6 +264,55 @@ class Settings(BaseSettings):
     # Confirm the account/API accepts pcmu with: python check_realtime.py --audio-probe
     realtime_audio_format: str = "pcmu"
 
+    # THE OUTBOUND LEG, SEPARATELY — what OpenAI sends US, not what we send
+    # Twilio. Twilio always receives 8kHz mu-law either way.
+    #
+    # "pcmu" — as before. mu-law crosses untouched and nothing can be done to
+    #          it on the way past.
+    # "pcm"  — PCM16 24kHz, conditioned by agents/voice/outbound_audio, then
+    #          converted once. Costs one filter chain and one decimation.
+    #
+    # SPLIT FROM realtime_audio_format BECAUSE THE TWO LEGS WANT DIFFERENT
+    # ANSWERS. Inbound passthrough is free and right: the model is the consumer,
+    # it does its own front-end processing, and nothing we could insert would
+    # help it. Outbound passthrough is not free — it forecloses every form of
+    # output conditioning, and the measurement says conditioning is exactly what
+    # this call needs.
+    #
+    # The agent carries about HALF the human caller's energy in 2-3.4 kHz on
+    # the same call, same codec, same recording — the band that carries s, t, f
+    # and sh. See outbound_audio's docstring for the numbers and for the offline
+    # experiment that lands within 3% of the caller reference.
+    #
+    # The CPU argument for passthrough does not survive contact with a stopwatch:
+    # the whole chain — presence EQ, anti-alias, decimate, compress, encode —
+    # measures 182ms for 75s of audio, which is 0.24% of one core.
+    #
+    # REVERT TO "pcmu" TO A/B IT. Both paths are live and the switch is this
+    # one value, which is the point: the claim is falsifiable on one call.
+    realtime_output_format: str = "pcm"
+
+    # WHAT WE TELL THE TRANSCRIBER THE CALLER IS SPEAKING. "en" is what has
+    # always been sent; this only makes it changeable.
+    #
+    # WHY IT IS WORTH AN A/B. On call-20260826-1656 three caller turns came
+    # back as "Yasha rohe.", "Yajom" and a line of Urdu script. The forensic
+    # pass refuted every explanation that would make those fabrications: the
+    # Urdu sits on 3.30s of continuous audio at rms 0.036 with the agent
+    # channel silent for 100% of the window, its timestamp lands inside its
+    # own segment, and the retired hint means there is no prompt to echo.
+    # Somebody said something real.
+    #
+    # What is NOT known is whether that was the caller speaking Urdu, or
+    # accented English forced through an "en" decode. Every test call to date
+    # has been to the same Hyderabad colleague, which makes both live.
+    #
+    # The A/B is one call each on "en" and on None/"" (let the transcriber
+    # detect), compared on the SAME kind of speech. Until that runs, the
+    # default does not move: an empty value is passed through untouched, so
+    # setting it to "" omits the language hint entirely.
+    realtime_transcribe_language: str = "en"
+
     # "near_field" | "far_field" | "off".
     # Untested. The earlier justification ("a handset is a near-field mic") was
     # a guess: the model never receives handset audio, it receives 8kHz μ-law.

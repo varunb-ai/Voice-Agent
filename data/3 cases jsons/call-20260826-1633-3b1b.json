@@ -1,0 +1,213 @@
+{
+  "call_id": "call-20260826-1633-3b1b",
+  "doctor_name": "Dr. Jennifer",
+  "hospital_name": "New York Baptist Hospital",
+  "branch": null,
+  "resolved": false,
+  "outcome": "none",
+  "collected": [],
+  "missing": [
+    "identity"
+  ],
+  "fields": {},
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jennifer",
+    "hospital_name": "New York Baptist Hospital",
+    "specialization": "Cardiology",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260826-1633-3b1b",
+    "collected_fields": {}
+  },
+  "duration_seconds": 35,
+  "cost_usd": 0.22569,
+  "template": "provider_verification",
+  "grounding": null,
+  "grounding_at_save": null,
+  "suppressed_echoes": [
+    {
+      "kind": "verbatim hint run",
+      "raw": "Location words: campus, clinic, medical center, satellite office, north, south, east, west, downtown, midtown, uptown, suite, boulevard, avenue, parkway, drive, street. Scheduling words: waitlist, waiting list, referral, new patients, accepting, scheduling, insurance.",
+      "kept": ""
+    },
+    {
+      "kind": "verbatim hint run",
+      "raw": "Location words: campus, clinic, medical center, satellite office, north, south, east, west, downtown, midtown, uptown, suite, boulevard, avenue, parkway, drive, street. Scheduling words: waitlist, waiting list, referral, new patients, accepting, scheduling, insurance.",
+      "kept": ""
+    }
+  ],
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": [
+    {
+      "text": "Is now a good time?",
+      "verdict": "duplicate"
+    }
+  ],
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": null,
+  "transcript_waits": null,
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": 1,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.72,
+  "reply_latency": {
+    "turns": 3,
+    "median": 1.12,
+    "worst": 1.32,
+    "detector_lag_s": 0.45,
+    "stages": [
+      {
+        "tool": null,
+        "detector_s": 0.412,
+        "felt_s": 0.991,
+        "vad_to_resp": 0.428,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.563
+      },
+      {
+        "tool": null,
+        "detector_s": 0.464,
+        "felt_s": 1.324,
+        "vad_to_resp": 0.464,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.86
+      },
+      {
+        "tool": null,
+        "detector_s": 0.452,
+        "felt_s": 1.124,
+        "vad_to_resp": 0.452,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.672
+      }
+    ]
+  },
+  "conversation": {
+    "location_asks": 0,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 14,
+    "agent_turns": 4,
+    "caller_turns": 4,
+    "caller_questions": 1,
+    "question_turns": 2,
+    "stapled_questions": 0,
+    "staple_rate": 0.0,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 8,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 11,
+    "input_audio": 2409,
+    "input_audio_cached": 1344,
+    "output_audio": 406,
+    "input_text": 65789,
+    "input_text_cached": 33088,
+    "output_text": 476,
+    "cache_hit_rate": 0.5049
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "16:33:57",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "waitlist referral The downtown clinic is accepting new patients and scheduling appointments for the satellite office.",
+      "timestamp": "16:34:00",
+      "audio_rms": 0.11150231212377548
+    },
+    {
+      "role": "agent",
+      "text": "No problem at all \u2014 when would be a better time to call back?",
+      "timestamp": "16:34:05",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah. Scheduling.",
+      "timestamp": "16:34:07",
+      "audio_rms": 0.12076815962791443
+    },
+    {
+      "role": "caller",
+      "text": "Is this suite? Yeah, go ahead please.",
+      "timestamp": "16:34:12",
+      "audio_rms": 0.14382046461105347
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that \u2014 I\u2019ll try again this afternoon.",
+      "timestamp": "16:34:15",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Alright, thank you.",
+      "timestamp": "16:34:21",
+      "audio_rms": 0.11951591819524765
+    },
+    {
+      "role": "agent",
+      "text": "No problem \u2014 thanks for your time.",
+      "timestamp": "16:34:22",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called New York Baptist Hospital to verify Dr. Jennifer's branch. Branch could not be confirmed. Not collected: identity.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260826-1633-3b1b.wav",
+  "recorded_at": "2026-08-26T16:33:52.844096"
+}

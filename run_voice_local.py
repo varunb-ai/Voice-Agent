@@ -36,8 +36,8 @@ from rich.table import Table
 
 from core.config import settings
 from core.models import Doctor, TranscriptTurn
-from agents.voice.brain import VoiceBrain
-from agents.voice.memory import CallMemory
+from agents.experiment.brain import VoiceBrain
+from agents.experiment.memory import CallMemory
 from agents.recording.agent import record_call
 
 console = Console()
@@ -186,8 +186,8 @@ def main() -> None:
 
     # Pre-warm models so first turn has no loading delay
     console.print("[dim]  Loading voice models…[/dim]", end="\r")
-    from agents.voice.tts_local import _load_voice, _pick_voice
-    from agents.voice.stt_whisper import _model as _whisper_model
+    from agents.experiment.tts_local import _load_voice, _pick_voice
+    from agents.experiment.stt_whisper import _model as _whisper_model
     _load_voice(_pick_voice())
     _whisper_model()
     console.print("[dim]  Models ready.          [/dim]\n")

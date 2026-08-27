@@ -1,0 +1,462 @@
+{
+  "call_id": "call-20260827-1214-3d1c",
+  "doctor_name": "Dr. Jennifer",
+  "hospital_name": "New York Baptist Hospital",
+  "branch": "Northside Medical Group",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "identity",
+    "branch",
+    "accepting",
+    "scheduling",
+    "referral"
+  ],
+  "missing": [],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Yes, yes, you're talking with Jennifer Doctor."
+    },
+    "branch": {
+      "value": "Northside Medical Group"
+    },
+    "accepting": {
+      "value": "yes",
+      "heard": "Yes, yes."
+    },
+    "scheduling": {
+      "value": "yes",
+      "heard": "Yeah, like anytime you can book it now through online.",
+      "detail": "Anytime; can book online."
+    },
+    "referral": {
+      "value": "no",
+      "heard": "No, no, for now, no need of it. You can book it as usual."
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jennifer",
+    "hospital_name": "New York Baptist Hospital",
+    "specialization": "Cardiology",
+    "branch": "Northside Medical Group",
+    "city": null,
+    "source": "voice",
+    "status": "verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-27T06:46:27.286058+00:00",
+    "enriched_by": "call-20260827-1214-3d1c",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yes, yes, you're talking with Jennifer Doctor."
+      },
+      "branch": {
+        "value": "Northside Medical Group"
+      },
+      "accepting": {
+        "value": "yes",
+        "heard": "Yes, yes."
+      },
+      "scheduling": {
+        "value": "yes",
+        "heard": "Yeah, like anytime you can book it now through online.",
+        "detail": "Anytime; can book online."
+      },
+      "referral": {
+        "value": "no",
+        "heard": "No, no, for now, no need of it. You can book it as usual."
+      }
+    }
+  },
+  "duration_seconds": 130,
+  "cost_usd": 0.310757,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript",
+  "branch_rejections": null,
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "released_second_items": null,
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": [
+    {
+      "tool": "save_new_patient_status",
+      "args": {
+        "status": "yes",
+        "heard": "Yes, yes."
+      },
+      "waited_s": 0.22,
+      "outcome": "applied",
+      "held_because": "status='yes' \u2014 nothing has been transcribed since you asked | NEED: their answer to THAT question, in their own words",
+      "error": null
+    },
+    {
+      "tool": "save_referral_requirement",
+      "args": {
+        "requirement": "no",
+        "heard": "No, no, for now, no need of it. You can book it as usual."
+      },
+      "waited_s": 0.23,
+      "outcome": "applied",
+      "held_because": "referral='no' \u2014 nothing has been transcribed since you asked | NEED: their answer to THAT question, in their own words",
+      "error": null
+    }
+  ],
+  "ended_by_caller": null,
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.42,
+  "reply_latency": {
+    "turns": 10,
+    "median": 1.93,
+    "worst": 3.96,
+    "detector_lag_s": 0.43,
+    "stages": [
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.48,
+        "felt_s": 1.48,
+        "vad_to_resp": 0.48,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 1.0
+      },
+      {
+        "tool": "save_doctor_identity",
+        "tools": [
+          {
+            "tool": "save_doctor_identity",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.452,
+        "felt_s": 2.045,
+        "vad_to_resp": 0.467,
+        "inference_1": 0.782,
+        "our_work": 0.015,
+        "deferral": 0.016,
+        "inference_2": 0.765,
+        "no_tool_s": null
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.408,
+        "felt_s": 1.299,
+        "vad_to_resp": 0.408,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.891
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.404,
+        "felt_s": 2.779,
+        "vad_to_resp": 0.42,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 2.359
+      },
+      {
+        "tool": "save_branch",
+        "tools": [
+          {
+            "tool": "save_branch",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.424,
+        "felt_s": 2.19,
+        "vad_to_resp": 0.424,
+        "inference_1": 0.656,
+        "our_work": 0.016,
+        "deferral": 0.0,
+        "inference_2": 1.094,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_new_patient_status",
+        "tools": [
+          {
+            "tool": "save_new_patient_status",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.436,
+        "felt_s": 1.967,
+        "vad_to_resp": 0.451,
+        "inference_1": 0.657,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 0.859,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_scheduling_status",
+        "tools": [
+          {
+            "tool": "save_scheduling_status",
+            "ok": false
+          }
+        ],
+        "detector_s": 0.408,
+        "felt_s": 3.955,
+        "vad_to_resp": 0.424,
+        "inference_1": 1.094,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 2.437,
+        "no_tool_s": null
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.432,
+        "felt_s": 1.104,
+        "vad_to_resp": 0.448,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.656
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.436,
+        "felt_s": 1.046,
+        "vad_to_resp": 0.452,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.594
+      },
+      {
+        "tool": "save_referral_requirement",
+        "tools": [
+          {
+            "tool": "save_referral_requirement",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.4,
+        "felt_s": 1.9,
+        "vad_to_resp": 0.4,
+        "inference_1": 0.594,
+        "our_work": 0.016,
+        "deferral": 0.0,
+        "inference_2": 0.89,
+        "no_tool_s": null
+      }
+    ]
+  },
+  "conversation": {
+    "location_asks": 2,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 22,
+    "agent_turns": 11,
+    "caller_turns": 11,
+    "caller_questions": 3,
+    "question_turns": 8,
+    "stapled_questions": 2,
+    "staple_rate": 0.67,
+    "back_to_back_asks": 1,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 14,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 20,
+    "input_audio": 13619,
+    "input_audio_cached": 12096,
+    "output_audio": 1087,
+    "input_text": 152667,
+    "input_text_cached": 135552,
+    "output_text": 1216,
+    "cache_hit_rate": 0.8879
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "12:14:20",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Good morning",
+      "timestamp": "12:14:32",
+      "audio_rms": 0.10838553309440613
+    },
+    {
+      "role": "agent",
+      "text": "Good morning \u2014 is this Dr. Jennifer, Cardiology, at New York Baptist Hospital?",
+      "timestamp": "12:14:34",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, yes, you're talking with Jennifer Doctor. How can I help you?",
+      "timestamp": "12:14:42",
+      "audio_rms": 0.1182854101061821
+    },
+    {
+      "role": "agent",
+      "text": "Got it, thanks \u2014 which branch do you work out of for New York Baptist Hospital?",
+      "timestamp": "12:14:46",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Ah",
+      "timestamp": "12:14:52",
+      "audio_rms": 0.15117168426513672
+    },
+    {
+      "role": "caller",
+      "text": "Actually, I am working at the Northside Medical Group. Can I know who is calling?",
+      "timestamp": "12:14:57",
+      "audio_rms": 0.1907041072845459
+    },
+    {
+      "role": "agent",
+      "text": "This is David, calling on behalf of Forage AI.",
+      "timestamp": "12:15:00",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay. And what else do you need from me? Command",
+      "timestamp": "12:15:08",
+      "audio_rms": 0.10724031925201416
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 is Northside Medical Group a branch of New York Baptist Hospital, or a separate organization you work for now?",
+      "timestamp": "12:15:13",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "It's a bench.",
+      "timestamp": "12:15:23",
+      "audio_rms": 0.14019480347633362
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is Dr. Jennifer currently taking new patients?",
+      "timestamp": "12:15:25",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, yes.",
+      "timestamp": "12:15:31",
+      "audio_rms": 0.12368007749319077
+    },
+    {
+      "role": "agent",
+      "text": "Nice, thanks \u2014 can a new patient actually get an appointment scheduled right now?",
+      "timestamp": "12:15:33",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "But you can get it, please apply before it.",
+      "timestamp": "12:15:42",
+      "audio_rms": 0.1310824453830719
+    },
+    {
+      "role": "agent",
+      "text": "Right, I want to be sure I understood \u2014 for a new patient, can an appointment be booked now?",
+      "timestamp": "12:15:46",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, like anytime you can book it now through online.",
+      "timestamp": "12:15:57",
+      "audio_rms": 0.14352105557918549
+    },
+    {
+      "role": "agent",
+      "text": "Okay, let me note that and then ask one more quick thing about referrals.",
+      "timestamp": "12:15:59",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Again one more question.",
+      "timestamp": "12:16:07",
+      "audio_rms": 0.18484601378440857
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is a referral required for a new patient, or does it depend on the insurance or situation?",
+      "timestamp": "12:16:08",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, no, for now, no need of it. You can book it as usual.",
+      "timestamp": "12:16:20",
+      "audio_rms": 0.28029876947402954
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for confirming there's no referral needed.",
+      "timestamp": "12:16:22",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called New York Baptist Hospital to verify Dr. Jennifer's branch. Branch confirmed: Northside Medical Group.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1214-3d1c.wav",
+  "recorded_at": "2026-08-27T12:14:16.600562"
+}

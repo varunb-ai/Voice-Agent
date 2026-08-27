@@ -49,7 +49,16 @@ def save(record: CallRecord) -> str:
 
 
 def _save_postgres(record: CallRecord) -> str:
-    from core.db import get_connection
+    # NOT A TYPING PROBLEM. core.db exposes get_backend(), never get_connection,
+    # so this import raises ImportError on EVERY call and save() has always
+    # fallen through to _save_json. Postgres persistence from this path has
+    # never run.
+    #
+    # Left as-is on purpose: get_backend() is a different API (this function
+    # wants a raw DB-API connection for its own CREATE TABLE and %s-parameterised
+    # INSERT), so rewiring it would start writing to Postgres for the first
+    # time. That is a data decision, not a fix for a type error.
+    from core.db import get_connection  # type: ignore[attr-defined]
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""

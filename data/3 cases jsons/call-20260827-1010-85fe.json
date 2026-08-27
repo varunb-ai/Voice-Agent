@@ -1,0 +1,456 @@
+{
+  "call_id": "call-20260827-1010-85fe",
+  "doctor_name": "Dr. Jennifer",
+  "hospital_name": "New York Baptist Hospital",
+  "branch": "Private site campus",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "identity",
+    "branch",
+    "accepting"
+  ],
+  "missing": [],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Yes, that's correct."
+    },
+    "branch": {
+      "value": "Private site campus"
+    },
+    "accepting": {
+      "value": "no",
+      "heard": "No.",
+      "detail": "No new patient availability mentioned beyond 'No'."
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jennifer",
+    "hospital_name": "New York Baptist Hospital",
+    "specialization": "Cardiology",
+    "branch": "Private site campus",
+    "city": null,
+    "source": "voice",
+    "status": "verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-27T04:42:06.557710+00:00",
+    "enriched_by": "call-20260827-1010-85fe",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yes, that's correct."
+      },
+      "branch": {
+        "value": "Private site campus"
+      },
+      "accepting": {
+        "value": "no",
+        "heard": "No.",
+        "detail": "No new patient availability mentioned beyond 'No'."
+      }
+    }
+  },
+  "duration_seconds": 122,
+  "cost_usd": 0.24552,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript",
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": [
+    {
+      "text": "Is now a good time?",
+      "verdict": "duplicate"
+    }
+  ],
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": [
+    {
+      "tool": "save_new_patient_status",
+      "args": {
+        "status": "no",
+        "heard": "No.",
+        "detail": "No new patient availability mentioned beyond 'No'."
+      },
+      "waited_s": 0.0,
+      "outcome": "applied",
+      "held_because": "status='no' \u2014 nothing has been transcribed since you asked | NEED: their answer to THAT question, in their own words",
+      "error": null
+    }
+  ],
+  "ended_by_caller": null,
+  "transcript_waits": [
+    {
+      "waited_s": 1.53,
+      "outcome": "timeout"
+    }
+  ],
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.34,
+  "reply_latency": {
+    "turns": 11,
+    "median": 1.87,
+    "worst": 3.44,
+    "detector_lag_s": 0.42,
+    "stages": [
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.416,
+        "felt_s": 1.401,
+        "vad_to_resp": 0.416,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.985
+      },
+      {
+        "tool": "save_doctor_identity",
+        "tools": [
+          {
+            "tool": "save_doctor_identity",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.412,
+        "felt_s": 1.865,
+        "vad_to_resp": 0.428,
+        "inference_1": 0.687,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 0.75,
+        "no_tool_s": null
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.44,
+        "felt_s": 0.924,
+        "vad_to_resp": 0.44,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.484
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.424,
+        "felt_s": 2.768,
+        "vad_to_resp": 0.424,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 2.344
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.432,
+        "felt_s": 1.979,
+        "vad_to_resp": 0.432,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 1.547
+      },
+      {
+        "tool": "escalate",
+        "tools": [
+          {
+            "tool": "escalate",
+            "ok": false
+          }
+        ],
+        "detector_s": 0.44,
+        "felt_s": 2.19,
+        "vad_to_resp": 0.44,
+        "inference_1": 0.968,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 0.782,
+        "no_tool_s": null
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.368,
+        "felt_s": 1.103,
+        "vad_to_resp": 0.384,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.719
+      },
+      {
+        "tool": "save_new_patient_status",
+        "tools": [
+          {
+            "tool": "save_new_patient_status",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.42,
+        "felt_s": 3.435,
+        "vad_to_resp": 0.42,
+        "inference_1": 0.531,
+        "our_work": 1.531,
+        "deferral": 0.0,
+        "inference_2": 0.953,
+        "no_tool_s": null
+      },
+      {
+        "tool": "note_info",
+        "tools": [
+          {
+            "tool": "note_info",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.448,
+        "felt_s": 1.963,
+        "vad_to_resp": 0.463,
+        "inference_1": 0.703,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 0.797,
+        "no_tool_s": null
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.424,
+        "felt_s": 1.236,
+        "vad_to_resp": 0.424,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.812
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.46,
+        "felt_s": 1.304,
+        "vad_to_resp": 0.46,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.844
+      }
+    ]
+  },
+  "conversation": {
+    "location_asks": 6,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 21,
+    "agent_turns": 12,
+    "caller_turns": 11,
+    "caller_questions": 0,
+    "question_turns": 7,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 1
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 12,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 17,
+    "input_audio": 12106,
+    "input_audio_cached": 11328,
+    "output_audio": 1070,
+    "input_text": 137034,
+    "input_text_cached": 128256,
+    "output_text": 1152,
+    "cache_hit_rate": 0.9359
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "10:10:08",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "By David, it's a good time.",
+      "timestamp": "10:10:20",
+      "audio_rms": 0.11248334497213364
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that \u2014 is this Dr. Jennifer, Cardiology\u2019s office at New York Baptist Hospital?",
+      "timestamp": "10:10:22",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, that's correct.",
+      "timestamp": "10:10:31",
+      "audio_rms": 0.09949340671300888
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 which branch does Dr. Jennifer work out of?",
+      "timestamp": "10:10:33",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Um Private site campus.",
+      "timestamp": "10:10:39",
+      "audio_rms": 0.15409378707408905
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that \u2014 I\u2019m just noting Riverside Campus now, then I\u2019ll ask about new patients.",
+      "timestamp": "10:10:43",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay.",
+      "timestamp": "10:10:50",
+      "audio_rms": 0.10501179844141006
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 is that the full name on the sign, or could you share the street address for Riverside Campus?",
+      "timestamp": "10:10:53",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "I think that's the same.",
+      "timestamp": "10:11:02",
+      "audio_rms": 0.12814109027385712
+    },
+    {
+      "role": "agent",
+      "text": "Right, do you have the street address for it, even just the number and street name?",
+      "timestamp": "10:11:05",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, I don't have it.",
+      "timestamp": "10:11:12",
+      "audio_rms": 0.12930725514888763
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for sticking with me \u2014 I\u2019ll use the name you gave and move on from there.",
+      "timestamp": "10:11:15",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Ok.",
+      "timestamp": "10:11:24",
+      "audio_rms": 0.10235234349966049
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that location \u2014 is Dr. Jennifer currently taking new patients?",
+      "timestamp": "10:11:25",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No.",
+      "timestamp": "10:11:32",
+      "audio_rms": 0.1843588650226593
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for letting me know \u2014 is there a waitlist or any other way to request an appointment?",
+      "timestamp": "10:11:35",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, I don't know.",
+      "timestamp": "10:11:43",
+      "audio_rms": 0.1568865329027176
+    },
+    {
+      "role": "agent",
+      "text": "No problem \u2014 thanks for your time.",
+      "timestamp": "10:11:45",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Thank you.",
+      "timestamp": "10:11:53",
+      "audio_rms": 0.08148831874132156
+    },
+    {
+      "role": "agent",
+      "text": "Take care.",
+      "timestamp": "10:11:54",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Kraftwerk.",
+      "timestamp": "10:11:57",
+      "audio_rms": 0.012440796010196209
+    },
+    {
+      "role": "agent",
+      "text": "Take care.",
+      "timestamp": "10:11:58",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called New York Baptist Hospital to verify Dr. Jennifer's branch. Branch confirmed: Private site campus.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1010-85fe.wav",
+  "recorded_at": "2026-08-27T10:10:04.256404"
+}

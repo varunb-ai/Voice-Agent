@@ -628,11 +628,38 @@ _HUMAN_GREETING = (
 # US bias this hint exists for. (An earlier version said "Indian English phone
 # call" and listed Hyderabad neighbourhoods, which biased against US place and
 # health-system names — the answer is to name neither accent.)
-_US_TRANSCRIBE_HINT = (
-    "Location words: campus, clinic, medical center, satellite office, "
-    "north, south, east, west, downtown, midtown, uptown, suite, "
-    "boulevard, avenue, parkway, drive, street."
-)
+# ── RETIRED 2026-08-26. THE TRANSCRIBER RECITED IT BACK AS THE CALLER. ──────
+#
+# gpt-4o-transcribe takes this as `prompt`, and when a stretch of audio is
+# ambiguous it emits the prompt instead of the speech. Two calls were destroyed
+# by it in eight minutes:
+#
+#   1633  35s, collected NOTHING. The caller's FIRST turn came back as
+#         "waitlist referral The downtown clinic is accepting new patients and
+#         scheduling appointments for the satellite office". The agent read
+#         that as "not a good time", offered to call back, and hung up.
+#   1625  94s, identity only. "waiting", "waitlist", "Referral Hello?",
+#         "waitlist Yeah, that's correct." — branch and accepting never landed.
+#
+# NOT BACKGROUND NOISE, and that was checked rather than assumed: caller/agent
+# channel correlation is r=0.00-0.01 (so not speakerphone echo), caller-channel
+# activity on the wrecked calls is 34%/30% against 25% on the call that
+# succeeded, and the worst fabrication of all sits on the LOUDEST turn of its
+# call (rms 0.1438). Two turns WERE near-silent (rms 0.018) and produced bare
+# hint words — quiet audio is one trigger, but it is not the one that cost the
+# calls.
+#
+# WHAT IT BOUGHT was better recognition of "campus", "boulevard", "waitlist".
+# What it cost was two calls and $0.59. The trade is not close.
+#
+# THE GUARDS STAY. Removing them instead would be the opposite fix: with the
+# quarantine off, that fabricated sentence GROUNDS — "downtown clinic" really
+# does appear in what the guards believe the caller said, so save_branch passes
+# and a fabricated address reaches doctors.json marked verified. A loud failure
+# would become a silent wrong answer. The text moves to _RETIRED_HINT_TEXT in
+# realtime_worker so a recitation of what we USED to send is still recognised;
+# see the 2026-08-20 precedent there, which is the same move for the same reason.
+_US_TRANSCRIBE_HINT = ""
 
 
 # The objective both current templates share: one place name, and the call is
@@ -1256,13 +1283,10 @@ _PROVIDER_VERIFICATION_GREETING = (
 # whole conversational phrase — a hint is a prompt, and anything phrase-shaped
 # in it comes back as transcript on thin audio. "waitlist" and "referral" are
 # the two words this script cannot afford to lose and are not location words.
-_PROVIDER_VERIFICATION_HINT = (
-    "Location words: campus, clinic, medical center, satellite office, "
-    "north, south, east, west, downtown, midtown, uptown, suite, "
-    "boulevard, avenue, parkway, drive, street. "
-    "Scheduling words: waitlist, waiting list, referral, new patients, "
-    "accepting, scheduling, insurance."
-)
+# Retired with _US_TRANSCRIBE_HINT, and this is the one the wrecked calls ran
+# on — the scheduling words are why "waitlist" and "referral" appear as caller
+# speech in 1625 and 1633. Same reasoning, same date; see above.
+_PROVIDER_VERIFICATION_HINT = ""
 
 
 # WHAT THIS CALL COLLECTS. Both fields required; the branch first.

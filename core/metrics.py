@@ -11,7 +11,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 try:
-    from prometheus_client import Counter, Histogram, Gauge, start_http_server
+    # type: ignore on the REAL import, not the stubs: pyright takes the _Noop
+    # factories below as the declared type for these names and then reports the
+    # genuine classes as incompatible with them. The stubs are the fallback, so
+    # the real ones are what the annotation should follow.
+    from prometheus_client import Counter, Histogram, Gauge, start_http_server  # type: ignore
     _ENABLED = True
 except Exception:  # prometheus_client missing
     _ENABLED = False

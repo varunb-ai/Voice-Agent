@@ -1,0 +1,145 @@
+{
+  "call_id": "call-20260826-2012-tsid",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": "Northgate Campus",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "branch"
+  ],
+  "missing": [],
+  "fields": {
+    "branch": {
+      "value": "Northgate Campus"
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": "Cardiology",
+    "branch": "Northgate Campus",
+    "city": null,
+    "source": "voice",
+    "status": "verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-26T14:42:06.086501+00:00",
+    "enriched_by": "call-20260826-2012-tsid",
+    "collected_fields": {
+      "branch": {
+        "value": "Northgate Campus"
+      }
+    }
+  },
+  "duration_seconds": 0,
+  "cost_usd": 0.203454,
+  "template": "forage_data_collection",
+  "grounding": "verified against caller transcript",
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": null,
+  "transcript_waits": null,
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": null,
+  "reply_latency": null,
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 9,
+    "agent_turns": 3,
+    "caller_turns": 2,
+    "caller_questions": 0,
+    "question_turns": 1,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": true,
+  "caller_turns_unmeasured": 2,
+  "caller_turns_measured": 0,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 3,
+    "input_audio": 1200,
+    "input_audio_cached": 0,
+    "output_audio": 2400,
+    "input_text": 5900,
+    "input_text_cached": 3774,
+    "output_text": 60,
+    "cache_hit_rate": 0.5315
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, good afternoon - this is an automated assistant calling from Forage AI...",
+      "timestamp": "20:12:06",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, this is Northside.",
+      "timestamp": "20:12:06",
+      "audio_rms": null
+    },
+    {
+      "role": "agent",
+      "text": "Great - which location is Dr. Okafor practicing at?",
+      "timestamp": "20:12:06",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "She's at the Northgate campus.",
+      "timestamp": "20:12:06",
+      "audio_rms": null
+    },
+    {
+      "role": "agent",
+      "text": "Perfect, thank you so much. Have a great day!",
+      "timestamp": "20:12:06",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Northgate Campus.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260826-2012-tsid.wav",
+  "recorded_at": "2026-08-26T20:12:05.563078"
+}

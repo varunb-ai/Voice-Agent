@@ -9,6 +9,7 @@ Requirements:
     - TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER in .env
 """
 from __future__ import annotations
+from typing import Any, cast
 
 import argparse
 import threading
@@ -66,7 +67,9 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
         return text
 
     try:
-        call = client.calls.create(**full)
+        # The kwargs dict is heterogeneous, so the SDK cannot see `to` and
+        # `from_` as the strings they are.
+        call = client.calls.create(**cast(Any, full))
     except TwilioRestException as e:
         if "disallowed parameter" not in (e.msg or "").lower():
             print(f"\n  *** Could not place the call (Twilio {e.code}) ***")
@@ -74,7 +77,7 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
             raise SystemExit(1)
         print("  Note     : trial account — retrying without status callbacks")
         try:
-            call = client.calls.create(**minimal)
+            call = client.calls.create(**cast(Any, minimal))
         except TwilioRestException as e2:
             # The fallback failing for a DIFFERENT reason chained two full
             # tracebacks together, burying a one-line configuration problem.
@@ -87,7 +90,9 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
     # flight would have asked about one doctor. Twilio still has to ring the far
     # end before it fetches /answer, so the gap between create() and here is
     # microseconds against seconds — and /answer waits, so even that is covered.
-    worker.register_call(call.sid, doctor)
+    # call.sid is Optional on the SDK type; a create() that returned None
+    # here would already have failed above.
+    worker.register_call(cast(str, call.sid), doctor)
     print(f"\n  Call SID : {call.sid}")
     print(f"  Calling  : {to_number}")
     print(f"  From     : {settings.twilio_from_number}")
@@ -119,13 +124,13 @@ def _warmup() -> None:
         return
 
     print("  Warming up STT...", end=" ", flush=True)
-    from agents.voice.stt_whisper import _model, _tiny_model
+    from agents.experiment.stt_whisper import _model, _tiny_model
     _tiny_model()
     _model()
     print("done")
 
     print("  Warming up TTS...", end=" ", flush=True)
-    from agents.voice.tts_local import synthesize
+    from agents.experiment.tts_local import synthesize
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
     synthesize("Hello.", tmp.name)

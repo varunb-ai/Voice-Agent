@@ -17,8 +17,8 @@ import core.bootstrap  # noqa: F401  (UTF-8 console)
 from rich.console import Console
 
 from core.models import Doctor
-from agents.voice.brain import VoiceBrain
-from agents.voice.memory import CallMemory
+from agents.experiment.brain import VoiceBrain
+from agents.experiment.memory import CallMemory
 
 console = Console()
 

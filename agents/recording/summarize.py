@@ -1,6 +1,8 @@
 """Generate a short summary for a completed call using LLM or heuristic fallback."""
 from __future__ import annotations
 
+from typing import cast
+
 
 def summarize(snap: dict, use_llm: bool = True) -> str:
     doctor   = snap.get("doctor", "Unknown")
@@ -27,7 +29,10 @@ def summarize(snap: dict, use_llm: bool = True) -> str:
                     temperature=0.2,
                     max_tokens=100,
                 )
-                return resp.choices[0].message.content.strip()
+                # content is Optional; a None here raises and the except below
+                # falls through to the heuristic, which is the intended path.
+                # The cast keeps that behaviour exactly.
+                return cast(str, resp.choices[0].message.content).strip()
         except Exception:
             pass
 

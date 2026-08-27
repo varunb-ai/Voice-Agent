@@ -222,8 +222,22 @@ _REFERRAL_PATTERNS: tuple[tuple[ReferralAnswer, "re.Pattern[str]"], ...] = (
         r"\b(not (really )?sure|no idea|do ?n'?t know|could ?n'?t say|"
         r"can'?t say|have to (ask|check)|you'?d have to|i'?d have to check)\b",
         re.I)),
+    # THE STEM AND THE PREPOSITION BOTH VARY, and the list had one of each.
+    # call-20260827-1130: the caller answered "It's depend upon situation." and
+    # the classifier returned None, so the guard read a correct DEPENDS answer
+    # as a fabrication and refused it. Neither half was missing on its own —
+    # "it depends upon the situation" matches on bare `depends`, and "it's
+    # depend on situation" matches on `depend on`. Only the CONJUNCTION of the
+    # bare stem with "upon" fell through, which is ordinary Indian English and
+    # is what the callees on this project actually speak.
+    #
+    # THE PREPOSITION IS REQUIRED, deliberately, rather than widening to
+    # `depend\w*`. That would match "dependent", and "It is not dependent on
+    # anything, always required." is an ALWAYS answer that DEPENDS is tested
+    # before — so the loose version turns a correct classification into a wrong
+    # one. Requiring whitespace then on/upon cannot reach inside "dependent".
     (ReferralAnswer.DEPENDS, re.compile(
-        r"\b(depends|depend on|varies|only (for|with|if)|some (plans|insurers|"
+        r"\b(depends|depend(s|ed|ing)? (on|upon)|varies|only (for|with|if)|some (plans|insurers|"
         r"insurances)|certain (plans|insurers)|if (their|the) insurance|"
         r"case by case|case-by-case|depending)\b", re.I)),
     (ReferralAnswer.ALWAYS, re.compile(
@@ -434,6 +448,23 @@ def classify_identity(text: str) -> Optional[IdentityAnswer]:
 IDENTITY_ASK = re.compile(
     r"\bhave i reached\b"
     r"|\b(is|was) this\s+(dr\.?|doctor)\b"
+    # THE DECLARATIVE FORM, which is the one the model actually reaches
+    # for when it softens the question. On call-20260825-1712 it asked
+    # "are you able to confirm THIS IS Dr. Reyes, Oncology, at Lakeview
+    # Medical?" - the same question with the words in the other order -
+    # and this probe saw no ask at all. `since` stayed 0, so the
+    # never-asked branch applied, and the perfect answer "Yes, Dr. Reyes
+    # is our oncologist." was refused TWICE for not standing on its own.
+    # Three turns later the model reworded to "Is this Dr. Reyes' line...",
+    # which did match, and a bare "Yes," was accepted on the spot. The
+    # guard threw away the good evidence and took the weakest.
+    #
+    # Safe against the narrowness this block warns about: the DOCTOR must
+    # be NAMED immediately after, and a branch ask never says "this is Dr.
+    # <name>". The agent's own greeting ("Hi, this is David...") cannot
+    # match either, because a title is required.
+    r"|\bthis is\s+(dr\.?|doctor)\s+[\w'-]+"
+    r"|\b(through to|speaking (with|to)|reached)\s+(dr\.?|doctor)\s+[\w'-]+"
     r"|\b(dr\.?|doctor)\s+[\w'-]+(?:'s)?\s+(office|practice|practise|clinic)\b"
     r"|\bright (doctor|practice|place) for\b"
     # "…work HERE", not "…work out of". Without the place-anchor this matched

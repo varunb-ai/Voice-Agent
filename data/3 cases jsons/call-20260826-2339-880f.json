@@ -1,0 +1,227 @@
+{
+  "call_id": "call-20260826-2339-880f",
+  "doctor_name": "Dr. Jennifer",
+  "hospital_name": "New York Baptist Hospital",
+  "branch": null,
+  "resolved": false,
+  "outcome": "partial",
+  "collected": [
+    "identity"
+  ],
+  "missing": [
+    "branch",
+    "accepting"
+  ],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Yes"
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jennifer",
+    "hospital_name": "New York Baptist Hospital",
+    "specialization": "Cardiology",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260826-2339-880f",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yes"
+      }
+    }
+  },
+  "duration_seconds": 41,
+  "cost_usd": 0.108891,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript EXCEPT 'unsure', which the caller was never transcribed saying",
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": null,
+  "ended_by_caller": null,
+  "transcript_waits": [
+    {
+      "waited_s": 1.53,
+      "outcome": "timeout"
+    }
+  ],
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 3.2,
+  "reply_latency": {
+    "turns": 3,
+    "median": 2.59,
+    "worst": 4.77,
+    "detector_lag_s": 0.48,
+    "stages": [
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.48,
+        "felt_s": 1.637,
+        "vad_to_resp": 0.496,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 1.141
+      },
+      {
+        "tool": "save_doctor_identity",
+        "tools": [
+          {
+            "tool": "save_doctor_identity",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.476,
+        "felt_s": 2.586,
+        "vad_to_resp": 0.476,
+        "inference_1": 1.172,
+        "our_work": 0.0,
+        "deferral": 0.016,
+        "inference_2": 0.922,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_branch",
+        "tools": [
+          {
+            "tool": "save_branch",
+            "ok": false
+          },
+          {
+            "tool": "escalate",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.4,
+        "felt_s": 4.775,
+        "vad_to_resp": 0.4,
+        "inference_1": 0.422,
+        "our_work": 1.531,
+        "deferral": 0.0,
+        "inference_2": 2.422,
+        "no_tool_s": null
+      }
+    ]
+  },
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 12,
+    "agent_turns": 4,
+    "caller_turns": 3,
+    "caller_questions": 0,
+    "question_turns": 3,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 1,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 3,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 7,
+    "input_audio": 1925,
+    "input_audio_cached": 1536,
+    "output_audio": 379,
+    "input_text": 57336,
+    "input_text_cached": 49024,
+    "output_text": 310,
+    "cache_hit_rate": 0.8532
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "23:39:49",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, it's a good time.",
+      "timestamp": "23:40:00",
+      "audio_rms": 0.07354201376438141
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is this Dr. Jennifer, Cardiology, at New York Baptist Hospital?",
+      "timestamp": "23:40:02",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes",
+      "timestamp": "23:40:09",
+      "audio_rms": 0.07681683450937271
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 which branch does Dr. Jennifer work out of?",
+      "timestamp": "23:40:12",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Don't.",
+      "timestamp": "23:40:18",
+      "audio_rms": 0.14212006330490112
+    },
+    {
+      "role": "agent",
+      "text": "No problem \u2014 thanks for your time.",
+      "timestamp": "23:40:23",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called New York Baptist Hospital to verify Dr. Jennifer's branch. Branch could not be confirmed. Not collected: branch, accepting.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260826-2339-880f.wav",
+  "recorded_at": "2026-08-26T23:39:45.725858"
+}

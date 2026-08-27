@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agents.voice.memory import CallMemory
+from agents.experiment.memory import CallMemory
 
 # ── Tool schemas (OpenAI-compatible) ─────────────────────────────────────────
 

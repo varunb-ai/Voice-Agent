@@ -1,0 +1,243 @@
+{
+  "call_id": "call-20260827-1202-a568",
+  "doctor_name": "Dr. Alan Reyes",
+  "hospital_name": "Lakeview Medical",
+  "branch": null,
+  "resolved": false,
+  "outcome": "partial",
+  "collected": [
+    "identity"
+  ],
+  "missing": [
+    "branch",
+    "accepting"
+  ],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Yes."
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Alan Reyes",
+    "hospital_name": "Lakeview Medical",
+    "specialization": "Oncology",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260827-1202-a568",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yes."
+      }
+    }
+  },
+  "duration_seconds": 46,
+  "cost_usd": 0.12218,
+  "template": "provider_verification",
+  "grounding": null,
+  "branch_rejections": null,
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "released_second_items": null,
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": null,
+  "ended_by_caller": null,
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.55,
+  "reply_latency": {
+    "turns": 4,
+    "median": 2.28,
+    "worst": 2.72,
+    "detector_lag_s": 0.43,
+    "stages": [
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.428,
+        "felt_s": 2.084,
+        "vad_to_resp": 0.428,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 1.656
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.436,
+        "felt_s": 1.405,
+        "vad_to_resp": 0.451,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.954
+      },
+      {
+        "tool": "save_doctor_identity",
+        "tools": [
+          {
+            "tool": "save_doctor_identity",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.468,
+        "felt_s": 2.484,
+        "vad_to_resp": 0.468,
+        "inference_1": 1.016,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 1.0,
+        "no_tool_s": null
+      },
+      {
+        "tool": "escalate",
+        "tools": [
+          {
+            "tool": "escalate",
+            "ok": true
+          }
+        ],
+        "detector_s": 0.412,
+        "felt_s": 2.724,
+        "vad_to_resp": 0.428,
+        "inference_1": 1.109,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 1.187,
+        "no_tool_s": null
+      }
+    ]
+  },
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 16,
+    "agent_turns": 5,
+    "caller_turns": 4,
+    "caller_questions": 0,
+    "question_turns": 4,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 3,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 4,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 7,
+    "input_audio": 2162,
+    "input_audio_cached": 1664,
+    "output_audio": 465,
+    "input_text": 57179,
+    "input_text_cached": 48832,
+    "output_text": 427,
+    "cache_hit_rate": 0.8509
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "12:02:41",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Hi",
+      "timestamp": "12:02:53",
+      "audio_rms": 0.11449243873357773
+    },
+    {
+      "role": "agent",
+      "text": "Hi there \u2014 is it okay to talk for a moment?",
+      "timestamp": "12:02:55",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes",
+      "timestamp": "12:03:00",
+      "audio_rms": 0.1158098429441452
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is this Dr. Reyes, Oncology, at Lakeview Medical?",
+      "timestamp": "12:03:01",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes.",
+      "timestamp": "12:03:07",
+      "audio_rms": 0.1318592131137848
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 do you know which branch Dr. Reyes is working out of right now?",
+      "timestamp": "12:03:10",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, I don't know.",
+      "timestamp": "12:03:17",
+      "audio_rms": 0.1663210690021515
+    },
+    {
+      "role": "agent",
+      "text": "No problem \u2014 thanks for your time.",
+      "timestamp": "12:03:20",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Lakeview Medical to verify Dr. Alan Reyes's branch. Branch could not be confirmed. Not collected: branch, accepting.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1202-a568.wav",
+  "recorded_at": "2026-08-27T12:02:37.994058"
+}

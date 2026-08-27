@@ -14,6 +14,7 @@ Usage:
     python check_realtime.py --probe     # also test the other Realtime models
 """
 from __future__ import annotations
+from typing import Any, cast
 
 import argparse
 import asyncio
@@ -118,7 +119,8 @@ async def probe_audio_variants(instructions: str, tools: list, hint: str) -> Non
                         "type": "realtime",
                         "instructions": instructions,
                         "tools": tools,
-                        "audio": build_audio_config(**kwargs),
+                        # kwargs comes from argv, so every value types as str.
+                        "audio": build_audio_config(**cast(Any, kwargs)),
                         "max_output_tokens": settings.realtime_max_response_tokens,
                     },
                 }))
@@ -317,7 +319,8 @@ async def main() -> int:
             )
             check(True, "credentials valid", f"{acct.friendly_name}")
 
-            is_trial = (acct.type or "").lower() == "trial"
+            # acct.type is an SDK enum wrapper, not a str.
+            is_trial = str(acct.type or "").lower() == "trial"
             if is_trial and settings.use_realtime:
                 # NOT a hard failure — I had this wrong. One trial account here
                 # could not open <Connect><Stream> (call placed, /answer 200,

@@ -1,0 +1,393 @@
+{
+  "call_id": "call-20260826-1513-c40c",
+  "doctor_name": "Dr. Alan Reyes",
+  "hospital_name": "Lakeview Medical",
+  "branch": "Westside Campus, 1476 8th Street",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "identity",
+    "branch",
+    "accepting",
+    "scheduling",
+    "referral"
+  ],
+  "missing": [],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Yes, that's correct.",
+      "detail": "Oncology"
+    },
+    "branch": {
+      "value": "Westside Campus, 1476 8th Street"
+    },
+    "accepting": {
+      "value": "yes",
+      "heard": "Yes, she is taking on new patients right now."
+    },
+    "scheduling": {
+      "value": "yes",
+      "heard": "Yes, you can book online or you can also directly call us."
+    },
+    "referral": {
+      "value": "depends",
+      "heard": "Yes, only if you have insurance with a particular company then only the referral is required.",
+      "depends_on": "insurance with a particular company"
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Alan Reyes",
+    "hospital_name": "Lakeview Medical",
+    "specialization": "Oncology",
+    "branch": "Westside Campus, 1476 8th Street",
+    "city": null,
+    "source": "voice",
+    "status": "verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-26T09:45:26.726985+00:00",
+    "enriched_by": "call-20260826-1513-c40c",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yes, that's correct.",
+        "detail": "Oncology"
+      },
+      "branch": {
+        "value": "Westside Campus, 1476 8th Street"
+      },
+      "accepting": {
+        "value": "yes",
+        "heard": "Yes, she is taking on new patients right now."
+      },
+      "scheduling": {
+        "value": "yes",
+        "heard": "Yes, you can book online or you can also directly call us."
+      },
+      "referral": {
+        "value": "depends",
+        "heard": "Yes, only if you have insurance with a particular company then only the referral is required.",
+        "depends_on": "insurance with a particular company"
+      }
+    }
+  },
+  "duration_seconds": 130,
+  "cost_usd": 0.284304,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript",
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": null,
+  "transcript_waits": null,
+  "name_mismatches": [
+    {
+      "heard": "riaz",
+      "ours": "reyes",
+      "said": "Yes, Dr. Riaz Arif is our oncologist.",
+      "after_spelling": false
+    }
+  ],
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.83,
+  "reply_latency": {
+    "turns": 10,
+    "median": 2.21,
+    "worst": 3.66,
+    "detector_lag_s": 0.41,
+    "stages": [
+      {
+        "tool": null,
+        "detector_s": 0.4,
+        "felt_s": 1.587,
+        "vad_to_resp": 0.4,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 1.187
+      },
+      {
+        "tool": "save_doctor_identity",
+        "detector_s": 0.408,
+        "felt_s": 2.44,
+        "vad_to_resp": 0.424,
+        "inference_1": 0.875,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 1.141,
+        "no_tool_s": null
+      },
+      {
+        "tool": null,
+        "detector_s": 0.384,
+        "felt_s": 1.165,
+        "vad_to_resp": 0.384,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.781
+      },
+      {
+        "tool": "save_doctor_identity",
+        "detector_s": 0.38,
+        "felt_s": 2.177,
+        "vad_to_resp": 0.396,
+        "inference_1": 0.578,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 1.203,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_doctor_identity",
+        "detector_s": 0.488,
+        "felt_s": 3.66,
+        "vad_to_resp": 0.488,
+        "inference_1": 0.657,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 2.515,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_doctor_identity",
+        "detector_s": 0.42,
+        "felt_s": 2.045,
+        "vad_to_resp": 0.42,
+        "inference_1": 0.672,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 0.953,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_branch",
+        "detector_s": 0.392,
+        "felt_s": 2.83,
+        "vad_to_resp": 0.392,
+        "inference_1": 1.359,
+        "our_work": 0.016,
+        "deferral": 0.0,
+        "inference_2": 1.063,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_new_patient_status",
+        "detector_s": 0.436,
+        "felt_s": 2.264,
+        "vad_to_resp": 0.436,
+        "inference_1": 0.703,
+        "our_work": 0.0,
+        "deferral": 0.031,
+        "inference_2": 1.094,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_scheduling_status",
+        "detector_s": 0.412,
+        "felt_s": 2.084,
+        "vad_to_resp": 0.412,
+        "inference_1": 0.688,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 0.984,
+        "no_tool_s": null
+      },
+      {
+        "tool": "save_referral_requirement",
+        "detector_s": 0.44,
+        "felt_s": 2.237,
+        "vad_to_resp": 0.44,
+        "inference_1": 0.844,
+        "our_work": 0.0,
+        "deferral": 0.0,
+        "inference_2": 0.953,
+        "no_tool_s": null
+      }
+    ]
+  },
+  "conversation": {
+    "location_asks": 1,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 35,
+    "agent_turns": 10,
+    "caller_turns": 9,
+    "caller_questions": 0,
+    "question_turns": 9,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 12,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 21,
+    "input_audio": 15913,
+    "input_audio_cached": 14592,
+    "output_audio": 1127,
+    "input_text": 175489,
+    "input_text_cached": 165824,
+    "output_text": 972,
+    "cache_hit_rate": 0.9426
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "15:13:19",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, it's a good time, go ahead.",
+      "timestamp": "15:13:30",
+      "audio_rms": 0.14214572310447693
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is this Dr. Reyes, Oncology, at Lakeview Medical?",
+      "timestamp": "15:13:32",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, Dr. Riaz Arif is our oncologist.",
+      "timestamp": "15:13:42",
+      "audio_rms": 0.15224425494670868
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 I heard a different name there, so could you spell the last name you have for the oncologist, one letter at a time, so I can make sure we\u2019re talking about Dr. Reyes?",
+      "timestamp": "15:13:46",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes. REYES",
+      "timestamp": "15:13:57",
+      "audio_rms": 0.13692015409469604
+    },
+    {
+      "role": "agent",
+      "text": "Sorry, I need to be sure it\u2019s Dr. Reyes \u2014 is that the exact name you have?",
+      "timestamp": "15:14:02",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, that's the exact name I have. waitlist.",
+      "timestamp": "15:14:10",
+      "audio_rms": 0.12479452788829803
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 is it Dr. Reyes, spelled R-E-Y-E-S, the oncologist, and not Dr. Riaz Arif?",
+      "timestamp": "15:14:17",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, that's correct.",
+      "timestamp": "15:14:27",
+      "audio_rms": 0.09587645530700684
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 which branch does Dr. Reyes work out of?",
+      "timestamp": "15:14:29",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "She's at the westside campus, 1476 8th Street.",
+      "timestamp": "15:14:40",
+      "audio_rms": 0.1272605061531067
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 is Dr. Reyes currently taking new patients?",
+      "timestamp": "15:14:43",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, she is taking on new patients right now.",
+      "timestamp": "15:14:51",
+      "audio_rms": 0.17060016095638275
+    },
+    {
+      "role": "agent",
+      "text": "Good to know \u2014 can a new patient actually get scheduled at the moment?",
+      "timestamp": "15:14:54",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, you can book online or you can also directly call us. Anything is set.",
+      "timestamp": "15:15:03",
+      "audio_rms": 0.17111662030220032
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is a referral required for new patients, or does it depend on their situation or insurance?",
+      "timestamp": "15:15:07",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, only if you have insurance with a particular company then only the referral is required.",
+      "timestamp": "15:15:20",
+      "audio_rms": 0.13700032234191895
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for the details \u2014 have a good one.",
+      "timestamp": "15:15:22",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Lakeview Medical to verify Dr. Alan Reyes's branch. Branch confirmed: Westside Campus, 1476 8th Street.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260826-1513-c40c.wav",
+  "recorded_at": "2026-08-26T15:13:16.137020"
+}

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import parseaddr
-from typing import Optional
+from typing import Optional, cast, Any
 
 from core.config import settings
 
@@ -88,7 +88,9 @@ def fetch_replies_from(
             typ, msg_data = imap.fetch(num, "(RFC822)")
             if typ != "OK":
                 continue
-            msg = email_lib.message_from_bytes(msg_data[0][1])
+            # imaplib types each fetch item as bytes | tuple | None; the
+            # RFC822 fetch above always yields the tuple form.
+            msg = email_lib.message_from_bytes(cast(Any, msg_data[0])[1])
             replies.append(
                 IncomingReply(
                     from_addr=parseaddr(msg.get("From", ""))[1],

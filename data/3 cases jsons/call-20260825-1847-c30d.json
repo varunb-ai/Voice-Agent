@@ -1,0 +1,224 @@
+{
+  "call_id": "call-20260825-1847-c30d",
+  "doctor_name": "Dr. Carol",
+  "hospital_name": "New York Presbyterian",
+  "branch": null,
+  "resolved": false,
+  "outcome": "partial",
+  "collected": [
+    "identity"
+  ],
+  "missing": [
+    "branch",
+    "accepting"
+  ],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Yes, I already told you that."
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Carol",
+    "hospital_name": "New York Presbyterian",
+    "specialization": "Neurosurgery",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260825-1847-c30d",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yes, I already told you that."
+      }
+    }
+  },
+  "duration_seconds": 80,
+  "cost_usd": 0.167742,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript EXCEPT 'unspecified', which the caller was never transcribed saying",
+  "grounding_at_save": null,
+  "suppressed_echoes": [
+    {
+      "kind": "verbatim hint run",
+      "raw": "Location words: campus, clinic, medical center, satellite office, north, south, east, west, downtown, midtown, uptown, suite, boulevard, avenue, parkway, drive, street. Scheduling words: waitlist, waiting list, referral, new patients, accepting, scheduling, insurance.",
+      "kept": ""
+    }
+  ],
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": [
+    {
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "verdict": "duplicate"
+    }
+  ],
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "transcript_waits": null,
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.83,
+  "reply_latency": {
+    "turns": 7,
+    "median": 1.22,
+    "worst": 2.73,
+    "detector_lag_s": 0.44
+  },
+  "conversation": {
+    "location_asks": 2,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 18,
+    "agent_turns": 8,
+    "caller_turns": 7,
+    "caller_questions": 1,
+    "question_turns": 5,
+    "stapled_questions": 0,
+    "staple_rate": 0.0,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 1,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 7,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 9,
+    "input_audio": 5320,
+    "input_audio_cached": 4480,
+    "output_audio": 996,
+    "input_text": 66765,
+    "input_text_cached": 65024,
+    "output_text": 848,
+    "cache_hit_rate": 0.9642
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "18:47:51",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Start",
+      "timestamp": "18:47:59",
+      "audio_rms": 0.055121343582868576
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is this Dr. Carol, Neurosurgery, at New York Presbyterian?",
+      "timestamp": "18:48:02",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes?",
+      "timestamp": "18:48:09",
+      "audio_rms": 0.05826892703771591
+    },
+    {
+      "role": "agent",
+      "text": "Got it, thanks for confirming \u2014 let me just clarify one more detail about where she sees patients.",
+      "timestamp": "18:48:12",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay.",
+      "timestamp": "18:48:19",
+      "audio_rms": 0.04238765314221382
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 is this Dr. Carol, Neurosurgery, at New York Presbyterian?",
+      "timestamp": "18:48:21",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, I already told you that.",
+      "timestamp": "18:48:29",
+      "audio_rms": 0.09367015957832336
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for sticking with me \u2014 do you know which branch Dr. Carol works out of?",
+      "timestamp": "18:48:32",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, I'm not sure about that.",
+      "timestamp": "18:48:39",
+      "audio_rms": 0.07635168731212616
+    },
+    {
+      "role": "agent",
+      "text": "No worries \u2014 is there someone in scheduling who might know which location she sees patients at?",
+      "timestamp": "18:48:42",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, I don't know.",
+      "timestamp": "18:48:50",
+      "audio_rms": 0.12928146123886108
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 since we can\u2019t pin down the site from here, I\u2019ll need to leave it there.",
+      "timestamp": "18:48:52",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay,",
+      "timestamp": "18:48:59",
+      "audio_rms": 0.03944352641701698
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for your time.",
+      "timestamp": "18:49:00",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called New York Presbyterian to verify Dr. Carol's branch. Branch could not be confirmed. Not collected: branch, accepting.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260825-1847-c30d.wav",
+  "recorded_at": "2026-08-25T18:47:43.882262"
+}

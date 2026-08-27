@@ -27,8 +27,8 @@ from fastapi.responses import Response
 
 from core.config import settings
 from core.models import Doctor, TranscriptTurn
-from agents.voice.memory import CallMemory
-from agents.voice.audio_utils import telnyx_to_float32, float32_to_telnyx, wav_to_float32, resample
+from agents.experiment.memory import CallMemory
+from agents.experiment.audio_utils import telnyx_to_float32, float32_to_telnyx, wav_to_float32, resample
 
 # ── Classic pipeline dependencies (USE_REALTIME=false only) ──────────────────
 # webrtcvad, the Piper/Whisper brain and the recording agent are needed only by
@@ -37,7 +37,7 @@ from agents.voice.audio_utils import telnyx_to_float32, float32_to_telnyx, wav_t
 # classic path is actually used rather than crashing the server at startup.
 try:
     import webrtcvad
-    from agents.voice.brain import VoiceBrain
+    from agents.experiment.brain import VoiceBrain
     from agents.recording.agent import record_call
     _CLASSIC_IMPORT_ERROR: Optional[BaseException] = None
 except ImportError as _e:            # pragma: no cover - depends on install set
@@ -136,6 +136,25 @@ def _is_twilio_recording_url(url: str) -> bool:
 _ALLOWED_RECORDING_HOSTS = {"api.twilio.com"}
 
 
+def _form_str(form, key: str, default: str = "") -> str:
+    """One Twilio form field, as the text it always is.
+
+    `FormData.get` is typed `UploadFile | str | None` because a multipart
+    body MAY carry a file, and every call-sid, recording URL and status in
+    this module flows out of it into a dict key, a path fragment or an HTTP
+    request. Twilio signs and sends urlencoded webhooks and never posts a
+    file to these endpoints, so this narrows to the case that actually
+    occurs.
+
+    A non-string yields the DEFAULT rather than str(value): the repr of an
+    UploadFile is not a call sid, and letting one reach _doctor_for or a
+    filename would turn a type error into a wrong file on disk. Behaviour is
+    unchanged for every value Twilio actually sends.
+    """
+    v = form.get(key, default)
+    return v if isinstance(v, str) else default
+
+
 def _require_classic() -> None:
     """Raise a clear error if the classic pipeline is used without its deps."""
     if _CLASSIC_IMPORT_ERROR is not None:
@@ -208,6 +227,9 @@ class _Session:
         self.memory      = CallMemory(call_id=self.call_id)
         self.memory.clear()
         self.memory.update(doctor=doctor.doctor_name, hospital=doctor.hospital_name)
+        # Guaranteed non-None by _require_classic() above; restated for the
+        # type checker, which cannot narrow through that call.
+        assert VoiceBrain is not None
         self.brain       = VoiceBrain(doctor, self.memory, use_llm=True)
         self.turns:      list[TranscriptTurn] = []
         self.ws:         Optional[WebSocket] = None
@@ -237,13 +259,13 @@ class _Session:
 
     def _prebuild_tts(self) -> None:
         import re
-        from agents.voice.tts_local import synthesize
-        from agents.voice.audio_utils import wav_to_float32, resample
-        from agents.voice.prompts import _FIRST_ASK, _REPEAT_ASK, _HOLD_ACKS, _CLOSINGS, _GREETINGS
+        from agents.experiment.tts_local import synthesize
+        from agents.experiment.audio_utils import wav_to_float32, resample
+        from agents.experiment.prompts import _FIRST_ASK, _REPEAT_ASK, _HOLD_ACKS, _CLOSINGS, _GREETINGS
         from core.config import settings
         clean = re.sub(r"^Dr\.?\s+", "", self.doctor.doctor_name, flags=re.I).strip()
         tod = "morning"  # pre-warm all time variants below
-        from agents.voice.prompts import _GREETINGS
+        from agents.experiment.prompts import _GREETINGS
         all_greetings = [
             g.format(time_of_day=tod, hospital=self.doctor.hospital_name or "your hospital",
                      org=settings.org_name)
@@ -331,7 +353,7 @@ class _Session:
             else:
                 # ── Streaming TTS: first chunk plays in ~200ms ────────────────
                 log.info("TTS streaming: %s", text[:60])
-                from agents.voice.tts_local import synthesize_stream_chunks
+                from agents.experiment.tts_local import synthesize_stream_chunks
                 import numpy as np
                 cache_parts: list[np.ndarray] = []
                 duration_sec = 0.0
@@ -485,6 +507,9 @@ class _Session:
         snap["transcript"] = [t.model_dump() for t in self.turns]
         n_turns     = len([t for t in self.turns if t.role == "caller"])
         cost_usd    = _calc_cost(duration, n_turns)
+        # Same invariant as VoiceBrain above: _Session cannot exist without
+        # _require_classic() having passed.
+        assert record_call is not None
         record, backend = record_call(
             snap, call_id=self.call_id,
             audio_path=audio_path, duration_seconds=duration,
@@ -611,7 +636,7 @@ async def answer(request: Request):
     if not await _verify_twilio_signature(request, form):
         log.warning("Rejected unsigned /answer request")
         return _forbidden()
-    csid = form.get("CallSid", "")
+    csid = _form_str(form, "CallSid")
     doc  = await _doctor_for(csid)
     if not doc:
         log.error("No doctor registered for CallSid %s after %.1fs — hanging up "
@@ -644,8 +669,8 @@ async def status_callback(request: Request):
     if not await _verify_twilio_signature(request, form):
         log.warning("Rejected unsigned /status request")
         return _forbidden()
-    status = form.get("CallStatus", "")
-    csid   = form.get("CallSid", "")
+    status = _form_str(form, "CallStatus")
+    csid   = _form_str(form, "CallSid")
     # print, not log.info: nothing configures logging for the uvicorn process,
     # so this went nowhere and the only thing on screen was uvicorn's access
     # line, "POST /status 200 OK" — which says a webhook arrived, not what it
@@ -662,7 +687,7 @@ async def status_callback(request: Request):
         "failed":    "the call failed to connect",
         "canceled":  "the call was cancelled before it connected",
     }
-    _dur = form.get("CallDuration") or "?"
+    _dur = _form_str(form, "CallDuration") or "?"
     if status in _never_connected:
         print(f"\n  ☎️  NOT ANSWERED — {_never_connected[status]} "
               f"(status={status}, {_dur}s)\n", flush=True)
@@ -757,11 +782,11 @@ async def recording_ready(request: Request):
     if not await _verify_twilio_signature(request, form):
         log.warning("Rejected unsigned /recording_ready request")
         return _forbidden()
-    recording_url  = form.get("RecordingUrl", "")
-    recording_sid  = form.get("RecordingSid", "")
-    recording_status = form.get("RecordingStatus", "")
-    call_sid       = form.get("CallSid", "")
-    duration       = form.get("RecordingDuration", "")
+    recording_url  = _form_str(form, "RecordingUrl")
+    recording_sid  = _form_str(form, "RecordingSid")
+    recording_status = _form_str(form, "RecordingStatus")
+    call_sid       = _form_str(form, "CallSid")
+    duration       = _form_str(form, "RecordingDuration")
     print(f"\n📼 Recording ready  : status={recording_status} dur={duration}s sid={recording_sid}", flush=True)
     if recording_status == "completed" and recording_url:
         asyncio.create_task(_download_twilio_recording(recording_url, call_sid, recording_sid))
@@ -1036,7 +1061,7 @@ def _calc_cost(duration_seconds: int, n_caller_turns: int) -> float:
 
 
 def _transcribe(audio_16k: np.ndarray, context: str = "") -> str:
-    from agents.voice.stt_whisper import transcribe_array
+    from agents.experiment.stt_whisper import transcribe_array
     return transcribe_array(audio_16k, context=context)
 
 

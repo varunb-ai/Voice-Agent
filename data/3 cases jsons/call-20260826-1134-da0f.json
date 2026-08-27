@@ -1,0 +1,232 @@
+{
+  "call_id": "call-20260826-1134-da0f",
+  "doctor_name": "Dr. Jane Okafor",
+  "hospital_name": "Northside Medical Group",
+  "branch": "Riverside Campus, 1467 River Street",
+  "resolved": true,
+  "outcome": "complete",
+  "collected": [
+    "identity",
+    "branch",
+    "accepting",
+    "scheduling",
+    "referral"
+  ],
+  "missing": [],
+  "fields": {
+    "identity": {
+      "value": "confirmed",
+      "heard": "Yes, that's right."
+    },
+    "branch": {
+      "value": "Riverside Campus, 1467 River Street"
+    },
+    "accepting": {
+      "value": "yes",
+      "heard": "Yes, she is."
+    },
+    "scheduling": {
+      "value": "yes",
+      "heard": "Yes, you can book an online"
+    },
+    "referral": {
+      "value": "depends",
+      "heard": "Only if you have an insurance with a particular company, yes, it's required.",
+      "depends_on": "insurance with a particular company"
+    }
+  },
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Jane Okafor",
+    "hospital_name": "Northside Medical Group",
+    "specialization": "Cardiology",
+    "branch": "Riverside Campus, 1467 River Street",
+    "city": null,
+    "source": "voice",
+    "status": "verified",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [],
+    "enriched_at": "2026-08-26T06:05:44.247277+00:00",
+    "enriched_by": "call-20260826-1134-da0f",
+    "collected_fields": {
+      "identity": {
+        "value": "confirmed",
+        "heard": "Yes, that's right."
+      },
+      "branch": {
+        "value": "Riverside Campus, 1467 River Street"
+      },
+      "accepting": {
+        "value": "yes",
+        "heard": "Yes, she is."
+      },
+      "scheduling": {
+        "value": "yes",
+        "heard": "Yes, you can book an online"
+      },
+      "referral": {
+        "value": "depends",
+        "heard": "Only if you have an insurance with a particular company, yes, it's required.",
+        "depends_on": "insurance with a particular company"
+      }
+    }
+  },
+  "duration_seconds": 88,
+  "cost_usd": 0.169055,
+  "template": "provider_verification",
+  "grounding": "verified against caller transcript",
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "transcript_waits": null,
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.86,
+  "reply_latency": {
+    "turns": 6,
+    "median": 2.33,
+    "worst": 7.09,
+    "detector_lag_s": 0.45
+  },
+  "conversation": {
+    "location_asks": 2,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 1,
+    "longest_turn_words": 17,
+    "agent_turns": 7,
+    "caller_turns": 6,
+    "caller_questions": 0,
+    "question_turns": 6,
+    "stapled_questions": 0,
+    "staple_rate": null,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 11,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field"
+  },
+  "usage": {
+    "responses": 17,
+    "input_audio": 6045,
+    "input_audio_cached": 5440,
+    "output_audio": 657,
+    "input_text": 100071,
+    "input_text_cached": 91648,
+    "output_text": 455,
+    "cache_hit_rate": 0.9149
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "11:34:19",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yeah, it's a good time. Go ahead.",
+      "timestamp": "11:34:30",
+      "audio_rms": 0.1438881903886795
+    },
+    {
+      "role": "agent",
+      "text": "Thanks \u2014 is this Dr. Okafor, Cardiology, at Northside Medical Group?",
+      "timestamp": "11:34:33",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, that's right.",
+      "timestamp": "11:34:41",
+      "audio_rms": 0.13690316677093506
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 which branch does Dr. Okafor work out of?",
+      "timestamp": "11:34:44",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "She work at the Riverside campus 1467 Street",
+      "timestamp": "11:34:51",
+      "audio_rms": 0.17163603007793427
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that location \u2014 is Dr. Okafor currently taking new patients?",
+      "timestamp": "11:34:57",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, she is.",
+      "timestamp": "11:35:05",
+      "audio_rms": 0.17016898095607758
+    },
+    {
+      "role": "agent",
+      "text": "Nice \u2014 can a new patient actually book an appointment right now?",
+      "timestamp": "11:35:09",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Yes, you can book an online You can also call us. Directly.",
+      "timestamp": "11:35:17",
+      "audio_rms": 0.15809521079063416
+    },
+    {
+      "role": "agent",
+      "text": "Good to know \u2014 is a referral required, or does it depend on the situation or insurance?",
+      "timestamp": "11:35:22",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Only if you have an insurance with a particular company, yes, it's required.",
+      "timestamp": "11:35:33",
+      "audio_rms": 0.1647154837846756
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for the details \u2014 take care.",
+      "timestamp": "11:35:39",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Northside Medical Group to verify Dr. Jane Okafor's branch. Branch confirmed: Riverside Campus, 1467 River Street.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260826-1134-da0f.wav",
+  "recorded_at": "2026-08-26T11:34:16.008669"
+}
