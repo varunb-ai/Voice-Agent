@@ -78,13 +78,8 @@
       "branch"
     ],
     "enriched_at": null,
-    "enriched_by": "call-20260827-1202-a568",
-    "collected_fields": {
-      "identity": {
-        "value": "confirmed",
-        "heard": "Yes."
-      }
-    }
+    "enriched_by": "call-20260827-1516-a437",
+    "collected_fields": {}
   },
   {
     "doctor_name": "Dr. Carol",
@@ -112,37 +107,39 @@
     "doctor_name": "Dr. Jennifer",
     "hospital_name": "New York Baptist Hospital",
     "specialization": "Cardiology",
-    "branch": "Northside Medical Group",
+    "branch": "Riverside Campus",
     "city": null,
     "source": "voice",
     "status": "verified",
     "status_before": "discovered",
     "confidence": 0,
     "missing_for_complete": [],
-    "enriched_at": "2026-08-27T06:46:27.286058+00:00",
-    "enriched_by": "call-20260827-1214-3d1c",
+    "enriched_at": "2026-08-27T11:10:23.583662+00:00",
+    "enriched_by": "call-20260827-1638-8684",
     "collected_fields": {
       "identity": {
         "value": "confirmed",
-        "heard": "Yes, yes, you're talking with Jennifer Doctor."
+        "heard": "Yes, Jennifer is one of cardiologist.",
+        "detail": "Cardiology"
       },
       "branch": {
-        "value": "Northside Medical Group"
+        "value": "Riverside Campus"
       },
       "accepting": {
         "value": "yes",
-        "heard": "Yes, yes."
+        "heard": "Yes, she's taking."
       },
       "scheduling": {
         "value": "yes",
-        "heard": "Yeah, like anytime you can book it now through online.",
-        "detail": "Anytime; can book online."
+        "heard": "Yes,"
       },
       "referral": {
-        "value": "no",
-        "heard": "No, no, for now, no need of it. You can book it as usual."
+        "value": "depends",
+        "heard": "It does required and also it may be depend upon the insurance also.",
+        "depends_on": "insurance"
       }
-    }
+    },
+    "notes": {}
   },
   {
     "doctor_name": "Dr. C",

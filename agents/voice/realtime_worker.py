@@ -76,6 +76,11 @@ from agents.voice.latency import _stage_row as _stage_row, _fmt_stages as _fmt_s
 
 # Re-exported: the suite and the rest of this module address these as
 # rw.<name>. See agents/voice/audio.py for why they moved.
+from agents.voice.lifecycle import (
+    _ResponseDone as _ResponseDone,
+    _end_speaking_gate as _end_speaking_gate,
+    _handle_response_done as _handle_response_done,
+)
 from agents.voice.audio import (
     _TWILIO_SR,
     _OAI_SR,
@@ -108,6 +113,7 @@ from agents.voice.grounding import (
     _IDENTITY_ASK as _IDENTITY_ASK,
     _CLAIMS_SAVED as _CLAIMS_SAVED,
     _claims_saved as _claims_saved,
+    _spoken_farewell as _spoken_farewell,
     _HOLD_REQUEST as _HOLD_REQUEST,
     _CALLER_WILL_ACT as _CALLER_WILL_ACT,
     is_hold_request as is_hold_request,
@@ -159,6 +165,7 @@ from agents.voice.turns import (
     GIVE_UP_REASONS as GIVE_UP_REASONS,
     _field_vocabulary as _field_vocabulary,
     _field_already_answered as _field_already_answered,
+    _volunteered_fields as _volunteered_fields,
     give_up_directive as give_up_directive,
     _PATIENT_ASK as _PATIENT_ASK,
     _asks_about_patient as _asks_about_patient,
@@ -254,13 +261,6 @@ from agents.voice.evidence import (  # re-exported for callers
 
 log = logging.getLogger(__name__)
 
-
-
-
-
-
-
-
 REALTIME_URL = "wss://api.openai.com/v1/realtime?model={model}"
 # Per-attempt ceiling on the OpenAI handshake. Deliberately below the
 # websockets default of 10s: the callee is already on the line and every
@@ -269,64 +269,6 @@ REALTIME_URL = "wss://api.openai.com/v1/realtime?model={model}"
 _OAI_CONNECT_TIMEOUT_S = 6.0
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# _LOCATION_NOUN, _norm_quotes, _sentences and _clauses now live in
-# agents/voice/objectives.py and are imported at the top of this file under
-# these same private names. They moved because the ask-shape detection there
-# has to recognise a location noun and split a turn into clauses EXACTLY as the
-# detectors here do — the branch field's probe and `_is_location_ask` are two
-# readings of one pattern, and a second copy would drift the way tools.py's 41
-# hand-copied prompt phrases drifted before they were derived instead.
-#
-# Why _norm_quotes exists at all, kept here because it is the reason not to
-# "simplify" it away: the model writes TYPOGRAPHIC apostrophes — "wasn’t",
-# "it’s" — and every pattern in this file spells them ASCII ("n'?t"). On
-# call-20260818-1338 "I wasn’t able to get the specific branch today" was
-# counted as a location ask because _REPORTS_FAILURE could not see "wasn’t".
-
-
-
-
-
-
-
-
-
-
-
-
-
-# The invariant fragment of each directive — no counts, no wording that a
-# rewrite would move. It exists so the test suite can assert this directive is
-# ABSENT from a call that must not have given up, without holding a copy of the
-# sentence: an absence assertion against a hand-copied literal starts passing
-# for free the moment the real text changes, and that is the one failure this
-# check is for.
-#
 # NOT interpolated into the directive below — the source-directive scanner
 # (test_realtime_protocol.py's "every injected directive is found") locates
 # every open-quote-paren-system-colon literal by regex and requires real
@@ -338,16 +280,12 @@ _OAI_CONNECT_TIMEOUT_S = 6.0
 GIVE_UP_MARKERS = {
     "no_progress": "you have now asked for the location",
     "unanswered":  "they have not answered",
+    # The watchdog's own exit, added when it stopped falling silent after
+    # spending _MAX_SILENCE_PROMPTS. A trigger with no marker is a trigger no
+    # absence assertion can vouch for — that is what the paired length check
+    # in the suite is there to force.
+    "no_response": "the line has gone quiet",
 }
-
-
-
-
-
-
-
-
-
 
 # _sentences and _clauses moved to objectives.py (imported above). The reason
 # _clauses exists is worth keeping where the detectors that depend on it live:
@@ -369,38 +307,6 @@ GIVE_UP_MARKERS = {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ── The inverse guard: an answer the caller GAVE and the call threw away ─────
 #
 # Everything else here blocks false positives — saving a location the caller
@@ -418,25 +324,6 @@ GIVE_UP_MARKERS = {
 # call that should not have resolved shows up as a wrong row someone can find.
 # A real answer discarded shows up as nothing at all — indistinguishable from a
 # receptionist who genuinely would not say.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def _echo_gate_allows(raw: bytes) -> bool:
     """Should this caller frame reach OpenAI while the agent is speaking?
@@ -578,65 +465,6 @@ def build_audio_config(*, transcribe_model: str, transcribe_hint: str,
 
 # ── Grounding: a saved location must be one the caller actually said ─────────
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # The three closed-set fields, each bound to the ask that anchors it. Wrappers
 # rather than call-site keyword soup: the pairing of a field with its probe and
 # its vocabulary is a fact about the field, and stating it once here is what
@@ -648,23 +476,6 @@ def _ungrounded_status(args: dict, sess: "RealtimeSession") -> str:
     return _ungrounded_choice(args, sess, arg="status", probe=ACCEPTING_ASK,
                               classifier=classify_choice, states=CHOICE_STATES,
                               label="status")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def _ungrounded_identity(args: dict, sess: "RealtimeSession") -> str:
     """Grounding for whether we reached the right doctor. Its own vocabulary.
@@ -736,37 +547,6 @@ _CHOICE_SAVE_TOOLS.update({
         "their own words on referrals: always, depends on what, or 'unsure'",
         "referral_grounding"),
 })
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # ── Main handler ──────────────────────────────────────────────────────────────
 
@@ -1239,31 +1019,6 @@ async def _twilio_to_oai(
 
 
 
-async def _end_speaking_gate(sess: "RealtimeSession", delay: float) -> None:
-    """Clear agent_speaking once the audio we sent has finished playing out.
-
-    Was a closure redefined inside the event loop on every response, with its
-    arguments smuggled in as default values (`s=sess, delay=_echo_cooldown`).
-    Pyright could not resolve its type at all — "refers to itself" — which is
-    the last thing that stayed unanalysed after the loop was split. Rebuilding
-    a coroutine function per response was also pure waste.
-
-    Module level, arguments passed explicitly. Same behaviour, and now typed.
-    """
-    await asyncio.sleep(delay)
-    sess.agent_speaking = False
-    # Under REALTIME_ECHO_GATE=pass this window gates nothing — frames flow
-    # throughout — so announcing it as "now listening" was misleading output,
-    # implying the caller had been unheard for 6.91s when they had not.
-    if settings.realtime_echo_gate != "pass":
-        print(f"[Realtime] Echo cooldown done ({delay:.2f}s) — "
-              f"listening for caller", flush=True)
-
-
-
-
-
-
 async def _oai_to_twilio(
     oai_ws,
     twilio_ws: WebSocket,
@@ -1281,6 +1036,15 @@ async def _oai_to_twilio(
     _barge_in_pending     = False   # True when we cancelled a response — skip its transcript
     _closing_sent         = False   # True after we send closing response.create — wait for its response.done
     _closing_retries      = 0       # a goodbye the caller talked over is not a goodbye
+    # ONLY EVER ASSIGNED INSIDE response.done until that block was extracted on
+    # 2026-08-27, so it never needed an initial value: nothing read it before
+    # the first response finished. Building the handler's state tuple reads all
+    # twelve on every response.done, INCLUDING the first, and an unbound local
+    # there raised UnboundLocalError straight into the loop's crash handler —
+    # which caught it, printed "EVENT LOOP CRASHED", and ended the call. The
+    # whole suite went red in the same shape: everything after the first
+    # response.done simply never ran.
+    _echo_cooldown        = 0.3     # replaced by the real figure on every response
     _empty_responses      = 0       # responses that completed without saying anything
     # Tool results arrive on response.function_call_arguments.done, which fires
     # BEFORE response.done for the same response. Creating a response there
@@ -1620,402 +1384,39 @@ async def _oai_to_twilio(
 
             # ── Response done: extract token usage + check resolution ────
             elif event_type == "response.done":
-                sess._response_active = False
-                # t4 — the tool-carrying response closed, which is the event
-                # the deferred response.create waits for. Guarded on t3 so the
-                # SPOKEN response's own done (which arrives long after t5)
-                # cannot claim this mark.
-                if (sess._stage is not None and "t3" in sess._stage
-                        and "t4" not in sess._stage):
-                    sess._stage["t4"] = time.monotonic()
-                # `_response_spoke = _response_had_audio` stood here, assigned
-                # and never read. It came in with c443356 (the 8.2s dead-air
-                # fix) and was orphaned when that check moved to the model's
-                # own `_out_audio_tokens` from the usage block, which is the
-                # honest measure — our delta flag cannot see a response whose
-                # audio we gated. Removed 2026-08-18.
-                _response_had_audio = False   # reset for next response
-                sess._responses    += 1
-                # "completed" | "cancelled" | "incomplete" | "failed". This was
-                # never read, so a closing response the caller talked over was
-                # indistinguishable from one that actually played, and the call
-                # hung up on a goodbye nobody heard.
-                _resp_status = ((msg.get("response") or {}).get("status")
-                                or "completed")
-                # WHY it failed, which was being thrown away.
-                #
-                # call-20260819-2216 had SEVEN `[failed]` responses with
-                # in_text=0, and four stretches of 8-11 seconds where nobody on
-                # the call made a sound — the failures and the dead air line up
-                # one for one. Twilio's own recording showed every agent block
-                # reaching the line within 0.4s of generation, so the transport
-                # was never the problem, and two rounds of diagnosis went into
-                # guessing at a reason the event carried all along.
-                #
-                # `status_details` holds {type, reason} and, for failures, an
-                # {error: {type, code, message}}. Printed, not logged, so it
-                # lands in the call log next to the response it explains.
-                _sd = ((msg.get("response") or {}).get("status_details") or {})
-                if _resp_status in ("failed", "incomplete") and _sd:
-                    _sd_err = _sd.get("error") or {}
-                    _why_failed = (_sd_err.get("message")
-                                   or _sd_err.get("code")
-                                   or _sd.get("reason") or "no reason given")
-                    print(f"[Realtime] ⚠️  response {_resp_status}: "
-                          f"{_why_failed}", flush=True)
-                    sess.response_failures.append(
-                        {"status": _resp_status,
-                         "reason": str(_why_failed)[:200]})
-                # The model's own count of audio it produced. Zero on a
-                # completed response means it said nothing at all, which on a
-                # phone line is indistinguishable from the call having dropped.
-                # Read from usage rather than from our local audio-delta flag so
-                # that a response carrying a tool call, or one whose deltas we
-                # gated, is judged by what the model actually emitted.
-                _out_audio_tokens = (((msg.get("response") or {}).get("usage") or {})
-                                     .get("output_token_details", {})
-                                     .get("audio_tokens", 0))
-                # Input tokens this response consumed. A response that was
-                # REJECTED before it ran — conversation_already_has_active_response
-                # is the one that matters — comes back failed having read
-                # nothing, so both of these are zero. A response that genuinely
-                # ran and simply produced no audio has read the conversation and
-                # reports input tokens. That difference is the only way to tell
-                # "say something, the line is dead" apart from "you already have
-                # a response in flight", and re-requesting on the latter is what
-                # produced the 25s of dead air on call-20260811-1640.
-                _resp_in = (((msg.get("response") or {}).get("usage") or {})
-                            .get("input_token_details", {}))
-                _in_tokens = ((_resp_in.get("text_tokens")  or 0)
-                              + (_resp_in.get("audio_tokens") or 0))
-                # A response can be cancelled by US (the barge-in handler above,
-                # which sets _barge_in_pending) or by OPENAI, whose server VAD
-                # interrupts on caller speech on its own. Until now the second
-                # kind was completely silent: status came back "cancelled",
-                # nothing had logged a barge-in, and no `clear` was ever sent to
-                # Twilio, so any audio already buffered there kept playing after
-                # generation had stopped.
-                #
-                # Closing the response.created race above should make this rare
-                # — our handler now fires first in the common case. It is kept
-                # because "rare" is not "never": the server can still win the
-                # race on a slow link, and an interruption path that only works
-                # when we win a race is the thing that has been invisible for
-                # eight sessions. Logged distinctly so the two are told apart in
-                # the transcript rather than inferred.
-                # A response that completed and made a sound means the agent has
-                # since been heard, so any earlier truncation is no longer the
-                # thing to read the next caller turn against. _REPAIR_WINDOW_S
-                # bounds this by time; this bounds it by events, which is the
-                # tighter of the two and the one that is actually the reason.
-                if _resp_status == "completed" and _out_audio_tokens > 0:
-                    sess._truncated_at = None
-                if _resp_status == "cancelled" and not _barge_in_pending:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] "
-                          f"✋ BARGE-IN  : cancelled by OpenAI's VAD "
-                          f"(audio_out={_out_audio_tokens} tok)", flush=True)
-                    if sess.stream_sid:
-                        try:
-                            await twilio_ws.send_text(json.dumps({
-                                "event": "clear", "streamSid": sess.stream_sid,
-                            }))
-                        except Exception:
-                            pass
-                    sess.agent_speaking = False
-                    _drop_held_items(sess, "OpenAI's VAD cancelled the response")
-                # A cancelled response may never emit transcript.done. Clearing
-                # the flag only there meant it leaked into the NEXT response and
-                # silently swallowed a real transcript line.
-                #
-                # THE HELD AUDIO IS THE SAME HAZARD, and the same sentence is
-                # the reason: an item that never gets a transcript.done is
-                # never judged, so without this sweep its PCM would sit in the
-                # buffer and be played by whatever released an item NEXT
-                # response — audio from a turn that was cancelled, arriving
-                # inside a later one. Everything legitimate has already been
-                # flushed or popped by now: transcript.done precedes this.
-                _barge_in_pending   = False
-                _drop_held_items(sess, "the response ended without judging it")
-                # Flush buffered agent audio as one contiguous block.
-                # Placing it all at _current_response_start means the PCM runs at the correct
-                # sample rate (24 kHz) from that point — no overlap, no gaps.
-                if _current_response_pcm and _current_response_start is not None:
-                    sess._agent_pcm.append((_current_response_start, b"".join(_current_response_pcm)))
-                    print(f"[Realtime] Flushed agent response: {len(_current_response_pcm)} chunks, "
-                          f"start={_current_response_start:.2f}s, "
-                          f"dur={_samples_this_response/_agent_wire_sample_rate():.2f}s", flush=True)
-                _current_response_pcm.clear()
-                _current_response_start = None
-                # Dynamic echo cooldown: wait until audio finishes playing on the phone +
-                # echo travel time.  response.done fires when the SERVER finishes generating
-                # (fast), but the audio is still playing on the handset.  Using a fixed 0.5s
-                # caused the agent to hear its own echo and generate a duplicate response.
-                # Formula: playback_duration + 0.65s echo margin (min 0.5s for very short clips).
-                # Wait until the audio has finished PLAYING on the handset,
-                # then a small margin — and no longer, because caller audio is
-                # dropped for this whole window.
-                #
-                # The old formula measured the wait from response.done, which
-                # fires when the SERVER finishes generating. Generation runs
-                # faster than realtime, so response.done lands well before
-                # playback ends, and adding the full clip duration on top of it
-                # over-waited by roughly the generation time — about 2s of
-                # deafness added to every single turn, directly inflating the
-                # measured 2.5-4s response latency.
-                #
-                # Playback ends at (first chunk sent) + (audio duration), since
-                # Twilio plays what we send at realtime speed.
-                _audio_seconds = _samples_this_response / _agent_wire_sample_rate()
-                if _first_delta_sent_at is not None:
-                    _playback_ends_at = _first_delta_sent_at + _audio_seconds
-                    # Kept on the session so _create_response can see it. We
-                    # hand Twilio audio as fast as OpenAI produces it, and
-                    # OpenAI produces far faster than realtime — a 6.25s reply
-                    # arrives in about a second. Everything after that sits in
-                    # Twilio's queue. Creating another response before the
-                    # queue drains does not talk OVER the caller; it appends,
-                    # so they hear one unbroken monologue with no gap to speak
-                    # into. On call-20260819-2006 that came out as three
-                    # identical questions in a single 50-word turn, and she
-                    # hung up.
-                    sess._playback_ends_at = _playback_ends_at
-                    _echo_cooldown = max(0.3, _playback_ends_at + 0.25 - time.monotonic())
-                    # How much of this clip the callee has STILL not heard. The
-                    # echo gate already reasons in these terms; the silence
-                    # watchdog did not, and that was the bug — see the comment
-                    # where _agent_quiet_since is set below.
-                    _playback_remaining = max(0.0, _playback_ends_at - time.monotonic())
-                else:
-                    _echo_cooldown = max(0.3, _audio_seconds + 0.25)
-                    # No delta was ever sent, so nothing is playing out.
-                    _playback_remaining = 0.0
-                _first_delta_sent_at = None
-                _current_item_id = None
-                _spoken_item_id = None
-                _samples_this_response = 0
-                asyncio.create_task(_end_speaking_gate(sess, _echo_cooldown))
-                # Account each response's tokens ONCE. A live call logged the
-                # same usage line twice, identical to the token
-                # (in_text=4572 cached=4416 in_audio=372 out_audio=108), and
-                # counted 6 responses against 4 audio blocks. Every duplicate
-                # inflates the cost figure — the one number this project has
-                # been trying to get honest.
-                _resp_id = msg.get("response", {}).get("id")
-                if _resp_id and _resp_id in _counted_responses:
-                    log.debug("[Realtime] duplicate response.done for %s — "
-                              "usage already counted", _resp_id)
-                    usage = {}
-                else:
-                    if _resp_id:
-                        _counted_responses.add(_resp_id)
-                    usage = msg.get("response", {}).get("usage", {})
-                if usage:
-                    details_in  = usage.get("input_token_details",  {})
-                    details_out = usage.get("output_token_details", {})
-                    sess._input_audio_tokens  += details_in.get("audio_tokens",  0)
-                    sess._input_text_tokens   += details_in.get("text_tokens",   0)
-                    sess._output_audio_tokens += details_out.get("audio_tokens", 0)
-                    sess._output_text_tokens  += details_out.get("text_tokens",  0)
-                    # Cached tokens — the only direct evidence that the prompt
-                    # cache is engaging. Shape varies by API version: a flat
-                    # `cached_tokens` plus an optional per-modality breakdown.
-                    cached = details_in.get("cached_tokens_details") or {}
-                    c_audio = cached.get("audio_tokens", 0)
-                    c_text  = cached.get("text_tokens",  0)
-                    if not (c_audio or c_text):
-                        # No breakdown available — attribute the flat total to
-                        # text, which is where the static prompt prefix lives.
-                        c_text = details_in.get("cached_tokens", 0)
-                    sess._input_audio_cached_tokens += c_audio
-                    sess._input_text_cached_tokens  += c_text
-                    # out_text is printed alongside out_audio because the token
-                    # CAP counts both, and only out_audio was ever shown. When
-                    # call-20260820-1230 came back "incomplete:
-                    # max_output_tokens" the line read out_audio=151 against a
-                    # cap of 400, which looks like it had plenty of room and
-                    # made the truncation unexplainable from the log alone.
-                    # The missing half was the text.
-                    _ot_audio = details_out.get("audio_tokens", 0)
-                    _ot_text  = details_out.get("text_tokens", 0)
-                    print(f"[Realtime] usage: in_text={details_in.get('text_tokens', 0)} "
-                          f"(cached {c_text})  in_audio={details_in.get('audio_tokens', 0)} "
-                          f"(cached {c_audio})  out_audio={_ot_audio}  out_text={_ot_text}"
-                          f"  (cap {settings.realtime_max_response_tokens})"
-                          f"  [{_resp_status}]",
-                          flush=True)
-                # The agent has stopped talking; the ball is with the callee. If
-                # they never speak, no VAD event fires and nothing else in this
-                # loop will ever run again.
-                #
-                # The clock starts when the callee STOPS HEARING us, not when
-                # response.done arrives. response.done fires when the server
-                # finishes generating, and generation runs faster than realtime,
-                # so this used to start counting while the agent was still
-                # talking — the agent's own voice was counted as the callee's
-                # silence. Measured on call-20260811-1649: the watchdog reported
-                # 3.5s before "Are you still with me?" when the real gap was
-                # 1.41s, and 7.0s before the goodbye when the real gap was 2.45s.
-                # The error scales with clip length, so the longest turns were
-                # cut off hardest — the call was hung up 2.45s after a handover
-                # line, while the callee was still drawing breath.
-                #
-                # Pointing this at a moment in the FUTURE is intentional: the
-                # watchdog compares time.time() - quiet_since, which simply goes
-                # negative until playback ends.
-                sess._agent_quiet_since = time.time() + _playback_remaining
-                # Enable caller audio forwarding after first response (greeting) finishes
-                if not sess.listen_enabled.is_set():
-                    # Everything buffered up to here was never sent to OpenAI,
-                    # so its ms timestamps count from THIS point, not from
-                    # stream start. Record where that is before any caller turn
-                    # can exist — every utterance slice is measured from it.
-                    sess._listen_start_bytes = sum(len(c) for c in sess._caller_oai_pcm)
-                    _lead_s = sess._listen_start_bytes / max(_wire_bytes_per_ms(), 1e-9) / 1000
-                    print(f"[Realtime] Greeting done — now listening to caller "
-                          f"(OpenAI's audio clock starts {_lead_s:.2f}s into ours)",
-                          flush=True)
-                    sess.listen_enabled.set()
-                # Deferred response.create from a tool result — safe now that the
-                # previous response has completed.
-                if _pending_response_create and not sess.done:
-                    _pending_response_create = False
-                    await _create_response(oai_ws, sess, why="deferred tool result")
-                elif (not sess.done and _resp_status != "cancelled"
-                      and _out_audio_tokens == 0 and _empty_responses < 2
-                      and not (_resp_status == "failed" and _in_tokens == 0)
-                      and not sess._response_active):
-                    # A response that COMPLETED without producing any audio is
-                    # dead air: nothing is queued behind it, so the line stays
-                    # silent until the caller gives up and speaks. On a live
-                    # call this ran 8.2 seconds and the caller asked "are you
-                    # there?" — exactly what a person says to a dropped line.
-                    # Only 'cancelled' is excluded — those are barge-ins, where
-                    # silence is correct because the caller is talking. This
-                    # used to require status == 'completed', so an 'incomplete'
-                    # or 'failed' response producing no audio slipped through
-                    # and became 10s of dead air on a live call. The status was
-                    # not logged either, so there was no way to tell which.
-                    #
-                    # Widening it to 'failed' then caused the opposite failure.
-                    # This is the sixth response.create call site and the second
-                    # to be written without checking _response_active — the same
-                    # bug 97ff46d fixed in the watchdog. A rejected response
-                    # comes back failed, this handler read that as dead air and
-                    # created another, which collided and failed in turn. Two
-                    # guards, because the two causes are different: skip when a
-                    # response is already in flight, and skip a failure that
-                    # never consumed input, which is what a rejection looks like.
-                    _empty_responses += 1
-                    print(f"[Realtime] Response produced no audio — "
-                          f"re-requesting to avoid dead air "
-                          f"({_empty_responses}/2)", flush=True)
-                    await _create_response(oai_ws, sess, why="empty response",
-                                          allow_when_vad_pending=True)
-                # ── THE OBJECTIVE FINISHED ON A DEFERRED SAVE ───────────
-                # _resolve_deferred_save set the flag and deliberately did not
-                # act on it: it runs inside the caller-transcript handler,
-                # where `_closing_sent` does not exist and the in-flight
-                # response has not spoken yet. Here both are available, so this
-                # is where the same two decisions the tool handler makes get
-                # made — is this already a goodbye, and does the loop owe
-                # itself one more response.done before hanging up.
-                #
-                # DEFERRED AGAIN WHILE A RESPONSE IS ACTIVE. _pending_response_
-                # create may have just started one a few lines above; asking
-                # for the goodbye into that is the collision this module has
-                # been bitten by twice. The flag survives to the next
-                # response.done, which is the correct place to try again.
-                if sess._close_after_response and not sess.done:
-                    if sess._response_active:
-                        print("[Realtime] 🏁 close deferred — a response is "
-                              "already in flight", flush=True)
-                    else:
-                        sess._close_after_response = False
-                        sess.done = True
-                        _last_agent = next((t.text for t in reversed(sess.turns)
-                                            if t.role == "agent"), "")
-                        _sounded_like_a_goodbye = (
-                            bool(_last_agent)
-                            and not _last_agent.rstrip().endswith("?"))
-                        if _out_audio_tokens > 0 and _sounded_like_a_goodbye:
-                            # It already said something that can stand as a
-                            # farewell. Fall through: this response.done is the
-                            # closing one and the branch below drains the audio.
-                            print("[Realtime] 🏁 objective complete — the turn "
-                                  "just spoken stands as the goodbye",
-                                  flush=True)
-                        else:
-                            print(f"[Realtime] 🏁 objective complete — asking "
-                                  f"for a goodbye (last turn "
-                                  f"{_last_agent[:40]!r})", flush=True)
-                            await oai_ws.send(json.dumps({
-                                "type": "conversation.item.create",
-                                "item": {
-                                    "type": "message",
-                                    "role": "user",
-                                    "content": [{
-                                        "type": "input_text",
-                                        "text": ("(say a brief warm goodbye "
-                                                 "now, then stop)"),
-                                    }],
-                                },
-                            }))
-                            await _create_response(oai_ws, sess,
-                                                   why="closing goodbye",
-                                                   allow_when_done=True)
-                            # Consumed by THIS response.done immediately below,
-                            # so the goodbye's own response.done is the one that
-                            # reaches the hang-up branch.
-                            _closing_sent = True
-
-                if sess.done:
-                    if _closing_sent:
-                        # This is the tool-call response.done — closing response is being generated, wait for it
-                        _closing_sent = False
-                    elif _resp_status != "completed" and _closing_retries < 1:
-                        # The goodbye was cancelled — the caller was still
-                        # talking, so barge-in killed it. Hanging up here is
-                        # what drops the line in silence. The goodbye item is
-                        # still in the conversation; ask for it once more, after
-                        # a beat so we are not talking over them again.
-                        _closing_retries += 1
-                        print(f"[Realtime] Closing response was {_resp_status} — "
-                              f"caller talked over it. Retrying the goodbye once.",
-                              flush=True)
-                        # Hand the retry to the watchdog instead of sleeping
-                        # here. This block runs INSIDE the event loop, so an
-                        # `await asyncio.sleep(0.8)` stops us reading the
-                        # socket for 0.8s — and OpenAI's server VAD creates its
-                        # own response the moment the caller speaks. On
-                        # call-20260818-1338 the caller said "Mercy Medical
-                        # Center" during that sleep, `response.created` sat
-                        # unread so `_response_active` was still False, and the
-                        # retry went out against stale state:
-                        #     conversation_already_has_active_response
-                        # Sleeping inside an event handler means acting on a
-                        # snapshot of the world taken before the nap.
-                        #
-                        # The watchdog is a separate task, so events keep being
-                        # processed while it waits and `_response_active` is
-                        # true by the time it fires.
-                        sess._goodbye_retry_at = time.time() + 0.8
-                        continue
-                    else:
-                        # This is the closing response.done.
-                        # Wait for the FULL audio to finish playing on the caller's phone before hanging up.
-                        # _echo_cooldown = audio_duration + 0.65s, computed just above from _samples_this_response.
-                        # Sleeping only 1s was cutting off the goodbye mid-sentence.
-                        hangup_wait = max(_echo_cooldown, 1.5)
-                        print(f"[Realtime] Closing done — waiting {hangup_wait:.1f}s for audio to finish playing", flush=True)
-                        await asyncio.sleep(hangup_wait)
-                        print("[Realtime] Hanging up now", flush=True)
-                        done_event.set()
-                        try:
-                            await twilio_ws.close()
-                        except Exception:
-                            pass
-                        break
-
+                # 397 lines lived here until 2026-08-27. See lifecycle.py, and
+                # pyrightconfig.json for why the remedy is a split and not a
+                # complexity ceiling.
+                _rd = await _handle_response_done(
+                    msg, sess, oai_ws, twilio_ws, done_event,
+                    _current_response_pcm, _counted_responses,
+                    _ResponseDone(
+                        _samples_this_response, _first_delta_sent_at,
+                        _current_response_start, _spoken_item_id,
+                        _response_had_audio, _current_item_id, _closing_sent,
+                        _closing_retries, _empty_responses,
+                        _pending_response_create, _barge_in_pending,
+                        _echo_cooldown))
+                _samples_this_response = _rd.samples_this_response
+                _first_delta_sent_at = _rd.first_delta_sent_at
+                _current_response_start = _rd.current_response_start
+                _spoken_item_id = _rd.spoken_item_id
+                _response_had_audio = _rd.response_had_audio
+                _current_item_id = _rd.current_item_id
+                _closing_sent = _rd.closing_sent
+                _closing_retries = _rd.closing_retries
+                _empty_responses = _rd.empty_responses
+                _pending_response_create = _rd.pending_response_create
+                _barge_in_pending = _rd.barge_in_pending
+                _echo_cooldown = _rd.echo_cooldown
+                # THE TWO EXITS. `continue` and `break` cannot cross a function
+                # boundary, so the handler names the loop's next move and this
+                # is the only place that acts on it. Dropping either one leaves
+                # the goodbye unretried, or the line open after the hang-up.
+                if _rd.flow == "continue":
+                    continue
+                if _rd.flow == "break":
+                    break
             elif event_type == "error":
                 err  = msg.get("error", {})
                 code = err.get("code", "")
@@ -2194,6 +1595,7 @@ __all__ = [    "ACCEPTING_ASK",
     "_candidate_location",
     "_claims_employment",
     "_claims_saved",
+    "_spoken_farewell",
     "_class_present",
     "_close_quietly",
     "_collapse",
@@ -2206,8 +1608,11 @@ __all__ = [    "ACCEPTING_ASK",
     "_echo_gate_allows",
     "_effective_output_format",
     "_end_speaking_gate",
+    "_ResponseDone",
+    "_handle_response_done",
     "_ever_transcribed",
     "_field_already_answered",
+    "_volunteered_fields",
     "_field_vocabulary",
     "_fmt_stages",
     "_grounded_in",

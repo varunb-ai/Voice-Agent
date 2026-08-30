@@ -1,0 +1,249 @@
+{
+  "call_id": "call-20260827-1516-a437",
+  "doctor_name": "Dr. Alan Reyes",
+  "hospital_name": "Lakeview Medical",
+  "branch": null,
+  "resolved": false,
+  "outcome": "none",
+  "collected": [],
+  "missing": [
+    "identity"
+  ],
+  "fields": {},
+  "success_at": "complete",
+  "doctor_record": {
+    "doctor_name": "Dr. Alan Reyes",
+    "hospital_name": "Lakeview Medical",
+    "specialization": "Oncology",
+    "branch": null,
+    "city": null,
+    "source": "website",
+    "status": "missing_branch",
+    "status_before": "discovered",
+    "confidence": 0,
+    "missing_for_complete": [
+      "branch"
+    ],
+    "enriched_at": null,
+    "enriched_by": "call-20260827-1516-a437",
+    "collected_fields": {}
+  },
+  "duration_seconds": 63,
+  "cost_usd": 0.126812,
+  "template": "provider_verification",
+  "grounding": null,
+  "branch_rejections": null,
+  "grounding_at_save": null,
+  "suppressed_echoes": null,
+  "fabricated_turns": null,
+  "rejection_cancels": null,
+  "dropped_second_items": null,
+  "released_second_items": [
+    {
+      "text": "No problem \u2014 take care."
+    }
+  ],
+  "volunteered_answers": null,
+  "owed_abandoned": null,
+  "held_saves": null,
+  "held_applied": null,
+  "held_dropped": null,
+  "unverified_quotes": null,
+  "deferred_saves": null,
+  "ended_by_caller": "Goodbye.",
+  "name_mismatches": null,
+  "backchannels_sent": null,
+  "backchannel_echo_frames": null,
+  "owed_substance_recovered": null,
+  "stacked_replies": null,
+  "false_save_claims": null,
+  "response_failures": null,
+  "pickup_to_greeting_s": 2.38,
+  "reply_latency": {
+    "turns": 5,
+    "median": 1.33,
+    "worst": 1.89,
+    "detector_lag_s": 0.37,
+    "stages": [
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.36,
+        "felt_s": 1.328,
+        "vad_to_resp": 0.375,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.953
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.436,
+        "felt_s": 1.108,
+        "vad_to_resp": 0.436,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.672
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.364,
+        "felt_s": 0.973,
+        "vad_to_resp": 0.364,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 0.625
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.368,
+        "felt_s": 1.79,
+        "vad_to_resp": 0.384,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 1.406
+      },
+      {
+        "tool": null,
+        "tools": null,
+        "detector_s": 0.448,
+        "felt_s": 1.886,
+        "vad_to_resp": 0.464,
+        "inference_1": null,
+        "our_work": null,
+        "deferral": null,
+        "inference_2": null,
+        "no_tool_s": 1.422
+      }
+    ]
+  },
+  "conversation": {
+    "location_asks": 0,
+    "double_asks": 0,
+    "piled_turns": 0,
+    "longest_turn_sentences": 2,
+    "longest_turn_words": 21,
+    "agent_turns": 6,
+    "caller_turns": 5,
+    "caller_questions": 1,
+    "question_turns": 2,
+    "stapled_questions": 1,
+    "staple_rate": 1.0,
+    "back_to_back_asks": 0,
+    "repeated_sentences": 0,
+    "back_to_back_repeats": 0
+  },
+  "ask_budget": {
+    "unanswered_limit": 4,
+    "no_progress_limit": 8,
+    "directive_sent": false,
+    "verdict": "not needed"
+  },
+  "hospital_mismatch": null,
+  "branch_needed_clarification": false,
+  "false_employment_claim": false,
+  "caller_turns_unmeasured": 0,
+  "caller_turns_measured": 6,
+  "model": "gpt-realtime-2",
+  "audio_settings": {
+    "turn_detection": "server_vad",
+    "silence_ms": 400,
+    "eagerness": "medium",
+    "voice": "cedar",
+    "noise_reduction": "near_field",
+    "input_format": "pcmu",
+    "output_format": "pcm",
+    "output_conditioned": true
+  },
+  "usage": {
+    "responses": 7,
+    "input_audio": 2089,
+    "input_audio_cached": 1792,
+    "output_audio": 575,
+    "input_text": 48439,
+    "input_text_cached": 40256,
+    "output_text": 568,
+    "cache_hit_rate": 0.8322
+  },
+  "transcript": [
+    {
+      "role": "agent",
+      "text": "Hi, this is David, calling on behalf of Forage AI to verify some information that was missed on our website \u2014 I'm not calling to book anything. Is now a good time?",
+      "timestamp": "15:16:28",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "No, no, it's not a good time. Can you call me back later?",
+      "timestamp": "15:16:40",
+      "audio_rms": 0.2080322951078415
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 what time later today works?",
+      "timestamp": "15:16:42",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "afternoon.",
+      "timestamp": "15:16:47",
+      "audio_rms": 0.11913985759019852
+    },
+    {
+      "role": "agent",
+      "text": "Thanks for that \u2014 I don\u2019t have a direct phone line, so please email directory@forageai.com and they\u2019ll follow up this afternoon.",
+      "timestamp": "15:16:50",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Ok, thank you.",
+      "timestamp": "15:16:58",
+      "audio_rms": 0.09325265884399414
+    },
+    {
+      "role": "agent",
+      "text": "Sure \u2014 thanks for letting me know the time that works. No problem \u2014 take care.",
+      "timestamp": "15:17:00",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay.",
+      "timestamp": "15:17:10",
+      "audio_rms": 0.13414610922336578
+    },
+    {
+      "role": "agent",
+      "text": "Got it \u2014 we\u2019ll follow up this afternoon.",
+      "timestamp": "15:17:12",
+      "audio_rms": null
+    },
+    {
+      "role": "caller",
+      "text": "Okay. Goodbye.",
+      "timestamp": "15:17:18",
+      "audio_rms": 0.1526349037885666
+    },
+    {
+      "role": "agent",
+      "text": "Alright, thanks for your time earlier \u2014 goodbye.",
+      "timestamp": "15:17:22",
+      "audio_rms": null
+    }
+  ],
+  "summary": "Called Lakeview Medical to verify Dr. Alan Reyes's branch. Branch could not be confirmed. Not collected: identity.",
+  "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1516-a437.wav",
+  "recorded_at": "2026-08-27T15:16:23.753470"
+}

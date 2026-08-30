@@ -2942,5 +2942,73 @@
     "summary": "Called New York Baptist Hospital to verify Dr. Jennifer's branch. Branch confirmed: Northside Medical Group.",
     "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1214-3d1c.wav",
     "json_path": "data/3 cases jsons/call-20260827-1214-3d1c.json"
+  },
+  {
+    "call_id": "call-20260827-1428-9f82",
+    "time": "2026-08-27T14:28:59.072473",
+    "doctor": "Dr. Jennifer",
+    "hospital": "New York Baptist Hospital",
+    "branch": "Riverside campus",
+    "resolved": true,
+    "outcome": "complete",
+    "missing": [],
+    "grounding": "verified against caller transcript",
+    "duration_seconds": 92,
+    "cost_usd": 0.213911,
+    "summary": "Called New York Baptist Hospital to verify Dr. Jennifer's branch. Branch confirmed: Riverside campus.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1428-9f82.wav",
+    "json_path": "data/3 cases jsons/call-20260827-1428-9f82.json"
+  },
+  {
+    "call_id": "call-20260827-1516-a437",
+    "time": "2026-08-27T15:16:23.753470",
+    "doctor": "Dr. Alan Reyes",
+    "hospital": "Lakeview Medical",
+    "branch": null,
+    "resolved": false,
+    "outcome": "none",
+    "missing": [
+      "identity"
+    ],
+    "grounding": null,
+    "duration_seconds": 63,
+    "cost_usd": 0.126812,
+    "summary": "Called Lakeview Medical to verify Dr. Alan Reyes's branch. Branch could not be confirmed. Not collected: identity.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1516-a437.wav",
+    "json_path": "data/3 cases jsons/call-20260827-1516-a437.json"
+  },
+  {
+    "call_id": "call-20260827-1534-demo",
+    "time": "2026-08-27T15:34:39.246974",
+    "doctor": "ZZ Test Doctor",
+    "hospital": "ZZ Test Hospital",
+    "branch": null,
+    "resolved": false,
+    "outcome": "none",
+    "missing": [
+      "identity"
+    ],
+    "grounding": null,
+    "duration_seconds": 0,
+    "cost_usd": 0.0,
+    "summary": "Called ZZ Test Hospital to verify Dr. ZZ Test Doctor's branch. Branch could not be confirmed. Not collected: identity.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1534-demo.wav",
+    "json_path": "data/3 cases jsons/call-20260827-1534-demo.json"
+  },
+  {
+    "call_id": "call-20260827-1638-8684",
+    "time": "2026-08-27T16:38:27.093699",
+    "doctor": "Dr. Jennifer",
+    "hospital": "New York Baptist Hospital",
+    "branch": "Riverside Campus",
+    "resolved": true,
+    "outcome": "complete",
+    "missing": [],
+    "grounding": "verified against caller transcript",
+    "duration_seconds": 116,
+    "cost_usd": 0.225958,
+    "summary": "Called New York Baptist Hospital to verify Dr. Jennifer's branch. Branch confirmed: Riverside Campus.",
+    "audio_path": "C:\\Users\\varun\\Desktop\\conversational_ai\\data\\3 cases voice\\call-20260827-1638-8684.wav",
+    "json_path": "data/3 cases jsons/call-20260827-1638-8684.json"
   }
 ]

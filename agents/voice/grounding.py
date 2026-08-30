@@ -122,6 +122,39 @@ def _claims_saved(text: str) -> bool:
     """Did this agent turn tell the caller the location is recorded, or done?"""
     return bool(_CLAIMS_SAVED.search(_norm_quotes(text or "")))
 
+
+# A SIGN-OFF. Deliberately kept apart from _CLAIMS_SAVED, which is about a
+# false claim of RECORDING; this is about ending the conversation.
+#
+# NOTHING IN THIS CODEBASE WATCHED FOR ONE. `sess.done` moves on exactly four
+# events — escalate succeeding, a save completing the objective, the deferred
+# close, and the caller ending the call — and every one of them is a TOOL or
+# the caller. The agent saying goodbye was invisible.
+#
+# call-20260827-1516: the caller said it was a bad time and asked to be rung
+# back. At 15:17:00 the agent said "No problem — take care." and called no
+# tool, so nothing had ended anything: OpenAI's VAD opened a response on the
+# caller's "Okay.", the model filled it, and the call ran another twenty
+# seconds of politeness before the CALLER had to end it. escalate arrived two
+# seconds after that, on the reply already in flight.
+_SPOKEN_FAREWELL = re.compile(
+    # `take care OF` is not a sign-off — "I'll take care of that" is a promise
+    # to act, and reading it as goodbye would inject the escalate directive in
+    # the middle of a call that is going fine.
+    r"\b(take care(?!\s+of\b)|good ?bye|bye now|"
+    r"have a (good|great|nice) (day|one|afternoon|evening|weekend)|"
+    r"thanks? (you )?for your time)\b", re.I)
+
+
+def _spoken_farewell(text: str) -> bool:
+    """Did this agent turn sign off?
+
+    Used ONLY together with `not sess.done` — a farewell is correct once
+    something has ended the call, and the whole point of the guard is the case
+    where nothing has.
+    """
+    return bool(_SPOKEN_FAREWELL.search(_norm_quotes(text or "")))
+
 # Asking for time to go and look something up. Matched by shape — a first-person
 # or please-wait construction plus a checking/waiting word — rather than a list
 # of phrasings, because "ways to ask for a minute" is an open set.
@@ -1070,8 +1103,22 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
             # paraphrase into a grammatical sentence is a rejection it will read
             # out loud — see _reject's docstring in tools.py, which exists
             # because a live call relayed one to a receptionist verbatim.
+            # RE-READ REACHES ALL FIVE FIELDS NOW, not just the branch.
+            # save_branch has carried this fragment since call-20260820-1321,
+            # where two bare rejections left the model unable to tell WHAT was
+            # wrong and it rephrased into a worse answer. The four choice
+            # fields never had it — they got the reason and nothing about where
+            # to look — and the prompt was carrying the difference in prose
+            # ("RE-READ WHAT THEY ACTUALLY SAID BEFORE YOU ASK AGAIN") for all
+            # five. This is a tool result, not the cached prefix, so unifying
+            # it costs nothing against the prompt ceiling and lets that prose
+            # go: the instruction now arrives at the moment it applies, on the
+            # field it applies to.
             result = {"ok": False, "error": (
-                f"NOT SAVED — {ungrounded_choice} | NEED: {_need}")}
+                f"NOT SAVED — {ungrounded_choice} "
+                f"| RE-READ: their turns, verbatim; the answer is often "
+                f"already among them "
+                f"| NEED: {_need}")}
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
                   f"🚫 UNGROUNDED ANSWER BLOCKED: {name}({args})", flush=True)
         else:
@@ -1251,6 +1298,29 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     # hunting a bug that isn't there and hides the one that is.
     ts = datetime.now().strftime("%H:%M:%S")
     ok = bool(result.get("ok"))
+    # ── EVERY REFUSAL, ONE RECORD, WITH THE WORDS THAT CAUSED IT ───────────
+    # The counter below this only ever covered save_branch, and a choice-field
+    # refusal reached the artifact through nothing at all: on
+    # call-20260827-1428 the identity save was refused at 14:29:35 and the
+    # finished JSON contains no "BLOCKED", no "REJECTED", no "NOT SAVED".
+    # Seven probe gaps have been found on this project by a person reading a
+    # console log, and this is why — the evidence was never written down.
+    #
+    # `heard` IS THE POINT. A refusal without the caller turn that caused it
+    # says a guard fired; with it, it says which phrasing the probe could not
+    # read, which is the one thing that turns an audit into a fix. The deferred
+    # path is not double-counted: a hold returns ok=True and records itself in
+    # deferred_saves, and its own refusal lands there as "contradicted".
+    if not ok and name.startswith("save_"):
+        sess.save_refusals.append({
+            "tool": name,
+            "args": args,
+            "why": str(result.get("error", ""))[:200],
+            "heard": next((t.text for t in reversed(sess.turns)
+                           if t.role == "caller" and t.text
+                           and t.text.strip() != "[...]"), ""),
+            "at": ts,
+        })
     if name == "save_branch":
         if ok:
             print(f"\n[{ts}] ✅ BRANCH SAVED   : {args}", flush=True)
@@ -1341,6 +1411,33 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
             # caller was left believing a branch had been recorded that
             # had not. Leaving a false statement standing to avoid
             # repeating yourself is the wrong trade.
+            # SIGNED OFF WITHOUT ENDING ANYTHING. The correction is to make
+            # the TOOL fire, never to hang up here: escalate is what writes the
+            # reason, and on 1516 it was the only record of why the call
+            # produced nothing. Cutting the line at the farewell would have
+            # traded twenty seconds of politeness for a call with no outcome —
+            # the trace-less failure this file exists to stop.
+            #
+            # One-shot, unlike the false-save claim beside it. That one answers
+            # a separate false statement each time; this one asks for a single
+            # tool call, and a second copy of a directive the model ignored is
+            # context spent for nothing.
+            if (_spoken_farewell(_said) and not sess.done
+                    and not sess._farewell_nudged):
+                sess._farewell_nudged = True
+                sess.farewell_without_close.append(_said[:160])
+                print(f"[{ts}] 👋 SIGNED OFF WITH NOTHING RECORDED — no tool "
+                      f"has ended this call; asking for escalate", flush=True)
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": (
+                                 "(system: you just signed off, but nothing "
+                                 "has ended this call — you have not called a "
+                                 "tool. Call escalate now with the true reason "
+                                 "this call is ending. Do not say goodbye "
+                                 "again and do not start a new topic.)")}]},
+                }))
             if _claims_saved(_said) and not sess.done:
                 sess._false_save_claims += 1
                 print(f"[{ts}] ⚠️  FALSE SAVE CLAIM — they were told "
@@ -1632,6 +1729,7 @@ __all__ = [
     "_address_offered",
     "_candidate_location",
     "_claims_saved",
+    "_spoken_farewell",
     "_create_response",
     "_discarded_location",
     "_handle_tool_call",

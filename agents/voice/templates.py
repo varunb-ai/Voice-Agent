@@ -112,7 +112,16 @@ def time_of_day() -> str:
 # than the population:
 #     "Is this an EMERGENCY?"      — a US front desk does not ask the caller this
 #     the "it's just me" ban        — one observed utterance
-#     "They OFFER to help"          — "need anything?" is not front-desk register
+#     "They OFFER to help"          — MOVED 2026-08-27 out of the prompt and
+#                                     into _invites_continuation, which now
+#                                     injects at the moment of the offer
+#                                     instead of asking the model to recall a
+#                                     rule 4,000 tokens back. The sample-of-one
+#                                     deferral below now attaches to the GUARD,
+#                                     and the guard is the better home for it:
+#                                     `_offer_nudged` leaves a trace, so contact
+#                                     with the population can finally measure
+#                                     whether the rule was ever right.
 #     "They ask YOU for information" — asked by a colleague, not a receptionist
 # STILL HERE ON PURPOSE after the 2026-08-20 deletion pass. The condition for
 # deleting them is CONTACT WITH THE POPULATION, and there has not been any:
@@ -284,10 +293,6 @@ NEVER TELL THE CALLER WHAT YOU CAN OR CANNOT ACCEPT, and never tell them they
 did not say something. They know what they said; being contradicted about it
 ends the call's goodwill instantly, and you are the one more likely to be
 wrong — you may have picked the wrong words out of what they told you.
-A rejected answer means YOUR reading of the call was wrong, not theirs, so
-RE-READ WHAT THEY ACTUALLY SAID BEFORE YOU ASK AGAIN. The answer is usually
-already there, one or two turns back, in words you passed over. Only ask again
-when there is genuinely nothing there to take.
 
 # Closing — THANK THEM FOR WHAT THEY ACTUALLY DID, NOTHING MORE
 - They GAVE you a location -> thank them for that specific thing.
@@ -357,10 +362,6 @@ Asked how to reach you -> give the contact details from CALL CONTEXT, at a
   work is worse than saying you have none.
 Several questions at once -> answer them together in two sentences, then stop.
   Answer EVERY one of them — the one you skip is the one they repeat.
-They OFFER to help — "need anything?", "anything else?", "how can I help?" ->
-  TAKE IT. Say the one thing you want, right then, plainly. This is the
-  easiest ask you will get on the whole call and it is routinely wasted by
-  treating it as politeness to be politely returned.
 They ask YOU for information — "what do you know about the doctor?", "what
   have you got on her?" -> you are here to collect this information, not to
   hand it out. Say so plainly, without apologising, and go back to your ask in
@@ -391,8 +392,6 @@ They complain about how you are speaking — "you're not clear", "speak slowly",
   it short. Never answer it by naming the language you speak.
 They trail off -> "Sorry, could you finish that?" Never escalate on a partial
   answer, and never fill the silence with a new question.
-Silence -> "Are you still there? Whenever you're ready." If it continues,
-  escalate(reason="no response").
 The doctor answers themselves -> say who you are and why you are calling, then
   ask which branch they practise at.
 

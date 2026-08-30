@@ -171,15 +171,51 @@ _CHOICE_PATTERNS: tuple[tuple[ChoiceAnswer, "re.Pattern[str]"], ...] = (
     # broke it, and the affirmative phrase underneath matched — so a practice
     # REFUSING new patients was classified as accepting them. That is the wrong
     # row this whole system exists to prevent, and it was live.
+    # THE SAME SLACK ON THE LEAD-IN, TOO. The comment above says negation gets
+    # the same slack as the affirmative; it did not, on the one clause where it
+    # mattered most. `_LEAD_IN` was introduced because "^\W*" could not reach
+    # the "yes" in "Ah, yes" — and only the YES branch was changed. So on
+    # call-20260827-1428 the caller answered "Right now no." to "is she taking
+    # new patients?", the bare token was not sentence-initial, and the held
+    # save was REFUSED against the transcript that bears it out. "Right now
+    # yes." classified fine on the same call's pattern set, which is the whole
+    # tell: the affirmative was heard and the negative was thrown away.
+    #
+    # `_LEAD_IN` is a closed list of discourse markers, so this cannot reach
+    # into a sentence — "there is no waitlist" still does not match here, and
+    # WAITLIST and UNSURE are both tested first.
     (ChoiceAnswer.NO, re.compile(
-        rf"^\W*(no|nope|nah)\b"
+        # THE TOKEN AT EITHER END. `_LEAD_IN` is a closed list of discourse
+        # markers and cannot cover "At the moment no." or "Unfortunately no." —
+        # enumerating those is the same losing game the probes above warn
+        # about. What every one of them has in common is the polarity word
+        # LAST, which is also what a determiner never is: "there is no
+        # waitlist" has a noun after it, "right now no." has nothing.
+        rf"^{_LEAD_IN}(?:no|nope|nah)\b(?!\s+(?:problem|worries|trouble)\b)"
+        rf"|\b(?:no|nope|nah)\b\W*$"
         rf"|\b(?:not|never|no longer)\s+{_GAP}{_ACCEPT_VERB}\b"
         rf"|\b(?:are ?n'?t|is ?n'?t|do ?n'?t|does ?n'?t|are not|is not)\s+"
         rf"{_GAP}{_ACCEPT_VERB}\b"
         rf"|\b(we'?re not|we are not|closed to new)\b", re.I)),
     (ChoiceAnswer.YES, re.compile(
+        # PARITY WITH THE NO BRANCH, and the reason this comment exists is that
+        # the first cut of the trailing form was applied to NO alone — which
+        # inverted the asymmetry instead of removing it. "At the moment no."
+        # classified and "At the moment yes." did not, so the sweep that found
+        # the original bug found its own fix reintroducing it the other way up.
+        # ALWAYS TEST BOTH POLARITIES ON THE SAME SENTENCE.
         rf"^{_LEAD_IN}(?:yes|yeah|yep|yup)\b"
-        rf"|\b(we are|we do|we'?re accepting)\b"
+        rf"|\b(?:yes|yeah|yep|yup)\b\W*$"
+        rf"|\b(we are|we do)\b"
+        # THIRD PERSON TOO. `we'?re accepting` covered the receptionist
+        # speaking for the practice and nothing else, so "She is accepting."
+        # and "The doctor's accepting." — the natural way to answer a question
+        # ABOUT the doctor — returned None and the answer was thrown away.
+        # Copula-anchored rather than subject-anchored: enumerating subjects is
+        # the same losing game as enumerating phrasings, and the negated forms
+        # ("is not accepting", "isn't accepting") are already claimed by the NO
+        # branch, which is tested first.
+        rf"|(?:\bis\b|\bare\b|'s|'re)\s+accepting\b"
         rf"|\b{_ACCEPT_VERB}\s+{_GAP}{_NEW_PATIENTS}\b"
         rf"|\b(?:taking|accepting)\s+(?:on\s+)?new\b"
         rf"|\b(happy to|absolutely|certainly|of course)\b", re.I)),
@@ -190,8 +226,66 @@ _CHOICE_PATTERNS: tuple[tuple[ChoiceAnswer, "re.Pattern[str]"], ...] = (
 # variable-length lookbehind, and because the clause boundary is the part that
 # matters: "we're not doing walk-ins, but she is taking new patients" is a YES,
 # and a whole-string negation test would call it a NO.
-_NEGATOR = re.compile(r"\b(?:not|never|no longer|cannot)\b|n'?t\b", re.I)
+#
+# `n'?t\b` HAD NO LEFT BOUNDARY, and it was the worst bug in this file. It was
+# written to catch a contraction with or without the transcriber's apostrophe
+# ("isn't", "isnt") — and with nothing anchoring its left side it matched the
+# tail of every word ending in "nt": moment, patient, appointment, current,
+# different, urgent, front, want, recent, department. Front-desk vocabulary,
+# all of it.
+#
+# The effect was a YES read as its opposite. "Any patient we are happy to see."
+# classified NO, because "patient" earlier in the clause counted as a negator —
+# a practice saying it will see someone, recorded as a refusal. That is the
+# wrong-row failure this whole system exists to prevent, and it was reachable
+# on the shipped patterns before the trailing-affirmative form ever existed;
+# that form only made it easy to find.
+#
+# So the apostrophe is REQUIRED, and the forms the transcriber renders without
+# one are listed. A list is right here where it was wrong for the probes: this
+# is a closed class of about a dozen English contractions, not an open set of
+# ways to phrase a question.
+_NEGATOR = re.compile(
+    r"\b(?:not|never|no longer|cannot)\b"
+    r"|\w+n't\b"
+    r"|\b(?:isnt|arent|aint|wasnt|werent|dont|doesnt|didnt|cant|wont|"
+    r"wouldnt|couldnt|shouldnt|havent|hasnt|hadnt)\b", re.I)
 _CLAUSE_SPLIT = re.compile(r"[,;.!?]|\bbut\b|\bthough\b|\bhowever\b", re.I)
+
+# The mirror of _NEGATOR, and it exists because the NO branch bypassed the
+# clause logic entirely. `we'?re not` carries NO OBJECT — it does not say what
+# they are not doing — and it is tested before YES, so
+#
+#     "we're not doing walk-ins, but she is taking new patients"
+#
+# returned NO. That is the literal sentence _NEGATOR's own docstring gives as
+# the one that must be YES: the machinery was right and simply never reached.
+# The tell was that "we don't do walk-ins, but yes…" returned YES, because
+# `don't` is not one of the NO branch's bare literals.
+#
+# DELIBERATELY NARROWER THAN THE YES PATTERN. Only an affirmative that names
+# NEW PATIENTS can overturn a stated negative — "we're not taking new patients,
+# but she is happy to see existing ones" must stay NO, and a general affirmative
+# would flip it. The answer has to be about the thing that was asked.
+_EXPLICIT_YES = re.compile(
+    r"\b(?:taking|accepting|seeing)\s+(?:\w+\s+){0,2}new\b", re.I)
+
+
+def _affirmed_after(text: str, idx: int) -> bool:
+    """Is there an un-negated 'we ARE taking new patients' in a LATER clause?
+
+    A clause boundary is required between the two, so this can never fire
+    inside the negative's own clause; and the affirmative it finds is put
+    through _negated_before itself, or "we're not doing walk-ins, and we're not
+    taking new patients" would flip on its own second negative.
+    """
+    for m in _EXPLICIT_YES.finditer(text, idx):
+        if not _CLAUSE_SPLIT.search(text[idx:m.start()]):
+            continue                     # same clause — not a later answer
+        if _negated_before(text, m.start()):
+            continue                     # the later clause is negative too
+        return True
+    return False
 
 
 def _negated_before(text: str, idx: int) -> bool:
@@ -244,8 +338,11 @@ _REFERRAL_PATTERNS: tuple[tuple[ReferralAnswer, "re.Pattern[str]"], ...] = (
         r"\b(always|every time|all (new )?patients|in all cases|"
         r"yes,? (they|you|a referral)|required for (all|every)|"
         r"we require|must have (a )?referral|need(s|ed)? a referral)\b", re.I)),
+    # Same lead-in parity as _CHOICE_PATTERNS' NO — see the note there. A
+    # referral answer arrives in the same shapes as a new-patient one.
     (ReferralAnswer.NO, re.compile(
-        r"^\W*(no|nope|nah)\b|\b(not (needed|required)|no referral|"
+        rf"^{_LEAD_IN}(?:no|nope|nah)\b(?!\s+(?:problem|worries|trouble)\b)"
+        rf"|\b(?:no|nope|nah)\b\W*$|" + r"\b(not (needed|required)|no referral|"
         r"do ?n'?t need|does ?n'?t need|without a referral|"
         r"self[- ]refer)\b", re.I)),
 )
@@ -328,6 +425,11 @@ def classify_choice(text: str) -> Optional[ChoiceAnswer]:
         # a different state, and NO is already the negative.
         if state is ChoiceAnswer.YES and _negated_before(t, m.start()):
             return ChoiceAnswer.NO
+        # ...and the same courtesy in the other direction. NO is tested first,
+        # so without this a negative about something else wins over the answer
+        # to the question actually asked. See _affirmed_after.
+        if state is ChoiceAnswer.NO and _affirmed_after(t, m.end()):
+            return ChoiceAnswer.YES
         return state
     return None
 
@@ -447,7 +549,26 @@ def classify_identity(text: str) -> Optional[IdentityAnswer]:
 # the DOCTOR to be named or referred to, which a branch ask does not do.
 IDENTITY_ASK = re.compile(
     r"\bhave i reached\b"
-    r"|\b(is|was) this\s+(dr\.?|doctor)\b"
+    # SLACK BETWEEN "is this" AND THE TITLE, for the same reason _GAP exists:
+    # a pattern with no room for determiners only recognises the sentence its
+    # author imagined. On call-20260827-1428 the model softened the question to
+    # "is this THE OFFICE FOR Dr. Jennifer, Cardiology?" — three words in the
+    # gap — this probe saw no ask, the evidence anchor never moved off the
+    # FIRST identity question, and the window still held "No, I'm just
+    # receptionist". The caller's clean "Yeah, it is." (which classify_identity
+    # reads as CONFIRMED on its own) was refused, the agent asked a third time,
+    # and the receptionist answered "Yes, I said". Third recurrence of the
+    # defect the block below already records twice.
+    #
+    # THE LOOKAHEAD IS LOAD-BEARING, and it is what keeps this safe against the
+    # narrowness warning below: with a bare gap, "is this the BRANCH Dr.
+    # Jennifer works out of?" becomes an identity ask and anchors the identity
+    # guard on a branch turn. `office`, `practice` and `clinic` stay allowed —
+    # "the office for Dr. X" is the legitimate case — because those name WHOSE
+    # office it is; `branch`, `campus` and `site` never do.
+    r"|\b(is|was) this\s+"
+    r"(?:(?!(?:branch|campus|site|location)\b)[\w'-]+\s+){0,3}"
+    r"(dr\.?|doctor)\b"
     # THE DECLARATIVE FORM, which is the one the model actually reaches
     # for when it softens the question. On call-20260825-1712 it asked
     # "are you able to confirm THIS IS Dr. Reyes, Oncology, at Lakeview
@@ -480,15 +601,30 @@ IDENTITY_ASK = re.compile(
 
 # The location noun. ONE definition, shared by the worker's `_is_location_ask`
 # and by the branch field's probe below.
+# `clinic` WAS MISSING, and it is the word IDENTITY_ASK already treats as a
+# place ("Dr. X's office|practice|practise|clinic"). "Which clinic does she work
+# out of?" is the branch question — the primary field of this whole project —
+# and _is_location_ask returned False on it, so the ask budget did not count it
+# and the grounding anchor did not move. `center` is the same class: "medical
+# center" is the commonest US form there is.
+#
+# `clinics?` and not `clinic\w*`, deliberately: `clinical` is not a place, and
+# the shared prompt says "route you to clinical staff" — a probe matching that
+# would read a sentence about staff as a location ask.
 LOCATION_NOUN = re.compile(
-    r"\b(branch|location|office|campus|site|address|practis\w*|practic\w*)\b",
+    r"\b(branch|location|office|campus|site|address|clinics?|"
+    r"cent(?:er|re)s?|facilit(?:y|ies)|building|practis\w*|practic\w*)\b",
     re.I)
 
 # Asking about taking on new patients. Declared here next to LOCATION_NOUN so a
 # template can point a Field at it; nothing reads it until a template does.
+# The adjacency shape again: `taking (on )?new` demanded the two words touch,
+# so "is she taking ANYBODY new?" matched nothing. Same bounded slack as _GAP,
+# and bounded at two words because the verb and its object are close in every
+# real phrasing — a wider gap starts reaching across clauses.
 ACCEPTING_ASK = re.compile(
-    r"\b(accepting|taking (on )?new|new patients|new-patient|"
-    r"open to new|seeing new)\b", re.I)
+    r"\b(accepting|(?:taking|seeing)\s+(?:\w+\s+){0,2}new|new patients|"
+    r"new-patient|open to new)\b", re.I)
 
 # Asking whether a new patient can actually get on the books right now.
 #

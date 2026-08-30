@@ -2003,10 +2003,14 @@ async def main():
     ]:
         check(_mark in inspect.getsource(_fn),
               f"{_mark} is stamped where it belongs — {_why}")
-    _loop_src = inspect.getsource(rw._oai_to_twilio)
-    for _mark, _why in [('"t1"', "response.created"),
-                        ('"t4"', "response.done")]:
-        check(_mark in _loop_src, f"{_mark} is wired into the event loop — {_why}")
+    # ANCHORED ON THE FUNCTION THAT OWNS THE EVENT, which is the whole point of
+    # the comment above — and it earned its keep on 2026-08-27, when the
+    # response.done block moved to lifecycle.py and this check went red rather
+    # than quietly passing on a file that no longer held the code.
+    for _mark, _fn, _why in [('"t1"', rw._oai_to_twilio,        "response.created"),
+                             ('"t4"', rw._handle_response_done, "response.done")]:
+        check(_mark in inspect.getsource(_fn),
+              f"{_mark} is wired into the handler that owns it — {_why}")
     # t5 and the close live in the AUDIO DELTA handler, not the event loop —
     # same place reply_latency is computed, because they answer the same
     # question and must not be able to disagree about when the agent spoke.
@@ -2691,6 +2695,83 @@ async def main():
     check(_floor(_really_answered + [("caller", "Actually no, she isn't.")], 0)
           == "No, we're not at the moment.",
           "and the re-ask itself reopens the floor for what follows it")
+
+    # ── THEY ANSWERED SOMETHING NOBODY ASKED ──────────────────────────────
+    # A front desk volunteers, and the ordinary path only ever looks at the
+    # field on the table — so the second answer sits in the transcript and the
+    # agent asks for it again four turns later. That is the "robotic loop"
+    # complaint in its most concrete form, and it is a GUARD rather than a
+    # prompt rule for the reason call-20260827-1130 settled: the recovery
+    # directive already said "say just that, in one short sentence, do not
+    # apologise" and the model disobeyed it four times inside one call.
+    def _vsess(asked=(), mem=None):
+        _s = rw.RealtimeSession("CA0000000000000000000000000vol1",
+                                Doctor(doctor_name="Dr. Jennifer",
+                                       hospital_name="New York Baptist"))
+        _s.objective = _pvobj
+        if mem:
+            _s.memory.update(**mem)
+        for _a in asked:
+            _s._field_ask_at[_a] = 0
+        return _s
+    _pv_accf = next(f for f in _pvobj.fields if f.name == "accepting")
+    _vf = lambda text, **kw: [(f.name, v) for f, v
+                              in rw._volunteered_fields(_vsess(**kw), text)]
+    check(_vf("She's at Riverside, and she's not taking new patients right now.")
+          == [("accepting", "no")],
+          "an answer volunteered inside another one is caught")
+    check(_vf("A referral is always required for new patients.")
+          == [("referral", "always")],
+          "and so is one for a field several questions away")
+    # THE MUTATION THAT MATTERS, and the whole safety of the guard. Every
+    # CHOICE field shares classify_choice, so vocabulary ALONE would read a
+    # bare "Yes." answering the branch question as "they volunteered that the
+    # doctor is accepting new patients" — and the directive tells the model to
+    # RECORD it. That is _field_already_answered's old defect arriving from the
+    # other end, where it would put a value in the record nobody gave.
+    for _bare in ["Yes.", "No.", "Yes, that is correct.", "Okay.",
+                  "We only see patients on Tuesdays."]:
+        check(_vf(_bare) == [],
+              f"a turn that does not NAME the field volunteers nothing: "
+              f"{_bare!r}",
+              "the caller's own words have to be about it, exactly as "
+              "_ungrounded_status requires when there is no ask to anchor to")
+    # ONCE IT HAS BEEN ASKED, the ordinary path owns it — the ask budget, the
+    # re-ask guard and the save gate all key off that ask.
+    check(_vf("She is accepting new patients.", asked=("accepting",)) == [],
+          "a field already asked for is not 'volunteered'")
+    check(_vf("She is accepting new patients.",
+              mem={_pv_accf.memory_key: "yes"}) == [],
+          "and neither is one already collected")
+
+    # END TO END, through the shipped handler.
+    class _VolWS:
+        def __init__(self): self.sent = []
+        async def send(self, s): self.sent.append(json.loads(s))
+
+    _vs = _vsess(); _vw = _VolWS()
+    _vs.add_turn("agent", "Which branch does Dr. Jennifer work out of?")
+    _vs.add_turn("caller", "[...]")
+    await rw._handle_caller_transcript(
+        {"transcript": "She's at Riverside, and she's not taking new "
+                       "patients right now."}, _vs, _vw)
+    _said = [m["item"]["content"][0]["text"] for m in _vw.sent
+             if m.get("type") == "conversation.item.create"]
+    check(any("without being asked" in d for d in _said),
+          f"the directive goes out on the turn that carried it ({_said})")
+    check([r["field"] for r in _vs.volunteered_answers] == ["accepting"],
+          f"and it is recorded, so a guard that acted leaves a trace "
+          f"({_vs.volunteered_answers})")
+    # ONE PER FIELD PER CALL. A second copy of a directive the model ignored is
+    # context spent for nothing — the rule every other nudge here uses.
+    _vw2 = _VolWS()
+    _vs.add_turn("caller", "[...]")
+    await rw._handle_caller_transcript(
+        {"transcript": "She's really not taking new patients."}, _vs, _vw2)
+    check(not any("without being asked" in
+                  m.get("item", {}).get("content", [{}])[0].get("text", "")
+                  for m in _vw2.sent),
+          "the directive is one-shot per field")
 
     # END TO END: call-20260825-1847 replayed through the shipped handler.
     class _AskWS:
@@ -3812,15 +3893,70 @@ async def main():
         check("it's just me" in _f3.lower(),
               f"{_n3}: prompt bans the identifies-nobody non-answer")
         # "Need anything?" — an open offer, answered with nothing.
-        check("They OFFER to help" in _f3,
-              f"{_n3}: prompt takes an offer of help instead of returning it")
+        # MOVED OUT OF THE PROMPT 2026-08-27. _invites_continuation existed and
+        # had two callers, both defensive: _caller_is_vetting and the escalate
+        # blocker. Neither fires in the ordinary mid-call case, so the rule was
+        # carried as 68 tokens of prose the model had to recall 4,000 tokens
+        # later at the one moment it mattered. The assertion follows the
+        # enforcement — see the injection check below.
+        check("They OFFER to help" not in _f3,
+              f"{_n3}: the offer rule is no longer carried as prose",
+              "asserted positively at the guard, so this absence is not the "
+              "only thing standing between the rule and nothing")
         # "Can you share those details with me?" — answered by reciting what was
         # on the record, to someone unverified.
         check("collect this information, not" in _f3,
               f"{_n3}: prompt refuses to read the record back to the caller")
-        # And the rejection-handling rule that lost the branch.
-        check("RE-READ WHAT THEY ACTUALLY SAID" in _f3,
-              f"{_n3}: prompt re-reads the transcript before re-asking")
+        # And the rejection-handling rule that lost the branch — MOVED into the
+        # rejection itself 2026-08-27. save_branch had carried `RE-READ` in its
+        # error since call-20260820-1321; the four choice fields got the reason
+        # and nothing about where to look, and the prompt covered the gap for
+        # all five. A tool result is not the cached prefix, so unifying it cost
+        # nothing and let 65 tokens go.
+        check("RE-READ WHAT THEY ACTUALLY SAID" not in _f3,
+              f"{_n3}: the re-read rule is no longer carried as prose",
+              "asserted positively against both rejection messages below")
+    # ── THE THREE RULES THAT MOVED FROM THE PROMPT INTO THE PROCESS ───────
+    # 2026-08-27. Each of these was prose the model had to recall; each is now
+    # a directive that arrives at the moment it applies. The absence checks
+    # above are worth nothing on their own — an absence assertion passes by
+    # finding nothing the day a wording changes — so every one of them is
+    # paired here with a positive check on the enforcement that replaced it.
+    #
+    # 1. RE-READ now rides on the rejection, for ALL FIVE fields.
+    _gsrc3 = _PKG_SRC
+    check(_gsrc3.count("RE-READ: ") >= 2,
+          "both the branch and the choice rejections carry RE-READ",
+          "save_branch had it since 1321; the four choice fields did not, and "
+          "the prompt was covering the difference for all five")
+    _choice_err = _gsrc3[_gsrc3.find('f"NOT SAVED — {ungrounded_choice} '):][:300]
+    check("RE-READ" in _choice_err and "NEED:" in _choice_err,
+          "the choice-field rejection says WHERE to look, not just what failed",
+          _choice_err[:90])
+    # 2. The silence watchdog ends the call instead of falling silent.
+    check("no_response" in rw.GIVE_UP_REASONS
+          and "no_response" in rw.GIVE_UP_MARKERS,
+          "the watchdog's exit is a real give-up trigger with its own marker")
+    _wd = _PKG_SRC[_PKG_SRC.find("if _used >= _MAX_SILENCE_PROMPTS:"):][:900]
+    check("give_up_directive" in _wd and "no_response" in _wd,
+          "spending the silence budget closes the call through the same "
+          "directive the ask budget uses",
+          "it used to `continue` forever, holding a line nobody was on")
+    check(rw.GIVE_UP_MARKERS["no_response"]
+          in rw.give_up_directive(
+              double(_unanswered_asks=0, _asks_without_progress=0),
+              "no_response"),
+          "and the no_response directive really contains its marker",
+          "a trigger whose marker does not appear in its own text makes every "
+          "absence assertion downstream vouch for nothing")
+    # 3. An offer of help is spent at the moment it is made.
+    _off = _PKG_SRC[_PKG_SRC.find("if (_invites_continuation(text) and not sess.done"):][:900]
+    check(_off and "_offer_nudged" in _off,
+          "an offer of help now injects mid-call, one-shot",
+          "_invites_continuation had two callers and both were defensive")
+    check("just offered to help" in _off,
+          "and the directive tells the agent to spend it, not return it")
+
     # The prose rule "Never claim to have noted, saved, or recorded a location
     # you were not given" was DELETED from the prompt on 2026-08-20. It was
     # observed failing on call-20260818-1613 (told the caller it was saved
@@ -4139,7 +4275,9 @@ async def main():
           and _d_sess.reply_latencies[-1] == 2.4,
           "absurd gaps are rejected, a real one is kept",
           f"list grew by {len(_d_sess.reply_latencies) - _before}, expected 1")
-    # WITH THE VERDICT, not just the text. This entry and the one
+    # WITH THE VERDICT, not just the text. On call-20260825-1428 the model
+    # emitted the GREETING twice and the mute stopped the caller hearing it
+    # twice — the guard earning its keep. This entry and the one
     # call-20260825-1435 produced are the same shape and opposite meanings:
     # here the model said the same three words twice and the mute is the guard
     # earning its keep; there it was the caller's answer being deleted. Nobody
@@ -4415,8 +4553,12 @@ async def main():
               for _t, m in rw.GIVE_UP_MARKERS.items()),
           "every give-up marker really appears in the directive it stands for",
           "otherwise the absence check below asserts nothing")
-    check(len(_give_up_marks) == len(rw.GIVE_UP_REASONS) == 2,
-          "both triggers are covered — one marker cannot vouch for the other",
+    # THREE since 2026-08-27: the silence watchdog used to spend its prompts
+    # and then `continue` forever, carrying its exit only as prompt prose
+    # ("Silence -> ... If it continues, escalate"). It now ends the call
+    # through this same directive, so it needs a marker like the other two.
+    check(len(_give_up_marks) == len(rw.GIVE_UP_REASONS) == 3,
+          "every trigger is covered — one marker cannot vouch for another",
           f"{sorted(rw.GIVE_UP_REASONS)}")
     check(not any(m in d for m in _give_up_marks for d in _vt_directives),
           "the budget did not burn on four screening questions",
@@ -7255,8 +7397,11 @@ async def main():
     # and the last agent turn exists. Asserted on the source, because those two
     # are in scope nowhere else - the same reason the response.create policy
     # checks in this suite read source.
-    import pathlib as _plb
-    _wsrc = _plb.Path(rw.__file__).read_text(encoding="utf-8")
+    # Reads the whole package: the response.done handler moved to lifecycle.py
+    # on 2026-08-27, and an assertion pinned to one FILE is an assertion that
+    # goes quiet the day the code is extracted — which is the moment it is most
+    # worth having.
+    _wsrc = _PKG_SRC
     _cb = _wsrc[_wsrc.index("if sess._close_after_response and not sess.done:"):]
     _cb = _cb[:_cb.index("if sess.done:")]
     check("_sounded_like_a_goodbye" in _cb,
@@ -7618,8 +7763,12 @@ async def main():
                        ("owed substance", rw._silence_watchdog)]:
         check("allow_when_vad_pending=True" in inspect.getsource(_src),
               f"and the {_why} call site actually passes the exemption")
-    check("allow_when_vad_pending=True" in inspect.getsource(rw._oai_to_twilio),
-          "as does the empty-response re-request in the event loop")
+    # Moved with response.done to lifecycle.py on 2026-08-27; the recovery is
+    # exempt for the same reason the other two are — it fires BECAUSE nothing
+    # came, so a "wait, something may be coming" guard would silence it.
+    check("allow_when_vad_pending=True"
+          in inspect.getsource(rw._handle_response_done),
+          "as does the empty-response re-request, now in _handle_response_done")
 
     # response.created closes the window, so a normal turn is not throttled.
     _loop_txt = inspect.getsource(rw._oai_to_twilio)
@@ -9265,6 +9414,469 @@ async def main():
           "the identity ask is recognised")
     check(obj.IDENTITY_ASK.search("Which branch does she work out of?") is None,
           "and a BRANCH ask is not — it would anchor the guard on the wrong turn")
+
+    # ── "is this THE OFFICE FOR Dr. X" — call-20260827-1428 ────────────────
+    # Third recurrence of one defect: the probe demanded "is this" immediately
+    # followed by the title, the model softened the wording, and the evidence
+    # anchor never moved off the FIRST identity question. The window still held
+    # "No, I'm just receptionist"; the caller's clean "Yeah, it is." — which
+    # classify_identity reads as CONFIRMED on its own — was refused, the agent
+    # asked a third time, and the receptionist answered "Yes, I said".
+    check(obj.classify_identity("Yeah, it is. How can I help you?")
+          is obj.IdentityAnswer.CONFIRMED,
+          "the caller's answer was always readable — the ASK was not",
+          "which is why the fix is the probe, not the vocabulary")
+    for _q in ["Thanks — is this the office for Dr. Jennifer, Cardiology?",
+               "Right, thanks — just to be clear, is this the office for "
+               "Dr. Jennifer, Cardiology?",
+               "Is this the practice of Dr. Reyes?",
+               "Is this the office of Dr. Okafor?"]:
+        check(rw._is_ask_for(_q, obj.IDENTITY_ASK),
+              f"a softened identity ask is still an identity ask: {_q[:52]!r}")
+    # THE LOOKAHEAD IS THE MUTATION THAT MATTERS. With a bare gap this probe
+    # swallows a BRANCH ask and anchors the identity guard on the wrong turn —
+    # the exact collision the two checks above this block exist to prevent.
+    # `office`/`practice`/`clinic` stay allowed because they name WHOSE office
+    # it is; `branch`/`campus`/`site` never do.
+    for _q in ["Is this the branch Dr. Jennifer works out of?",
+               "Is this the campus Dr. Reyes works from?",
+               "Is this the site Dr. Okafor sees patients at?"]:
+        check(not obj.IDENTITY_ASK.search(_q),
+              f"and a branch ask naming the doctor is still NOT one: {_q[:50]!r}")
+
+    # ── "Right now no." — the same call, the other probe ──────────────────
+    # The NO branch anchored the bare token at the string start while YES used
+    # _LEAD_IN, so "Right now yes." classified and "Right now no." did not: the
+    # affirmative was heard and the negative thrown away. A held save was
+    # REFUSED against the transcript that bears it out, and the receptionist
+    # had to restate it.
+    #
+    # Fixed at BOTH ends rather than by growing _LEAD_IN, because enumerating
+    # lead-ins is the losing game these probes keep losing. What every one of
+    # them has in common is the polarity word LAST — which is exactly what a
+    # determiner never is.
+    for _t in ["Right now no.", "Right now, no.", "At the moment no.",
+               "Unfortunately no.", "Sorry, no.", "I think no.", "Ah, no."]:
+        check(obj.classify_choice(_t) is obj.ChoiceAnswer.NO,
+              f"a padded no is still a no: {_t!r}",
+              f"got {obj.classify_choice(_t)!r}")
+    check(obj.classify_referral("Right now no.") is obj.ReferralAnswer.NO,
+          "and the referral vocabulary gets the same parity")
+    # THE DETERMINER MUST NOT FLIP, which is what bounds the trailing form.
+    for _t, _want in [("There is no waitlist.", "waitlist"),
+                      ("We're full, but I can put you on the list.", "waitlist"),
+                      ("No idea.", "unsure"),
+                      ("She is accepting new patients.", "yes"),
+                      ("Right now yes.", "yes"),
+                      ("No she isn't.", "no"),
+                      ("No we are not taking patients.", "no")]:
+        _g = obj.classify_choice(_t)
+        check(_g is not None and _g.value == _want,
+              f"{_t!r} -> {_want}", f"got {_g!r}")
+    # AND THE ONE THIS FOUND ON THE WAY PAST. "No problem" is an
+    # acknowledgement, not an answer, and the bare leading token was reading it
+    # as a refusal — turning a sentence that says the practice IS taking
+    # patients into a row that says it is not. Pre-existing, in the same three
+    # lines, and the wrong-row failure this whole system exists to prevent.
+    check(obj.classify_choice("No problem, she's taking new patients.")
+          is obj.ChoiceAnswer.YES,
+          "'No problem' is an acknowledgement, not a refusal",
+          "it used to classify NO — a YES answer recorded as its opposite")
+
+    # ── THE PROBE SWEEP, 2026-08-27 ───────────────────────────────────────
+    # Run across every remaining probe after the same two shapes were found
+    # twice on call-20260827-1428. It found four more, and one of them was the
+    # worst bug in objectives.py.
+    #
+    # 1. `n'?t\b` HAD NO LEFT BOUNDARY. Written for "isn't"/"isnt", it matched
+    #    the tail of every word ending in "nt" — moment, patient, appointment,
+    #    current, different, urgent, front, want, recent, department. So an
+    #    affirmative anywhere after the word "patient" in its own clause was
+    #    flipped: "Any patient we are happy to see." classified NO, a practice
+    #    agreeing to see someone recorded as a refusal. PRE-EXISTING on the
+    #    shipped patterns; the trailing-affirmative form only made it findable.
+    for _w in ["moment", "patient", "appointment", "current", "different",
+               "urgent", "front", "want", "recent", "department"]:
+        check(not obj._NEGATOR.search(_w),
+              f"{_w!r} is not a negator", "it merely ends in 'nt'")
+    check(obj.classify_choice("Any patient we are happy to see.")
+          is obj.ChoiceAnswer.YES,
+          "an affirmative after the word 'patient' is not negated",
+          "this classified NO — the wrong-row failure, on shipped patterns")
+    # AND REAL NEGATION STILL FLIPS, with and without the transcriber's
+    # apostrophe. A closed class of a dozen contractions is the one place a
+    # list IS the right tool — unlike the ways a question can be phrased.
+    for _t in ["She's not currently taking new patients.",
+               "We aren't taking anyone.", "We arent taking anyone.",
+               "She isn't accepting.", "We don't take new patients.",
+               "We dont take new patients."]:
+        check(obj.classify_choice(_t) is obj.ChoiceAnswer.NO,
+              f"real negation still reads as NO: {_t!r}")
+
+    # 2. AFFIRMATIVE/NEGATIVE PARITY, tested on the SAME sentence. The first
+    #    cut of the trailing form went onto NO alone, which inverted the
+    #    asymmetry rather than removing it — "At the moment no." classified and
+    #    "At the moment yes." did not. Both polarities, every time.
+    for _a, _b in [("Right now yes.", "Right now no."),
+                   ("At the moment yes.", "At the moment no."),
+                   ("Unfortunately yes.", "Unfortunately no."),
+                   ("Sorry, yes.", "Sorry, no."),
+                   ("I think yes.", "I think no."),
+                   ("Probably yes.", "Probably no.")]:
+        check(obj.classify_choice(_a) is obj.ChoiceAnswer.YES
+              and obj.classify_choice(_b) is obj.ChoiceAnswer.NO,
+              f"both polarities read on the same shape: {_a!r} / {_b!r}",
+              f"{obj.classify_choice(_a)!r} / {obj.classify_choice(_b)!r}")
+
+    # 3. LOCATION_NOUN was missing `clinic` — the word IDENTITY_ASK already
+    #    treats as a place, and the branch question is the primary field of
+    #    this project. "Which clinic does she work out of?" was not a location
+    #    ask, so the budget did not count it and the anchor did not move.
+    for _t in ["Which clinic does she work out of?",
+               "Which facility is she based at?",
+               "Which building does she see patients in?",
+               "Which centre is she at?",
+               "The medical center on Broadway."]:
+        check(obj.LOCATION_NOUN.search(_t),
+              f"a place named in the words a front desk uses: {_t[:44]!r}")
+    # `clinics?`, not `clinic\w*`: the shared prompt says "route you to
+    # clinical staff", and a probe matching that reads staff as a location.
+    check(not obj.LOCATION_NOUN.search("route you to clinical staff"),
+          "'clinical' is not a place")
+
+    # 4. ACCEPTING_ASK demanded `taking`/`new` touch.
+    check(obj.ACCEPTING_ASK.search("Is she taking anybody new?"),
+          "slack between the verb and 'new'")
+    check(not obj.ACCEPTING_ASK.search(
+              "Are you taking a message for the doctor?"),
+          "and two words of slack does not reach across to an unrelated 'new'")
+
+    # ── note_info WAS WRITE-ONLY — call-20260827-1516 ─────────────────────
+    # It did memory.update(**{f"note_{key}": value}), returned ok, and NOTHING
+    # anywhere read a note_ key back out: not the artifact, not doctors.json,
+    # not the summary. On 1516 the caller said it was a bad time and asked to
+    # be rung back; the agent captured the window and called note_info twice,
+    # and the call filed outcome=none, collected=[]. The one actionable thing
+    # it learned survived only as prose inside the transcript array.
+    _nsess = rw.RealtimeSession("CA00000000000000000000notes1",
+                                Doctor(doctor_name="Dr. Alan Reyes",
+                                       hospital_name="Lakeview Medical"))
+    _tools.note_info(_nsess.memory, "callback_time",
+                     "Caller requested callback in the afternoon.")
+    _tools.note_info(_nsess.memory, "email", "directory@example.com")
+    _tools.note_info(_nsess.memory, "blank", "")
+    check(_nsess.notes() == {"callback_time": "Caller requested callback in "
+                                              "the afternoon.",
+                             "email": "directory@example.com"},
+          f"note_info values are readable back off the session "
+          f"({_nsess.notes()})",
+          "a tool that reports ok and whose output nothing can see is the "
+          "acts-and-leaves-no-trace defect wearing a third hat")
+    check("note_" not in json.dumps(_nsess.notes()),
+          "the memory-namespacing prefix does not leak into the record")
+    check(rw.RealtimeSession("CA00000000000000000000notes2",
+                             Doctor(doctor_name="X", hospital_name="Y")
+                             ).notes() == {},
+          "and a call that noted nothing reports nothing")
+    # BOTH SERIALISERS. The artifact is what a reviewer reads; doctors.json is
+    # what a person acts on, and a call whose only product was "ring back this
+    # afternoon" has to put it on the row, not only on the artifact.
+    _ssrc = _PKG_SRC[_PKG_SRC.find("def notes(self)"):]
+    for _where, _hint in [('"notes":          self.notes() or None,', "artifact"),
+                          ('"notes":            self.notes(),', "doctor record")]:
+        check(_where in _PKG_SRC,
+              f"notes reach the {_hint}",
+              "one serialiser is how this got lost the first time")
+
+    # ── SIGNED OFF WITHOUT ENDING ANYTHING — the same call ────────────────
+    # sess.done moves on exactly four events and every one is a TOOL or the
+    # caller; the agent saying goodbye was invisible. On 1516 it said "No
+    # problem — take care." at 15:17:00, called nothing, and the call ran
+    # another twenty seconds until the CALLER ended it.
+    for _t in ["No problem — take care.", "Take care.", "Bye now.",
+               "Have a good day.",
+               "Alright, thanks for your time earlier — goodbye."]:
+        check(rw._spoken_farewell(_t), f"a sign-off is recognised: {_t!r}")
+    # `take care OF` is a promise to act. Reading it as goodbye would inject
+    # the escalate directive into the middle of a call that is going fine.
+    for _t in ["I'll take care of that.", "I will take care of it for you.",
+               "Got it — which branch does she work out of?",
+               "Got it — we'll follow up this afternoon."]:
+        check(not rw._spoken_farewell(_t),
+              f"and an ordinary turn is not: {_t!r}")
+    # THE CORRECTION IS THE TOOL, NEVER A HANG-UP. escalate is what writes the
+    # reason — on 1516 it was the only record of why the call produced nothing
+    # — so cutting the line at the farewell trades twenty seconds of politeness
+    # for a call with no outcome at all.
+    _fsrc = _PKG_SRC[_PKG_SRC.find("if (_spoken_farewell(_said) and not sess.done"):][:1200]
+    check(_fsrc and "Call escalate now" in _fsrc,
+          "the directive asks for the tool",
+          "hanging up here would lose the reason the call ended")
+    check("sess.done = True" not in _fsrc and "twilio_ws" not in _fsrc,
+          "and it neither ends the call itself nor touches the wire")
+    check("_farewell_nudged" in _fsrc and "farewell_without_close" in _fsrc,
+          "one-shot, and recorded so it cannot fire invisibly")
+
+    # ── THE PRECEDENCE TRAP ───────────────────────────────────────────────
+    # _NEGATOR's own docstring gives this sentence as the one that must be YES,
+    # and it returned NO. The clause machinery was right and was never reached:
+    # `we'?re not` carries NO OBJECT — it does not say what they are not doing
+    # — and the NO branch is tested before YES, so a negative about walk-ins
+    # beat the answer to the question actually asked. The tell was that
+    # "we don't do walk-ins, but yes…" returned YES, because `don't` is not one
+    # of the NO branch's bare literals.
+    check(obj.classify_choice(
+              "we're not doing walk-ins, but she is taking new patients")
+          is obj.ChoiceAnswer.YES,
+          "an affirmative in a LATER clause is the operative answer",
+          "the sentence _NEGATOR's docstring promises and did not deliver")
+    check(obj.classify_choice(
+              "we don't do walk-ins, but yes she is taking new patients")
+          is obj.ChoiceAnswer.YES,
+          "and the form that already worked still does",
+          "if this ever fails the fix went in at the wrong layer")
+    # NARROWER THAN THE YES PATTERN, DELIBERATELY. Only an affirmative naming
+    # NEW PATIENTS may overturn a stated negative — the answer has to be about
+    # the thing that was asked. These are the mutations that matter: a general
+    # affirmative, or a second negative, must both leave it NO.
+    for _t in ["we're not taking new patients, but she is happy to see "
+               "existing ones.",
+               "we're not doing walk-ins, and we're not taking new patients",
+               "We're not taking new patients.",
+               "She's not currently taking new patients."]:
+        check(obj.classify_choice(_t) is obj.ChoiceAnswer.NO,
+              f"a stated negative is not overturned by: {_t[:46]!r}",
+              f"got {obj.classify_choice(_t)!r}")
+    # A CLAUSE BOUNDARY IS REQUIRED, so this can never fire inside the
+    # negative's own clause — "not taking new patients" contains the very
+    # phrase _EXPLICIT_YES looks for.
+    check(not obj._affirmed_after("we're not taking new patients", 9),
+          "an affirmative in the SAME clause is not a later answer")
+
+    # ── THIRD-PERSON ACCEPTANCE ───────────────────────────────────────────
+    # `we'?re accepting` covered the receptionist speaking for the practice and
+    # nothing else, so the natural way to answer a question ABOUT the doctor
+    # returned None and the answer was discarded.
+    for _t in ["She is accepting.", "She's accepting.", "They are accepting.",
+               "The doctor is accepting.", "We're accepting."]:
+        check(obj.classify_choice(_t) is obj.ChoiceAnswer.YES,
+              f"third person is an answer too: {_t!r}",
+              f"got {obj.classify_choice(_t)!r}")
+    # Copula-anchored, not subject-anchored — enumerating subjects is the same
+    # losing game as enumerating phrasings. The negated forms stay NO because
+    # that branch is tested first.
+    for _t in ["She is not accepting.", "She isn't accepting.",
+               "They are not accepting."]:
+        check(obj.classify_choice(_t) is obj.ChoiceAnswer.NO,
+              f"and its negation is still NO: {_t!r}",
+              f"got {obj.classify_choice(_t)!r}")
+
+    print("\n" + "-" * 66)
+    print("  check_refusals — finding the next probe gap without a person")
+    print("-" * 66)
+    # Seven probe gaps have been found on this project and every one the same
+    # way: a person read a console log. The offline scan replaces the FINDING,
+    # not the judging — the alternative considered was classifying intent with
+    # a second LLM on the live path, and the arithmetic killed it (60
+    # classifications on a median 81s call = 44 RPM from one call against a 10
+    # RPM ceiling, on a reply path measured at 1.52s median), before the deeper
+    # objection that a model checking a model's reading of the same words is
+    # not a guardrail.
+    import check_refusals as _cr
+
+    # A REFUSAL ALONE IS NOT A FINDING. Most refusals are the guard working,
+    # and a scan that flags them all is a scan nobody runs twice. What indicts
+    # one is what the call went on to do with the field.
+    def _call(**kw):
+        base = {"call_id": "call-test", "conversation": {"agent_turns": 3},
+                "missing": [], "collected": []}
+        base.update(kw)
+        return base
+    _ref = [{"tool": "save_new_patient_status", "why": "no", "heard": "Right now no.",
+             "at": "00:00:00", "args": {}}]
+    check(_cr.audit_dict(_call(save_refusals=_ref, missing=["accepting"]))[0]["verdict"]
+          == "COST",
+          "refused and the field never landed -> COST",
+          "the guard did not delay the answer, it destroyed it")
+    check(_cr.audit_dict(_call(save_refusals=_ref, collected=["accepting"]))[0]["verdict"]
+          == "PREMATURE",
+          "refused and the field landed later -> PREMATURE",
+          "the caller was made to say it again in words the probe recognised")
+    check(_cr.audit_dict(_call(save_refusals=_ref)) == [],
+          "a refusal on a field the call never needed is not a finding",
+          "flagging every refusal is how a scan stops being read")
+    check(_cr.audit_dict(_call(missing=["accepting"])) == [],
+          "and a call with no refusals is silent")
+    # THE PHRASING IS THE DELIVERABLE — the whole point is handing a human the
+    # exact string to take to the pattern.
+    _f = _cr.audit_dict(_call(save_refusals=_ref, missing=["accepting"]))[0]
+    check(_f["heard"] == "Right now no.",
+          "the caller's exact words come out with the finding",
+          "a refusal without them says a guard fired; with them it says which "
+          "phrasing the probe could not read")
+    # THREE SOURCES. A guard can refuse at three moments and the artifact
+    # records each differently; reading one is how a scan reports "nothing to
+    # see" on a call that lost a field.
+    check(len(_cr._refusals(_call(
+              save_refusals=_ref,
+              deferred_saves=[{"tool": "save_branch", "outcome": "contradicted",
+                               "why": "x", "args": {"heard": "y"}}],
+              branch_rejections=[{"value": "Riverside", "why": "z"}]))) == 3,
+          "on-the-spot, contradicted-after-the-wait and branch rejections all "
+          "reach the scan")
+    check(not _cr._refusals(_call(deferred_saves=[
+              {"tool": "save_branch", "outcome": "applied"}])),
+          "and a deferred save that APPLIED is not a refusal")
+    # AGAINST THE REAL CORPUS: it must find the two gaps fixed by hand today,
+    # and nothing else. A scan with false positives is one that gets ignored.
+    import pathlib as _pl2
+    _real = sorted(_pl2.Path("data/3 cases jsons").glob("call-*.json"))
+    _found = [f for _p in _real for f in _cr.audit(_p)]
+    _ids = {(f["call_id"][:18], f["field"]) for f in _found}
+    check(("call-20260827-1130", "referral") in _ids,
+          "the corpus scan finds \"It's depend upon situation\" (COST)",
+          f"{sorted(_ids)}")
+    check(("call-20260827-1428", "accepting") in _ids,
+          'and finds "Right now, no." (PREMATURE)')
+    check(len(_found) == 2,
+          f"and flags nothing else across {len(_real)} calls",
+          f"{[(f['call_id'], f['field']) for f in _found]}")
+
+    # ── A MODULE'S RE-EXPORTED SURFACE MUST BE DECLARED ───────────────────
+    # Every private name consumed by another module in this package has to
+    # appear in its own module's __all__. Without it the checker reports the
+    # module's whole reason for existing as unused: Pylance greys the name AT
+    # ITS DEFINITION, and a hint storm is how a real warning gets buried.
+    #
+    # Found by hand twice on 2026-08-27 — lifecycle.py shipped with no __all__
+    # at all, and grounding.py had been missing `_spoken_farewell` since the
+    # farewell guard landed. Nothing in this suite could observe either, which
+    # is the whole argument for making the process enforce it.
+    import ast as _ast, pathlib as _pl, collections as _co
+    _pkg = _pl.Path("agents/voice")
+    _defined, _imported = {}, _co.defaultdict(set)
+    for _p in sorted(_pkg.glob("*.py")):
+        _tree = _ast.parse(_p.read_text(encoding="utf-8"))
+        _names = set()
+        for _n in _tree.body:
+            if isinstance(_n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                _names.add(_n.name)
+            elif isinstance(_n, _ast.Assign):
+                _names |= {_t.id for _t in _n.targets if isinstance(_t, _ast.Name)}
+            elif isinstance(_n, _ast.AnnAssign) and isinstance(_n.target, _ast.Name):
+                _names.add(_n.target.id)
+        _defined[_p.stem] = {_x for _x in _names
+                             if _x.startswith("_") and not _x.startswith("__")}
+        for _n in _ast.walk(_tree):
+            if isinstance(_n, _ast.ImportFrom) and (_n.module or "").startswith("agents.voice."):
+                _imported[_n.module.split(".")[-1]] |= {_a.name for _a in _n.names}
+    _undeclared = {}
+    for _mod, _used in sorted(_imported.items()):
+        _priv = _used & _defined.get(_mod, set())
+        if not _priv:
+            continue
+        _t = _ast.parse((_pkg / f"{_mod}.py").read_text(encoding="utf-8"))
+        _av = next((_n for _n in _t.body if isinstance(_n, _ast.Assign)
+                    and any(getattr(_x, "id", "") == "__all__" for _x in _n.targets)), None)
+        _listed = set() if _av is None else {_e.value for _e in _av.value.elts
+                                             if isinstance(_e, _ast.Constant)}
+        if _priv - _listed:
+            _undeclared[_mod] = sorted(_priv - _listed)
+    check(not _undeclared,
+          "every module declares the private names other modules import from it",
+          f"undeclared: {_undeclared}" if _undeclared else "")
+    # AND THE CHECK ITSELF HAS TO BE ABLE TO FAIL — an absence assertion over a
+    # scan that finds nothing passes for free. Prove the scan sees the surface
+    # it is guarding.
+    check(len(_imported.get("evidence", set())) > 20
+          and len(_imported.get("lifecycle", set())) >= 3,
+          "and the scan really sees the cross-module surface",
+          f"evidence={len(_imported.get('evidence', set()))} "
+          f"lifecycle={len(_imported.get('lifecycle', set()))}")
+
+    print("\n" + "-" * 66)
+    print("  Cited in source, untested until now")
+    print("-" * 66)
+    # A scan for call IDs found 58 distinct calls cited across agents/voice and
+    # 53 of them carried by a check in here. These are the ones that were not:
+    # history with nothing standing behind it, which is the half of "move the
+    # trauma logs into the tests" that was straightforwardly right.
+
+    # ── call-20260806-2029: the largest unit wins ─────────────────────────
+    # conversation_metrics counts sentence repeats first, then clause repeats
+    # NOT already inside a counted sentence. Counting clauses INSTEAD was the
+    # first attempt: a short sentence splits into sub-threshold clauses and
+    # vanishes, and checked against the whole call history that swap silently
+    # dropped a real repeat while fixing three others.
+    import agents.voice.metrics as _metrics
+
+    def _reps(_s):
+        return _metrics.conversation_metrics(
+            [rw.TranscriptTurn(role="agent", text=_s, timestamp="00:00:00"),
+             rw.TranscriptTurn(role="agent", text=_s, timestamp="00:00:00")]
+        )["repeated_sentences"]
+    for _s in ["Okay, no problem, I will.", "Right, so, let me see.",
+               "Sure, one moment, hang on."]:
+        check(_reps(_s) == 1,
+              f"a repeat whose every CLAUSE is sub-threshold still counts: "
+              f"{_s!r}",
+              "counting clauses instead of sentences loses exactly this shape")
+    # ...and the other half of "largest unit wins": one sentence said twice is
+    # ONE repetition, not one for the sentence plus one for each of its clauses.
+    check(_reps("Could I get the branch name, or the street address please?")
+          == 1,
+          "a long repeat with long clauses is counted once, not per clause")
+    check(_reps("Sure, no rush.") == 0,
+          "and three words is below the threshold either way",
+          "the threshold is what stops every 'okay' scoring as a repeat")
+
+    # ── call-20260819-1323: the hint came back as a caller turn ───────────
+    # "Mercy Hospital" — the FIRST health system in the transcription hint —
+    # arrived at audio_rms 0.011 on a call where the callee never spoke at all,
+    # and the agent answered it. The hint is prepended to the transcriber's own
+    # context, so anything in it can come back out as transcript.
+    _echo = lambda _txt, _rms: rw._is_hint_echo(
+        rw.TranscriptTurn(role="caller", text=_txt, timestamp="00:00:00",
+                          audio_rms=_rms), ["mercy"], _rms)
+    check(_echo("Mercy Hospital", 0.011),
+          "a bare hint term on near-silent audio is quarantined",
+          "call-1323: the callee never spoke and the agent answered anyway")
+    # BOTH SIGNALS MUST FAIL, and these are the mutations that say so. Either
+    # one alone would throw away a real answer from a quiet caller, or accept a
+    # fabrication from a loud one.
+    check(not _echo("Mercy Hospital", 0.09),
+          "the same words on real audio are a real answer")
+    check(not _echo("She's at the Mercy Hospital campus on 5th", 0.011),
+          "and a quiet turn that says MORE than the term is not an echo")
+    check(not _echo("Mercy Hospital", None),
+          "an unmeasured turn gets the benefit of the doubt",
+          "absence of measurement is not evidence of fabrication")
+
+    # ── call-20260820-1732: a phantom "Yes." on dead air ──────────────────
+    # 0.7s of near-silence produced a whole receptionist greeting. A genuine
+    # status answer IS bare — "Yes." is the normal shape — so the usual
+    # "did they say more than the term" discriminator is satisfied by every
+    # true answer, and the audio measurement is the only signal left.
+    def _statsess(_rms):
+        _s = rw.RealtimeSession("CA0000000000000000000000sil01",
+                                Doctor(doctor_name="Dr. Jane Okafor",
+                                       hospital_name="Northside Medical Group"))
+        _s.objective = _templates.get_template("provider_verification").objective
+        _s.memory.update(doctor_identity="confirmed")
+        _s.add_turn("agent", "Is Dr. Okafor taking new patients?")
+        _s.turns.append(rw.TranscriptTurn(role="caller", text="Yes.",
+                                          timestamp="00:00:00", audio_rms=_rms))
+        return _s
+    check(rw._ungrounded_status({"status": "yes", "heard": "Yes."},
+                                _statsess(0.0002)),
+          "a bare status token on silent audio is refused",
+          "this is squarely what the transcriber fabricates")
+    check(not rw._ungrounded_status({"status": "yes", "heard": "Yes."},
+                                    _statsess(0.09)),
+          "the same answer on real speech is accepted")
+    check(not rw._ungrounded_status({"status": "yes", "heard": "Yes."},
+                                    _statsess(None)),
+          "and an unmeasured turn is not refused on an unmeasurement")
     for _n, _t in _templates.TEMPLATES.items():
         _has = _t.objective.field_named("identity") is not None
         check(bool(obj.IDENTITY_ASK.search(_t.instructions)) is _has,

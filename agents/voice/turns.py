@@ -26,7 +26,7 @@ if TYPE_CHECKING:                    # pragma: no cover - typing only
 
 from agents.voice import backchannel
 from agents.voice.audio import _audio_carried_nothing, _SILENT_AUDIO_RMS, _audio_was_silent
-from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, _is_location_ask, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
+from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, _is_location_ask, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
 from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, is_hold_request, _create_response, _RETIRED_VOCAB_TEXT, _resolve_deferred_save
 from agents.voice.objectives import AnswerKind, clauses as _clauses, expected_answers, norm_quotes as _norm_quotes, sentences as _sentences
 from core.config import settings
@@ -334,6 +334,12 @@ def _is_objective_ask(text: str, sess: "RealtimeSession") -> bool:
 GIVE_UP_REASONS = {
     "no_progress": "caller engaged but never provided a location",
     "unanswered":  "caller did not answer after repeated asks",
+    # THE WATCHDOG'S OWN EXIT. It used to prompt _MAX_SILENCE_PROMPTS times and
+    # then `continue` forever, leaving the call open on a line nobody was on —
+    # the escalation was carried only as a prompt rule ("Silence -> ... If it
+    # continues, escalate"), which is a rule the model has to remember from
+    # 6,000 tokens back at the one moment it has stopped being spoken to.
+    "no_response": "caller stopped responding and did not come back",
 }
 
 def _field_vocabulary(field) -> Optional[Callable]:
@@ -362,6 +368,65 @@ def _field_vocabulary(field) -> Optional[Callable]:
     if states == CHOICE_STATES:
         return classify_choice
     return None
+
+def _volunteered_fields(sess: "RealtimeSession", text: str) -> list:
+    """Fields this caller turn answers that nobody has asked for yet.
+
+    THE PROMPT RULE THIS REPLACES WAS NEVER WRITTEN, and that is deliberate.
+    "If they give you an answer to a question you haven't asked, save it" is
+    exactly the shape of rule this project has repeatedly watched the model
+    ignore — the recovery directive on call-20260827-1130 said "say just that,
+    in one short sentence, do not apologise" and was disobeyed four times
+    inside one call. A guard that fires on the event costs no prompt tokens and
+    does not depend on the model remembering anything.
+
+    TWO CONDITIONS, AND THE SECOND ONE IS THE WHOLE SAFETY OF IT.
+
+      1. the field's own vocabulary reads a state out of the turn, and
+      2. the caller's words NAME THE TOPIC — `field.probe` matches.
+
+    Condition 1 alone is a fabrication engine. Every CHOICE field shares
+    `classify_choice`, so a bare "Yes." answering the branch question would be
+    read as "they volunteered that the doctor is accepting new patients", and
+    the directive below would then tell the model to record it. That is the
+    same defect `_field_already_answered` had until 2026-08-27, arriving from
+    the other end — and there it merely mis-fired a nudge, where here it would
+    put a value in the record the caller never gave.
+
+    So the turn has to be ABOUT the field, in the caller's own words. It is the
+    same anchoring `_ungrounded_status` applies to its evidence window: "when
+    there was no ask to anchor to, the turn must additionally be ABOUT new
+    patients".
+
+    ONLY FIELDS NOBODY HAS ASKED FOR. Once a field has been asked, the ordinary
+    path owns it — the ask budget, the re-ask guard and the save gate all key
+    off that ask, and a second opinion from here would double-count.
+    """
+    out = []
+    if sess.done or not (text or "").strip() or text.strip() == "[...]":
+        return out
+    for f in _objective_of(sess).fields:
+        if f.name in sess._volunteered_seen:
+            continue                       # one directive per field per call
+        if sess._field_ask_at.get(f.name) is not None:
+            continue                       # asked; the ordinary path owns it
+        try:
+            if f.present(sess.memory):
+                continue                   # already collected
+        except Exception:
+            pass
+        classify = _field_vocabulary(f)
+        probe = getattr(f, "probe", None)
+        if classify is None or probe is None:
+            continue
+        if not probe.search(text):
+            continue                       # not about this field — see above
+        got = classify(text)
+        if got is not None and got.value in (getattr(f, "states", None)
+                                             or frozenset()):
+            out.append((f, got.value))
+    return out
+
 
 def _field_already_answered(sess: "RealtimeSession", field,
                             since_idx: int) -> str:
@@ -463,7 +528,10 @@ def give_up_directive(sess: "RealtimeSession", trigger: str) -> str:
     _mem = getattr(sess, "memory", None)
     missing = (_objective_of(sess).missing_spoken(_mem) if _mem is not None
                else "") or "the branch"
-    if trigger == "unanswered":
+    if trigger == "no_response":
+        opening = ("(system: the line has gone quiet and they have not come "
+                   "back after being checked on twice. ")
+    elif trigger == "unanswered":
         opening = (f"(system: you have asked {sess._unanswered_asks} times "
                    f"and they have not answered. ")
     else:
@@ -949,6 +1017,33 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
         _used = (sess._silence_prompts_midcall if heard_from_them
                  else sess._silence_prompts_opening)
         if _used >= _MAX_SILENCE_PROMPTS:
+            # THE DANGLING STATE, closed. Both budgets spent used to mean this
+            # loop span on doing nothing until something else ended the call —
+            # and on a line where nobody is talking, nothing else does. The
+            # exit was in the prompt and nowhere in the process.
+            #
+            # Through give_up_directive rather than a fresh string, so the
+            # wording the test suite asserts on is the wording that goes out,
+            # and _give_up_sent makes it one-shot exactly like the budget's.
+            if not sess._give_up_sent and not sess.done:
+                sess._give_up_sent = True
+                sess._give_up_trigger = "no_response"
+                print(f"[Realtime] 🤐 silence budget spent ({_used}/"
+                      f"{_MAX_SILENCE_PROMPTS} {_phase}) — closing the call "
+                      f"rather than holding a line nobody is on", flush=True)
+                try:
+                    await oai_ws.send(json.dumps({
+                        "type": "conversation.item.create",
+                        "item": {"type": "message", "role": "user",
+                                 "content": [{"type": "input_text",
+                                              "text": give_up_directive(
+                                                  sess, "no_response")}]},
+                    }))
+                    await _create_response(oai_ws, sess,
+                                           why="silence budget spent",
+                                           allow_when_vad_pending=True)
+                except Exception:
+                    return
             continue
         if heard_from_them:
             sess._silence_prompts_midcall += 1
@@ -1247,6 +1342,37 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         # At a medical office "is this about a patient" decides whether they
         # pull a record or route to clinical staff — it cannot be left to be
         # inferred from "listing check".
+        # ── THEY OFFERED. TAKE IT. ──────────────────────────────────────
+        # `_invites_continuation` already existed and had exactly two callers,
+        # both of them defensive: _caller_is_vetting, and the escalate blocker
+        # that refuses to hang up on "how can I help?". Neither fires in the
+        # ordinary case, where a front desk offers mid-call and the agent
+        # returns the politeness instead of spending it. That was carried as
+        # prompt prose — "This is the easiest ask you will get on the whole
+        # call and it is routinely wasted" — which is a rule the model has to
+        # recall 4,000 tokens later at the one moment it matters.
+        #
+        # Placed with the other caller-turn nudges and one-shot like them: a
+        # second copy of a directive the model ignored is context spent for
+        # nothing.
+        if (_invites_continuation(text) and not sess.done
+                and not sess._offer_nudged
+                and _objective_of(sess).missing(sess.memory)):
+            sess._offer_nudged = True
+            print(f"[Realtime] 🎁 they offered — telling the agent to spend it "
+                  f"now: {text[:52]!r}", flush=True)
+            _want = (_objective_of(sess).missing_spoken(sess.memory)
+                     or "what you called about")
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": (
+                             f"(system: they just offered to help. Say the one "
+                             f"thing you want, right now, plainly — you still "
+                             f"need {_want}. Do not return the politeness and "
+                             f"do not wait for a better moment.)")}]},
+            }))
+
         if (_asks_about_patient(text) and not sess.done
                 and not sess._patient_nudged):
             sess._patient_nudged = True
@@ -1354,6 +1480,37 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         # earlier. Anything held for it is judged now, against the words
         # themselves — this is the event the 1.5s wait was standing in for.
         await _resolve_deferred_save(sess, oai_ws)
+
+        # ── THEY ANSWERED SOMETHING NOBODY ASKED ────────────────────────────
+        # A front desk volunteers. "She's at Riverside, and she's not taking
+        # new patients right now" answers two fields while we asked about one,
+        # and the ordinary path only ever looks at the field on the table — so
+        # the second answer sat in the transcript and the agent asked for it
+        # again four turns later, which is the "robotic loop" complaint in its
+        # most concrete form.
+        #
+        # AFTER _resolve_deferred_save, for the same reason the hang-up check
+        # is: a field that just landed from a held save must count as
+        # collected here, or this offers the model a value it already has.
+        for _vf, _vstate in _volunteered_fields(sess, text):
+            sess._volunteered_seen.add(_vf.name)
+            sess.volunteered_answers.append(
+                {"field": _vf.name, "state": _vstate, "heard": text[:160]})
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 💡 VOLUNTEERED "
+                  f"— they answered {_vf.name!r} without being asked: "
+                  f"{text[:60]!r}", flush=True)
+            # Terse and non-speakable, like every directive in this file: on
+            # call-20260818-1112 the agent read one of these out to a caller.
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": (
+                             f"(system: they just answered "
+                             f"{_vf.spoken or _vf.name} without being asked — "
+                             f"they said {text[:80]!r}. Record it now from "
+                             f"their words, and do not ask them for it later.)"
+                         )}]},
+            }))
 
         # ── THE CALLER ASKED TO STOP ────────────────────────────────────────
         # Set only the flag. No goodbye is injected and no response is created
@@ -1900,6 +2057,7 @@ __all__ = [
     "_claims_employment",
     "_content_words",
     "_field_already_answered",
+    "_volunteered_fields",
     "_field_vocabulary",
     "_handle_agent_transcript",
     "_handle_caller_transcript",

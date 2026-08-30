@@ -282,6 +282,11 @@ class RealtimeSession:
         # produce an acceptable value retries forever, saying goodbye each
         # time. See _MAX_SAVE_REJECTIONS.
         self._save_rejections: int = 0
+        # Every save a guard refused ON THE SPOT, with the caller turn that
+        # caused it. The counter above bounds the retry loop; this is the
+        # evidence, and it is what check_refusals.py reads to find the next
+        # probe gap without a person having to read a console log.
+        self.save_refusals: list[dict] = []
         # When the agent said the job was done while memory was still
         # empty. Checked by the watchdog once any tool call has landed.
         self._claimed_done_at: float = 0.0
@@ -440,6 +445,22 @@ class RealtimeSession:
         # transcribing. ONE-SHOT: the placeholder resolves within a turn either
         # way, and a guard that can refuse forever cannot end a call.
         self._escalation_held: bool = False
+        # Fields the volunteered-info guard has already spoken up about. One
+        # directive per field per call: a second copy of one the model ignored
+        # is context spent for nothing, the same rule the other nudges use.
+        self._volunteered_seen: set[str] = set()
+        # The caller offered to help and was told to spend it. One-shot, like
+        # the patient and identity nudges beside it.
+        self._offer_nudged: bool = False
+        # The agent said goodbye while nothing had ended the call. One-shot,
+        # and recorded: a guard that fires invisibly cannot be checked after.
+        self._farewell_nudged: bool = False
+        self.farewell_without_close: list[str] = []
+        # Answers the caller gave to questions nobody had asked, with the state
+        # they read as. Non-empty means the guard caught a field the ordinary
+        # path — which only ever looks at the question on the table — would
+        # have gone on to ask for again.
+        self.volunteered_answers: list[dict] = []
         # Closed-set saves accepted without their quote ever being checked,
         # because nothing on the call transcribed at all. `heard` on these is
         # the model's own string, and on call-20260825-1731 a model-authored
@@ -593,6 +614,37 @@ class RealtimeSession:
         """
         if 0.0 <= seconds < 30.0:
             self.reply_latencies.append(seconds)
+
+    def notes(self) -> dict:
+        """Everything note_info recorded, as {key: value}. {} when it wrote none.
+
+        WRITE-ONLY UNTIL 2026-08-27, and that is the whole reason this exists.
+        `note_info` did `memory.update(**{f"note_{key}": value})` and returned
+        ok — and nothing anywhere read a `note_` key back out. Not the artifact,
+        not doctors.json, not the summary. A tool that reports success and whose
+        output no downstream reader can see is the "acts and leaves no trace"
+        defect wearing a third hat.
+
+        call-20260827-1516 is the case. The caller said it was a bad time and
+        asked to be rung back; the agent got the window ("afternoon"), called
+        note_info TWICE to record it, and the call filed
+        `outcome: none, collected: []`. The one actionable thing the call
+        learned survived only as prose inside the transcript array, where
+        nothing can schedule anything from it.
+
+        The `note_` prefix is stripped, because it is namespacing for the memory
+        dict and noise to a reader. Fields may point at note_ keys (see
+        objectives.py), so a key that is ALSO a collected field still appears
+        here — the two views are of different things and neither is authoritative
+        over the other.
+        """
+        # snapshot(), not .items(): CallMemory is a store with a backend, not a
+        # dict, and reaching past its API is how a change of backend becomes a
+        # silent breakage here.
+        _snap = self.memory.snapshot() or {}
+        return {k[len("note_"):]: v
+                for k, v in sorted(_snap.items())
+                if k.startswith("note_") and v not in (None, "")}
 
     def collected_fields(self) -> dict:
         """Every field the objective declares, with what this call learned.
@@ -793,6 +845,13 @@ class RealtimeSession:
             # dict beside the columns that do exist — visible, and clearly not
             # pretending to be validated Doctor fields.
             "collected_fields": self.collected_fields(),
+            # Same reasoning as collected_fields directly above: the Doctor
+            # model has no column for a callback window or a referral URL, and
+            # inventing one here would put a second schema in the directory. It
+            # travels as a nested dict beside the columns that do exist. This is
+            # the row a person acts on, so a call whose only product was "ring
+            # back this afternoon" has to put it HERE, not only on the artifact.
+            "notes":            self.notes(),
         }
 
     def _write_doctor_directory(self, doctor_record: dict) -> None:
@@ -1086,6 +1145,15 @@ class RealtimeSession:
             # A rejection that only ever reached the console is a guard that
             # left no trace — the failure family this project keeps paying for.
             "branch_rejections": self.branch_rejections or None,
+            # Everything note_info recorded. On call-20260827-1516 this was the
+            # ONLY actionable thing the call learned — a callback window — and
+            # it reached no structured field at all.
+            "notes":          self.notes() or None,
+            # Refusals, with the words that caused them. See check_refusals.py.
+            "save_refusals":  self.save_refusals or None,
+            # Sign-offs spoken while no tool had ended the call. Non-empty
+            # means the agent tried to leave without writing a reason.
+            "farewell_without_close": self.farewell_without_close or None,
             # What `grounding` said while the call was still running, present
             # only when the finished transcript changed the answer. A verdict
             # that improves silently after the fact cannot be audited — this
@@ -1115,6 +1183,7 @@ class RealtimeSession:
             # they carried substance the spoken half did not. Non-empty here is
             # the mute declining to delete an answer.
             "released_second_items": self.released_second_items or None,
+            "volunteered_answers": self.volunteered_answers or None,
             # Substance the caller was owed and the recovery gave up on, with
             # the cap that stopped it. Non-null is always a defect on the call.
             "owed_abandoned": self.owed_abandoned or None,
