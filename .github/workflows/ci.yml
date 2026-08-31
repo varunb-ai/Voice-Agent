@@ -1,0 +1,98 @@
+# The discipline, made into a gate.
+#
+# Everything here already existed and was run by hand: the offline suite, the
+# pyright config, and the tracked-but-ignored audit documented in .gitignore.
+# Running them by hand is why "pyright 0/0" was once reported from a run that
+# had not included test_realtime_protocol.py — which held two real errors, one
+# of them a latent AttributeError that would have taken the whole suite down.
+# A gate cannot forget which paths it checked.
+#
+# NO API KEY, NO NETWORK, NO PHONE CALL. The suite drives complete scripted
+# calls against fake Twilio and OpenAI sockets. If anything here ever needs a
+# secret, it has stopped being the offline suite and that is the bug.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the development interpreter. The suite uses 3.12 syntax and
+          # the f-strings in it lean on PEP 701 nested quotes, so an older
+          # runner fails at parse time rather than on an assertion.
+          python-version: "3.12"
+          cache: pip
+
+      # THE GOLDEN PATH ONLY. requirements.txt still carries the legacy
+      # scaffolding (crawl4ai, playwright, langgraph, celery); none of it is on
+      # the realtime path and none of it is imported by the suite. Installing
+      # the subset keeps CI honest about what the live agent actually needs —
+      # if a real dependency is missing from this list, the suite says so here
+      # rather than on a phone call.
+      - name: Install the realtime path's dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            pydantic pydantic-settings python-dotenv httpx requests rich \
+            numpy scipy fastapi uvicorn websockets python-multipart twilio \
+            tiktoken openai soundfile
+
+      # ── The offline suite ────────────────────────────────────────────────
+      # Exit code 0 means every assertion passed. It prints its own PASS/FAIL
+      # lines, so the log is the report.
+      #
+      # PYTHONUTF8: the suite prints emoji in check names, and a runner with a
+      # non-UTF-8 default encoding dies on the first one.
+      - name: Offline protocol suite
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: python test_realtime_protocol.py
+
+      # ── Types ────────────────────────────────────────────────────────────
+      # EVERY path, named explicitly. The scoping mistake this gate exists to
+      # prevent was running pyright on agents/ and core/ and reporting the
+      # result as if it covered the repo.
+      - name: Pyright
+        run: npx --yes pyright test_realtime_protocol.py check_refusals.py agents core
+
+      # ── Repository hygiene ───────────────────────────────────────────────
+      # A tracked file that .gitignore also matches is living on borrowed time:
+      # git leaves already-tracked files alone, so it keeps working until
+      # somebody removes and re-adds it, then vanishes. This loop found
+      # data/calls.json (57 legacy call records, 56 with transcripts) still
+      # tracked under the data/ policy, and then found thirteen more — every
+      # file the negation block claimed to re-admit, because git will not
+      # descend into an excluded directory and the negations had never run.
+      #
+      # --no-index is load-bearing: without it git suppresses the match for
+      # exactly the files this is looking for, and the loop reports nothing.
+      - name: No tracked file is also ignored
+        run: |
+          trapped=$(for f in $(git ls-files); do
+            git check-ignore -q --no-index "$f" && echo "  $f"
+          done)
+          if [ -n "$trapped" ]; then
+            echo "Tracked AND ignored — these vanish the first time they are re-added:"
+            echo "$trapped"
+            exit 1
+          fi
+          echo "clean: index and ignore rules agree"
+
+      # Secrets have never been committed and the point is to keep it that way.
+      # Cheap, and it fails on the commit rather than after the push.
+      - name: No secrets in the index
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)\.env$|\.key$|\.pem$|\.p12$|credentials\.json$' || true)
+          if [ -n "$bad" ]; then
+            echo "Secret-shaped files are tracked:"; echo "$bad"; exit 1
+          fi
+          echo "clean: no secret-shaped paths tracked"

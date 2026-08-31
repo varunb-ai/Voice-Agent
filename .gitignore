@@ -82,10 +82,12 @@ data/*
 *.tmp.*
 
 # Suite output, when a run is redirected to a file in the repo root.
-# Caught by the tracked-but-ignored audit above: `git add -A` staged
-# 374 KB of console log as source.
-test_out.txt
-test_err.txt
+# `git add -A` staged 374 KB of console log as source once, then did it
+# again under a different prefix two commits later — so this is a shape,
+# not two filenames. Nothing in this repo legitimately ends _out.txt or
+# _err.txt; every one has been a redirected run.
+*_out.txt
+*_err.txt
 
 # ── Piper TTS voice models ───────────────────────────────────────────────────
 # ~345 MB of redistributable model weights, used only by the CLASSIC pipeline

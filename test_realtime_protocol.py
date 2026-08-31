@@ -7715,13 +7715,18 @@ async def main():
         _s._placeholder_at = time.monotonic()
         return _s
 
-    async def _land(sess, ws, text):
+    # NOT `_land`. A second function of that name lived here, 363 lines below
+    # the sync placeholder-swapping one, with a different signature — so every
+    # call after this point silently got THIS one whatever it meant. It worked
+    # only because nothing below wanted the other. pyright called it: "obscured
+    # by a declaration of the same name".
+    async def _land_via_handler(sess, ws, text):
         await rw._handle_caller_transcript(
             {"transcript": text}, sess, ws)
 
     # ── the flag is set, and nothing else is ────────────────────────────────
     _e1, _w1 = _end_sess(), _EndWS()
-    await _land(_e1, _w1, "Thank you bye. Cut the call.")
+    await _land_via_handler(_e1, _w1, "Thank you bye. Cut the call.")
     check(_e1.done is True, "a caller farewell sets sess.done",
           "the only flag that reaches the hangup branch")
     check(_e1.ended_by_caller and "cut the call" in _e1.ended_by_caller.lower(),
@@ -7740,7 +7745,7 @@ async def main():
 
     # ── an ordinary turn is untouched ──────────────────────────────────────
     _e2, _w2 = _end_sess(), _EndWS()
-    await _land(_e2, _w2, "Yes, a referral is always required.")
+    await _land_via_handler(_e2, _w2, "Yes, a referral is always required.")
     check(_e2.done is False and _e2.ended_by_caller is None,
           "an ordinary answer does not end the call",
           f"done={_e2.done} ended_by={_e2.ended_by_caller!r}")
@@ -7758,7 +7763,7 @@ async def main():
                           "args": {"status": "yes", "heard": "Yes, she is."},
                           "why": "held for evidence", "at": time.monotonic(),
                           "asked_turns": len(_e3.turns)}
-    await _land(_e3, _w3, "Yes, she is taking new patients. Okay bye.")
+    await _land_via_handler(_e3, _w3, "Yes, she is taking new patients. Okay bye.")
     check(_e3.memory.get("new_patient_status") == "yes",
           "the held save still lands on the turn that ends the call",
           f"{_e3.memory.get('new_patient_status')!r}")
@@ -10039,6 +10044,28 @@ async def main():
     check(len(_cr.audit_dict(_late)) == 1,
           "and the same refusal AFTER a question does flag",
           "the exemption is the missing question, not the field")
+    # THE CLOCK WRAPS AT MIDNIGHT. "HH:MM:SS" compares as a string, so a call
+    # opening at 23:59:30 and refusing at 00:00:05 reads every agent turn as
+    # NOT before the refusal: `before` comes back empty and the exemption
+    # swallows a real gap. The median call here is 79 seconds, so it takes one
+    # starting in the last minute of a day — rare, and the same shape as the
+    # no-transcript case, which is the argument for checking the ordering
+    # rather than trusting it.
+    _midnight = _call(
+        collected=["identity"],
+        transcript=[{"role": "agent", "text": "Hi, this is David...",
+                     "timestamp": "23:59:30"},
+                    {"role": "caller", "text": "Go ahead.", "timestamp": "23:59:50"},
+                    {"role": "agent", "text": "Is this Dr. Reyes?",
+                     "timestamp": "23:59:55"},
+                    {"role": "caller", "text": "Yeah, I did it.", "timestamp": "00:00:02"}],
+        save_refusals=[{"tool": "save_doctor_identity",
+                        "args": {"identity": "confirmed"},
+                        "why": "nothing the caller said reads as that answer",
+                        "heard": "Yeah, I did it.", "at": "00:00:05"}])
+    check(len(_cr.audit_dict(_midnight)) == 1,
+          "a refusal after midnight is still judged, not exempted by the wrap",
+          "two agent turns preceded it; string order says none did")
 
     # AGAINST THE REAL CORPUS: it must find the two gaps fixed by hand today,
     # and nothing else. A scan with false positives is one that gets ignored.
@@ -10179,8 +10206,15 @@ async def main():
         _t = _ast.parse(_files[_mod].read_text(encoding="utf-8"))
         _av = next((_n for _n in _t.body if isinstance(_n, _ast.Assign)
                     and any(getattr(_x, "id", "") == "__all__" for _x in _n.targets)), None)
-        _listed = set() if _av is None else {_e.value for _e in _av.value.elts
-                                             if isinstance(_e, _ast.Constant)}
+        # `.elts` EXISTS ONLY ON A LIST/TUPLE/SET LITERAL, and reading it off a
+        # bare `expr` is a real bug as well as a type error: a module writing
+        # `__all__ = sorted(...)` or `__all__ = _BASE + [...]` raises
+        # AttributeError here and takes the whole suite down with it. Anything
+        # this cannot read is treated as EMPTY, which reports every
+        # cross-module name in that module as undeclared — loud, and in the
+        # safe direction for a check about declared surface.
+        _elts = getattr(_av.value, "elts", []) if _av is not None else []
+        _listed = {_e.value for _e in _elts if isinstance(_e, _ast.Constant)}
         if _priv - _listed:
             _undeclared[_mod] = sorted(_priv - _listed)
     check(not _undeclared,

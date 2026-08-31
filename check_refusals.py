@@ -230,6 +230,22 @@ def _before_any_question(call: dict, r: dict) -> bool:
     turns = call.get("transcript") or []
     if not turns:
         return False
+    # THE CLOCK IS "HH:MM:SS" AND IT WRAPS. Comparing those as strings is only
+    # meaningful while the call stays inside one day: a call opening at
+    # 23:59:30 and refusing at 00:00:05 compares every agent turn as NOT
+    # before the refusal, `before` comes back empty, and the exemption
+    # swallows a real gap. Rare — the median call here is 79 seconds, so it
+    # needs one starting in the last minute of a day — and exactly the shape
+    # already fixed one line up: the count is trustworthy only when the
+    # timestamps can be ordered at all.
+    #
+    # So the ordering is CHECKED rather than assumed. Non-monotonic stamps, or
+    # a refusal that appears to precede the call's own first turn, mean the
+    # sequence cannot be read; say nothing and let the finding stand, which is
+    # the safe direction for a scan whose whole job is finding gaps.
+    stamps = [t.get("timestamp") or "" for t in turns]
+    if at < stamps[0] or any(a > b for a, b in zip(stamps, stamps[1:])):
+        return False
     before = [t for t in turns
               if t.get("role") == "agent" and (t.get("timestamp") or "") < at]
     return len(before) <= 1
