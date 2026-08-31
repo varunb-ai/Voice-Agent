@@ -818,67 +818,19 @@ class _ToolOutcome(NamedTuple):
     pending_response_create: Optional[bool]
     stop: bool
 
-async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
-                            _pending_tools: dict,
-                            _response_had_audio: bool) -> _ToolOutcome:
-    """Run one tool call and its guards. Extracted from _oai_to_twilio.
-
-    Pyright refused to analyse that function at all —
-
-        Code is too complex to analyze; reduce complexity by refactoring
-        into subroutines or reducing conditional code paths
-
-    — and when it gives up it can no longer prove any local inside is read, so
-    the editor greyed out ~60 names as unused and stopped seeing the calls the
-    function makes. Raising maxCodeComplexity does NOT help; the ceiling is
-    not the binding constraint. The only fix is the one the message names.
-
-    That mattered beyond the noise. Every recurring bug this week lived in
-    that unanalysed function: the barge-in pre-audio race, the six
-    response.create sites, the five-clause dead-air condition, the audio_rms
-    overwrite, and a dead assignment. Most bugs, least tooling.
-
-    This handler is the largest self-contained piece — 290 lines, 34 branch
-    points, a quarter of the function's total — and its coupling to the loop
-    is three flags and one `continue`, which is why it goes first.
+def _guard_save_branch(name: str, args: dict,
+                       sess: "RealtimeSession") -> dict:
     """
-    _agent_text_buf: Optional[str] = None
-    _closing_sent: Optional[bool] = None
-    _pending_response_create: Optional[bool] = None
-    call_id  = msg.get("call_id", "")
-    name     = msg.get("name", "")
-    args_str = msg.get("arguments") or _pending_tools.get(call_id, {}).get("args", "{}")
-    try:
-        args = json.loads(args_str)
-    except json.JSONDecodeError:
-        args = {}
+    Run save_branch behind the location guards, and say what came of it.
 
-    # t2 — the tool call is here.
-    if sess._stage is not None and "t2" not in sess._stage:
-        sess._stage["t2"] = time.monotonic()
-        sess._stage["tool"] = name
+    PURE APART FROM `sess`. It reads the transcript and writes the session's
+    own records — branch_rejections, the deferred save, the nudge flags — and
+    it touches neither the socket nor the call's lifecycle. That is what makes
+    it liftable: the dispatcher keeps every await, so the order in which
+    things reach OpenAI is unchanged by the move.
 
-    # THERE WAS A BLOCKING WAIT HERE, and it is gone. Every guard below asks
-    # what the caller said, and the model reached this line from audio the
-    # transcript has not necessarily caught up with — so this used to hold the
-    # whole handler up to 1.5s for the words. Measured over 119 artifacts it
-    # never once returned early (14 waits, 12 timeouts, 0 landed) and cost
-    # 1.5s a time; the deferral below does the same job on the transcript event
-    # itself, which is where the evidence actually appears. See the comment
-    # above _transcript_pending for the distribution that settled it.
-
-    # What the call had collected BEFORE this tool ran, so the no-progress
-    # ceiling can be reset by progress rather than by a guess about which tool
-    # constitutes progress. save_branch is not the only way a field arrives —
-    # a template may point a field at a note_* key — and hard-coding the tool
-    # name here is how the success condition ended up inside save_branch in the
-    # first place.
-    #
-    # (name, VALUE) pairs, not names — see _collected_pairs. A field that is
-    # overwritten with a different state is progress this set has to be able to
-    # see, and until 2026-08-31 it could not.
-    _collected_before = _collected_pairs(sess)
-
+    Returns the tool result the dispatcher goes on to report, defer or refuse.
+    """
     # Grounding check. On a live call the model called save_branch
     # with {'branch': 'Riverside Clinic', 'city': 'Atlanta'} when
     # the caller had said only "Hello" and "Okay, next slide,
@@ -888,290 +840,331 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     #
     # So a location may only be saved if the caller actually said
     # it. Verified against the transcript, not the model's claim.
-    if name == "save_branch":
-        # The check switches itself off when nothing was
-        # transcribed — correct, since absence of transcript is not
-        # evidence of fabrication and blocking would kill genuine
-        # saves on a bad line. But that is exactly the condition
-        # that produces fabrications: bad line -> no transcript ->
-        # guard off -> a location the model may have inferred gets
-        # written as fact. And with the out-of-band whisper
-        # fallback removed there is no second path to a transcript.
+    # The check switches itself off when nothing was
+    # transcribed — correct, since absence of transcript is not
+    # evidence of fabrication and blocking would kill genuine
+    # saves on a bad line. But that is exactly the condition
+    # that produces fabrications: bad line -> no transcript ->
+    # guard off -> a location the model may have inferred gets
+    # written as fact. And with the out-of-band whisper
+    # fallback removed there is no second path to a transcript.
+    #
+    # So record it. A save that could not be verified must not
+    # be indistinguishable downstream from one that was.
+    # THE CALLER ANSWERED. Whatever happens to the value below, the model
+    # only reaches here because it believed it heard a place — so the ask
+    # budget, which exists to stop the agent pestering someone who will not
+    # engage, has no business counting this call against them.
+    #
+    # It did, and it cost call-20260821-1931. The caller said "Mission Bay
+    # Clinic, 1825 4th Street"; the live transcript mangled it to "Ford
+    # Street"; grounding rejected the model's correct reading of it; the
+    # agent asked again, that re-ask hit the 4-ask limit, and the give-up
+    # directive fired. The caller then repeated the address cleanly — and
+    # _ungrounded_terms passes on that transcript, verified — but the agent
+    # had already been told to stop, so it said goodbye instead of
+    # retrying. The recovery path existed and the budget closed it.
+    #
+    # Safe because the two budgets measure different things and only this
+    # one is being reset: a model that keeps offering bad values is still
+    # bounded by _MAX_SAVE_REJECTIONS, which counts up while this counts
+    # down. Charging a rejected save to both is double jeopardy, and the
+    # person paying it is the caller who answered.
+    if str(args.get("branch") or "").strip():
+        sess.reset_ask_budget("caller named a place")
+    heard_any = any(t.role == "caller" and t.text.strip() != "[...]"
+                    for t in sess.turns)
+    # QUALIFIED, not just asserted. Grounding accepts on one content word,
+    # so "verified against caller transcript" was being stamped on values
+    # whose distinctive part nobody was heard to say — see _rode_along.
+    _rode = _rode_along(args, sess)
+    sess.memory.update(grounding=_grounding_verdict(
+        _rode, heard_any, getattr(sess, "branch_rejections", ())))
+    if _rode:
+        sess.memory.update(rode_along=_rode)
+        print(f"[Realtime] ⚠️  grounded on other words — "
+              f"{', '.join(repr(w) for w in _rode)} never appeared in the "
+              f"caller transcript", flush=True)
+    ungrounded = _ungrounded_terms(args, sess)
+    # FIRST, because it is the only gate that can see this one. A bare
+    # hint word passes grounding (it is in the transcript), passes the
+    # address check, and passes the organisation check — all three were
+    # measured false on call-20260821-1705 while "Suite" sat in args.
+    _val = str(args.get("branch") or "")
+    if _is_bare_hint_word(_val, getattr(sess, "transcribe_hint", "") or ""):
+        sess.memory.update(untrusted_location=_val)
+        result = {
+            "ok": False,
+            "error": (
+                f"NOT SAVED — {_val!r} is one generic location word, not "
+                f"the name of a place | LIKELY a transcription artifact "
+                f"on a turn that carried no speech "
+                f"| NEED: the site name in full, as they said it"
+            ),
+        }
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"🎣 HINT ECHO BLOCKED: {_val!r} came from our own "
+              f"transcription prompt", flush=True)
+    elif ungrounded and _transcript_pending(sess):
+        # ── THE WORDS ARE STILL IN FLIGHT ───────────────────────────
+        # The same hold the choice fields have had since 2026-08-26,
+        # which this path was missed out of. call-20260827-0942 is what
+        # that omission costs, twice on one call:
         #
-        # So record it. A save that could not be verified must not
-        # be indistinguishable downstream from one that was.
-        # THE CALLER ANSWERED. Whatever happens to the value below, the model
-        # only reaches here because it believed it heard a place — so the ask
-        # budget, which exists to stop the agent pestering someone who will not
-        # engage, has no business counting this call against them.
+        #   waited 1.50s for the transcript and it never came
+        #   BLOCKED {"branch": "Riverside campus"}
+        #   CALLER : He works out at Riverside Campus.   <- one line later
         #
-        # It did, and it cost call-20260821-1931. The caller said "Mission Bay
-        # Clinic, 1825 4th Street"; the live transcript mangled it to "Ford
-        # Street"; grounding rejected the model's correct reading of it; the
-        # agent asked again, that re-ask hit the 4-ask limit, and the give-up
-        # directive fired. The caller then repeated the address cleanly — and
-        # _ungrounded_terms passes on that transcript, verified — but the agent
-        # had already been told to stop, so it said goodbye instead of
-        # retrying. The recovery path existed and the budget closed it.
+        #   waited 1.50s ... never came
+        #   BLOCKED {"branch": "Riverside campus, 1477 10th Street"}
+        #           (numbers 10, 1477 not in what the caller said)
+        #   CALLER : I think it's 1477 10th Street.      <- one line later
         #
-        # Safe because the two budgets measure different things and only this
-        # one is being reset: a model that keeps offering bad values is still
-        # bounded by _MAX_SAVE_REJECTIONS, which counts up while this counts
-        # down. Charging a rejected save to both is double jeopardy, and the
-        # person paying it is the caller who answered.
-        if str(args.get("branch") or "").strip():
-            sess.reset_ask_budget("caller named a place")
-        heard_any = any(t.role == "caller" and t.text.strip() != "[...]"
-                        for t in sess.turns)
-        # QUALIFIED, not just asserted. Grounding accepts on one content word,
-        # so "verified against caller transcript" was being stamped on values
-        # whose distinctive part nobody was heard to say — see _rode_along.
-        _rode = _rode_along(args, sess)
-        sess.memory.update(grounding=_grounding_verdict(
-            _rode, heard_any, getattr(sess, "branch_rejections", ())))
-        if _rode:
-            sess.memory.update(rode_along=_rode)
-            print(f"[Realtime] ⚠️  grounded on other words — "
-                  f"{', '.join(repr(w) for w in _rode)} never appeared in the "
-                  f"caller transcript", flush=True)
-        ungrounded = _ungrounded_terms(args, sess)
-        # FIRST, because it is the only gate that can see this one. A bare
-        # hint word passes grounding (it is in the transcript), passes the
-        # address check, and passes the organisation check — all three were
-        # measured false on call-20260821-1705 while "Suite" sat in args.
-        _val = str(args.get("branch") or "")
-        if _is_bare_hint_word(_val, getattr(sess, "transcribe_hint", "") or ""):
-            sess.memory.update(untrusted_location=_val)
-            result = {
-                "ok": False,
-                "error": (
-                    f"NOT SAVED — {_val!r} is one generic location word, not "
-                    f"the name of a place | LIKELY a transcription artifact "
-                    f"on a turn that carried no speech "
-                    f"| NEED: the site name in full, as they said it"
-                ),
-            }
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"🎣 HINT ECHO BLOCKED: {_val!r} came from our own "
-                  f"transcription prompt", flush=True)
-        elif ungrounded and _transcript_pending(sess):
-            # ── THE WORDS ARE STILL IN FLIGHT ───────────────────────────
-            # The same hold the choice fields have had since 2026-08-26,
-            # which this path was missed out of. call-20260827-0942 is what
-            # that omission costs, twice on one call:
-            #
-            #   waited 1.50s for the transcript and it never came
-            #   BLOCKED {"branch": "Riverside campus"}
-            #   CALLER : He works out at Riverside Campus.   <- one line later
-            #
-            #   waited 1.50s ... never came
-            #   BLOCKED {"branch": "Riverside campus, 1477 10th Street"}
-            #           (numbers 10, 1477 not in what the caller said)
-            #   CALLER : I think it's 1477 10th Street.      <- one line later
-            #
-            # The caller heard the question a third time and said "Oh, no,
-            # that's the specific address. I already told that." Then
-            # escalate was refused - correctly - because the discard guard
-            # could see they HAD given a location. Every guard was right on
-            # its own terms and the call still ended with branch = null.
-            #
-            # Nothing is written here. _resolve_deferred_save re-runs
-            # _ungrounded_terms against the real words the moment they land.
-            sess._deferred_save = {
-                "name": name, "args": dict(args),
-                "why": ungrounded, "at": time.monotonic(),
-                "asked_turns": len(sess.turns),
-            }
-            result = {"ok": True, "pending": True, "note": (
-                "Held — their words are still being transcribed and this will "
-                "be checked against them. Do not ask again and do not apologise; "
-                "carry on.")}
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"⏸️  BRANCH HELD FOR EVIDENCE: {args}", flush=True)
-            print(f"          the transcript for that turn is still in flight "
-                  f"— judging it when it lands, not now", flush=True)
-        elif ungrounded:
-            # Terse fragment, not an English imperative. The old
-            # wording ("Never save a location you were not told.
-            # Ask them for it...") was fluent prose, so relaying it
-            # produced a grammatical sentence — and on
-            # call-20260818-1112 the agent said, out loud, "Sorry,
-            # I can't use that unless you've actually said the
-            # place name" to a caller who HAD just said one.
-            #
-            # RE-READ comes first because that is the actual fix
-            # nine times in ten: the caller said "office Abadan
-            # branch" and the model tried to save "Northside
-            # Branch", reshaped from the hospital name on its own
-            # record. The answer was already on the call. Telling
-            # it to ask is what sent that call to escalation with
-            # the location sitting in the transcript.
-            # SAY WHICH PART IS WRONG. _ungrounded_terms has always computed a
-            # specific reason — which field, which value, which number — and
-            # this site discarded it and sent a generic line instead. Same
-            # shape as 5aed263, where the failure reason was in every event and
-            # was thrown away: the diagnosis existed and never reached anyone.
-            #
-            # It cost a real call. On call-20260820-1321 two rejections in a
-            # row said only "NEED: wording the caller used out loud", so the
-            # model could not tell that its NUMBER was the problem — and "out
-            # loud" reads as "as spoken", which is an active nudge toward
-            # spelling digits into words. It did exactly that on the third try
-            # and bypassed the digit guard entirely.
-            #
-            # The reason text is built terse and non-speakable for the same
-            # reason the rest of these are: it is machinery, and on
-            # call-20260818-1112 the agent read one of these out to a caller.
-            result = {
-                "ok": False,
-                "error": (
-                    f"REJECTED — {ungrounded} "
-                    f"| RE-READ: caller turns, verbatim; a valid "
-                    f"location is often already among them "
-                    f"| NEED: their own words, any number in digits"
-                ),
-            }
-            # DURABLE, not just printed. This project's recurring defect is
-            # a guard that acts and leaves no trace, and this was the last
-            # branch guard still failing that way: on call-20260827-1010 the
-            # block appears nowhere in the artifact — "HALLUCINAT", "REJECTED"
-            # and "blocked" all score 0 against the JSON — while doctors.json
-            # carries status="verified". Whoever reads that row later cannot
-            # tell it from a clean one, which is the whole point of the row.
-            sess.branch_rejections.append({
-                "value": str(args.get("branch") or ""),
-                "why": ungrounded,
-                "at": datetime.now().strftime("%H:%M:%S"),
-            })
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"🚫 HALLUCINATED BRANCH BLOCKED: {args}", flush=True)
-        elif (_dropped := _address_dropped(args, sess)) and not sess._address_nudged:
-            # ONE-SHOT. The value being saved is CORRECT, only less complete
-            # than what they said, so this must never be able to stop the call
-            # finishing — a true-but-thin record beats no record at all.
-            #
-            # The rejection points at the transcript rather than at the caller:
-            # they already supplied it, and a wording that sends the agent back
-            # to ask again is how call-20260818-1112 lost an answer that was
-            # already on the call.
-            sess._address_nudged = True
-            sess.memory.update(address_offered=_dropped)
-            result = {"ok": False, "error": (
-                f"NOT SAVED — a street address was given and this value omits "
-                f"it | THEY SAID: {_dropped!r} | RETRY: save_branch with both, "
-                f"comma-separated | ALREADY SUPPLIED, nothing further needed "
-                f"from them")}
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"📍 ADDRESS DROPPED — they gave {_dropped!r}; asking for it "
-                  f"to be saved too", flush=True)
-        elif (mismatch := hospital_mismatch(sess)):
-            # Every word can be genuinely quoted from the caller and
-            # the record still be wrong, because the call reached
-            # the wrong organisation. Grounding cannot see this.
-            sess.memory.update(hospital_mismatch=mismatch)
-            result = {
-                "ok": False,
-                "error": (
-                    f"NOT SAVED — wrong organisation: {mismatch} "
-                    f"| NEED: which place this call actually reached"
-                ),
-            }
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"🏥 WRONG ORGANISATION: {mismatch}", flush=True)
-        else:
-            result = run_tool(name, sess.memory, args, sess.objective)
-    elif name in _CHOICE_SAVE_TOOLS:
+        # The caller heard the question a third time and said "Oh, no,
+        # that's the specific address. I already told that." Then
+        # escalate was refused - correctly - because the discard guard
+        # could see they HAD given a location. Every guard was right on
+        # its own terms and the call still ended with branch = null.
+        #
+        # Nothing is written here. _resolve_deferred_save re-runs
+        # _ungrounded_terms against the real words the moment they land.
+        sess._deferred_save = {
+            "name": name, "args": dict(args),
+            "why": ungrounded, "at": time.monotonic(),
+            "asked_turns": len(sess.turns),
+        }
+        result = {"ok": True, "pending": True, "note": (
+            "Held — their words are still being transcribed and this will "
+            "be checked against them. Do not ask again and do not apologise; "
+            "carry on.")}
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"⏸️  BRANCH HELD FOR EVIDENCE: {args}", flush=True)
+        print(f"          the transcript for that turn is still in flight "
+              f"— judging it when it lands, not now", flush=True)
+    elif ungrounded:
+        # Terse fragment, not an English imperative. The old
+        # wording ("Never save a location you were not told.
+        # Ask them for it...") was fluent prose, so relaying it
+        # produced a grammatical sentence — and on
+        # call-20260818-1112 the agent said, out loud, "Sorry,
+        # I can't use that unless you've actually said the
+        # place name" to a caller who HAD just said one.
+        #
+        # RE-READ comes first because that is the actual fix
+        # nine times in ten: the caller said "office Abadan
+        # branch" and the model tried to save "Northside
+        # Branch", reshaped from the hospital name on its own
+        # record. The answer was already on the call. Telling
+        # it to ask is what sent that call to escalation with
+        # the location sitting in the transcript.
+        # SAY WHICH PART IS WRONG. _ungrounded_terms has always computed a
+        # specific reason — which field, which value, which number — and
+        # this site discarded it and sent a generic line instead. Same
+        # shape as 5aed263, where the failure reason was in every event and
+        # was thrown away: the diagnosis existed and never reached anyone.
+        #
+        # It cost a real call. On call-20260820-1321 two rejections in a
+        # row said only "NEED: wording the caller used out loud", so the
+        # model could not tell that its NUMBER was the problem — and "out
+        # loud" reads as "as spoken", which is an active nudge toward
+        # spelling digits into words. It did exactly that on the third try
+        # and bypassed the digit guard entirely.
+        #
+        # The reason text is built terse and non-speakable for the same
+        # reason the rest of these are: it is machinery, and on
+        # call-20260818-1112 the agent read one of these out to a caller.
+        result = {
+            "ok": False,
+            "error": (
+                f"REJECTED — {ungrounded} "
+                f"| RE-READ: caller turns, verbatim; a valid "
+                f"location is often already among them "
+                f"| NEED: their own words, any number in digits"
+            ),
+        }
+        # DURABLE, not just printed. This project's recurring defect is
+        # a guard that acts and leaves no trace, and this was the last
+        # branch guard still failing that way: on call-20260827-1010 the
+        # block appears nowhere in the artifact — "HALLUCINAT", "REJECTED"
+        # and "blocked" all score 0 against the JSON — while doctors.json
+        # carries status="verified". Whoever reads that row later cannot
+        # tell it from a clean one, which is the whole point of the row.
+        sess.branch_rejections.append({
+            "value": str(args.get("branch") or ""),
+            "why": ungrounded,
+            "at": datetime.now().strftime("%H:%M:%S"),
+        })
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"🚫 HALLUCINATED BRANCH BLOCKED: {args}", flush=True)
+    elif (_dropped := _address_dropped(args, sess)) and not sess._address_nudged:
+        # ONE-SHOT. The value being saved is CORRECT, only less complete
+        # than what they said, so this must never be able to stop the call
+        # finishing — a true-but-thin record beats no record at all.
+        #
+        # The rejection points at the transcript rather than at the caller:
+        # they already supplied it, and a wording that sends the agent back
+        # to ask again is how call-20260818-1112 lost an answer that was
+        # already on the call.
+        sess._address_nudged = True
+        sess.memory.update(address_offered=_dropped)
+        result = {"ok": False, "error": (
+            f"NOT SAVED — a street address was given and this value omits "
+            f"it | THEY SAID: {_dropped!r} | RETRY: save_branch with both, "
+            f"comma-separated | ALREADY SUPPLIED, nothing further needed "
+            f"from them")}
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"📍 ADDRESS DROPPED — they gave {_dropped!r}; asking for it "
+              f"to be saved too", flush=True)
+    elif (mismatch := hospital_mismatch(sess)):
+        # Every word can be genuinely quoted from the caller and
+        # the record still be wrong, because the call reached
+        # the wrong organisation. Grounding cannot see this.
+        sess.memory.update(hospital_mismatch=mismatch)
+        result = {
+            "ok": False,
+            "error": (
+                f"NOT SAVED — wrong organisation: {mismatch} "
+                f"| NEED: which place this call actually reached"
+            ),
+        }
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"🏥 WRONG ORGANISATION: {mismatch}", flush=True)
+    else:
+        result = run_tool(name, sess.memory, args, sess.objective)
+    return result
+
+
+def _guard_choice_save(name: str, args: dict,
+                       sess: "RealtimeSession") -> dict:
+    """
+    Run one of the four CHOICE saves behind its own grounding guard.
+
+    ONE FUNCTION FOR FOUR TOOLS, because the only thing that differs
+    between them is the row in _CHOICE_SAVE_TOOLS: the argument the value
+    arrives in, the guard that judges it, the phrasing of what is needed,
+    and the memory key a refusal is recorded under. Everything else -
+    the budget reset, the deferral, the refusal record - is identical, and
+    four copies of it is four chances for one to drift.
+
+    Same contract as _guard_save_branch: reads the transcript, writes the
+    session's own records, touches neither the socket nor the lifecycle.
+    """
         # THE CALLER ANSWERED, whatever becomes of the value — same reasoning as
         # the save_branch reset above. The model only reaches here because it
         # believed it heard a state, so the budget that exists to stop the agent
         # pestering someone who will not engage has no business counting it.
-        _arg, _guard, _need, _gkey = _CHOICE_SAVE_TOOLS[name]
-        if str(args.get(_arg) or "").strip():
-            sess.reset_ask_budget(f"caller answered: {name}")
-        ungrounded_choice = _guard(args, sess)
-        # ── THE EVIDENCE HAS NOT ARRIVED YET IS NOT THE SAME AS THE EVIDENCE
-        #    CONTRADICTS YOU, and until now both ended in the same refusal.
-        #
-        # call-20260826-1422: six saves, six waits, six timeouts, zero landed.
-        # Every rejection was followed within the same second by the caller
-        # transcript containing the answer. "nothing has been transcribed since
-        # you asked" was true when asked and false a heartbeat later.
-        #
-        # The old comment on this path argued the cost of refusing was "one
-        # more turn: the model saves again when the transcript lands". That is
-        # not what the model did. It apologised — "I'm just making sure I heard
-        # you clearly, since phone audio can clip a bit" — and re-asked a
-        # question already answered, twice, on a 151s happy path.
-        #
-        # So when the guard objects and the words are STILL IN FLIGHT, hold the
-        # decision instead of taking it. Nothing is saved here. The same guard
-        # runs again the instant the transcript lands, against the real words.
-        # If they never land, nothing is ever written — which is the behaviour
-        # this branch has always had, reached by waiting rather than by
-        # guessing.
-        if ungrounded_choice and _transcript_pending(sess):
-            sess._deferred_save = {
-                "name": name, "args": dict(args),
-                "why": ungrounded_choice, "at": time.monotonic(),
-                "asked_turns": len(sess.turns),
-            }
-            # ok=True with nothing written is deliberate and it is the whole
-            # point. ok=False is what produced the apology and the re-ask; the
-            # model needs to hear "this is in hand, carry on", and the promise
-            # is kept by _resolve_deferred_save, which will inject a correction
-            # if the words do not bear it out.
-            result = {"ok": True, "pending": True, "note": (
-                "Held — their words are still being transcribed and this will "
-                "be checked against them. Do not ask again and do not apologise; "
-                "carry on.")}
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"⏸️  HELD FOR EVIDENCE: {name}({args})", flush=True)
-            print(f"          the transcript for that turn is still in flight "
-                  f"— judging it when it lands, not now", flush=True)
-        elif ungrounded_choice:
-            sess.memory.update(**{_gkey: f"BLOCKED — {ungrounded_choice}"})
-            # Terse fragments, no fluent imperative. A rejection the model can
-            # paraphrase into a grammatical sentence is a rejection it will read
-            # out loud — see _reject's docstring in tools.py, which exists
-            # because a live call relayed one to a receptionist verbatim.
-            # RE-READ REACHES ALL FIVE FIELDS NOW, not just the branch.
-            # save_branch has carried this fragment since call-20260820-1321,
-            # where two bare rejections left the model unable to tell WHAT was
-            # wrong and it rephrased into a worse answer. The four choice
-            # fields never had it — they got the reason and nothing about where
-            # to look — and the prompt was carrying the difference in prose
-            # ("RE-READ WHAT THEY ACTUALLY SAID BEFORE YOU ASK AGAIN") for all
-            # five. This is a tool result, not the cached prefix, so unifying
-            # it costs nothing against the prompt ceiling and lets that prose
-            # go: the instruction now arrives at the moment it applies, on the
-            # field it applies to.
-            result = {"ok": False, "error": (
-                f"NOT SAVED — {ungrounded_choice} "
-                f"| RE-READ: their turns, verbatim; the answer is often "
-                f"already among them "
-                f"| NEED: {_need}")}
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"🚫 UNGROUNDED ANSWER BLOCKED: {name}({args})", flush=True)
-        else:
-            sess.memory.update(**{_gkey: "verified against caller transcript"})
-            # THE QUALIFIER IS DROPPED, NOT THE SAVE. The status is grounded and
-            # worth recording; a summary carrying a word nobody said is not, and
-            # refusing the whole call over it would throw away a verified answer
-            # to protect a footnote. Recorded either way — a field silently
-            # emptied is the same invisibility the fabricated version had.
-            for _dkey in ("detail", "depends_on"):
-                _was = args.get(_dkey)
-                _bad, _what = _strip_ungrounded_detail(args, sess, _dkey)
-                if _bad:
-                    sess.memory.update(**{
-                        f"{_gkey}_{_dkey}_as_written": _was,
-                        f"{_gkey}_dropped_words": list(_bad)})
-                    print(f"[Realtime] ⚠️  {_dkey}: "
-                          f"{', '.join(repr(w) for w in _bad)} never "
-                          f"appeared in the caller transcript — {_what}",
-                          flush=True)
-            result = run_tool(name, sess.memory, args, sess.objective)
-    elif name == "escalate":
+    _arg, _guard, _need, _gkey = _CHOICE_SAVE_TOOLS[name]
+    if str(args.get(_arg) or "").strip():
+        sess.reset_ask_budget(f"caller answered: {name}")
+    ungrounded_choice = _guard(args, sess)
+    # ── THE EVIDENCE HAS NOT ARRIVED YET IS NOT THE SAME AS THE EVIDENCE
+    #    CONTRADICTS YOU, and until now both ended in the same refusal.
+    #
+    # call-20260826-1422: six saves, six waits, six timeouts, zero landed.
+    # Every rejection was followed within the same second by the caller
+    # transcript containing the answer. "nothing has been transcribed since
+    # you asked" was true when asked and false a heartbeat later.
+    #
+    # The old comment on this path argued the cost of refusing was "one
+    # more turn: the model saves again when the transcript lands". That is
+    # not what the model did. It apologised — "I'm just making sure I heard
+    # you clearly, since phone audio can clip a bit" — and re-asked a
+    # question already answered, twice, on a 151s happy path.
+    #
+    # So when the guard objects and the words are STILL IN FLIGHT, hold the
+    # decision instead of taking it. Nothing is saved here. The same guard
+    # runs again the instant the transcript lands, against the real words.
+    # If they never land, nothing is ever written — which is the behaviour
+    # this branch has always had, reached by waiting rather than by
+    # guessing.
+    if ungrounded_choice and _transcript_pending(sess):
+        sess._deferred_save = {
+            "name": name, "args": dict(args),
+            "why": ungrounded_choice, "at": time.monotonic(),
+            "asked_turns": len(sess.turns),
+        }
+        # ok=True with nothing written is deliberate and it is the whole
+        # point. ok=False is what produced the apology and the re-ask; the
+        # model needs to hear "this is in hand, carry on", and the promise
+        # is kept by _resolve_deferred_save, which will inject a correction
+        # if the words do not bear it out.
+        result = {"ok": True, "pending": True, "note": (
+            "Held — their words are still being transcribed and this will "
+            "be checked against them. Do not ask again and do not apologise; "
+            "carry on.")}
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"⏸️  HELD FOR EVIDENCE: {name}({args})", flush=True)
+        print(f"          the transcript for that turn is still in flight "
+              f"— judging it when it lands, not now", flush=True)
+    elif ungrounded_choice:
+        sess.memory.update(**{_gkey: f"BLOCKED — {ungrounded_choice}"})
+        # Terse fragments, no fluent imperative. A rejection the model can
+        # paraphrase into a grammatical sentence is a rejection it will read
+        # out loud — see _reject's docstring in tools.py, which exists
+        # because a live call relayed one to a receptionist verbatim.
+        # RE-READ REACHES ALL FIVE FIELDS NOW, not just the branch.
+        # save_branch has carried this fragment since call-20260820-1321,
+        # where two bare rejections left the model unable to tell WHAT was
+        # wrong and it rephrased into a worse answer. The four choice
+        # fields never had it — they got the reason and nothing about where
+        # to look — and the prompt was carrying the difference in prose
+        # ("RE-READ WHAT THEY ACTUALLY SAID BEFORE YOU ASK AGAIN") for all
+        # five. This is a tool result, not the cached prefix, so unifying
+        # it costs nothing against the prompt ceiling and lets that prose
+        # go: the instruction now arrives at the moment it applies, on the
+        # field it applies to.
+        result = {"ok": False, "error": (
+            f"NOT SAVED — {ungrounded_choice} "
+            f"| RE-READ: their turns, verbatim; the answer is often "
+            f"already among them "
+            f"| NEED: {_need}")}
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"🚫 UNGROUNDED ANSWER BLOCKED: {name}({args})", flush=True)
+    else:
+        sess.memory.update(**{_gkey: "verified against caller transcript"})
+        # THE QUALIFIER IS DROPPED, NOT THE SAVE. The status is grounded and
+        # worth recording; a summary carrying a word nobody said is not, and
+        # refusing the whole call over it would throw away a verified answer
+        # to protect a footnote. Recorded either way — a field silently
+        # emptied is the same invisibility the fabricated version had.
+        for _dkey in ("detail", "depends_on"):
+            _was = args.get(_dkey)
+            _bad, _what = _strip_ungrounded_detail(args, sess, _dkey)
+            if _bad:
+                sess.memory.update(**{
+                    f"{_gkey}_{_dkey}_as_written": _was,
+                    f"{_gkey}_dropped_words": list(_bad)})
+                print(f"[Realtime] ⚠️  {_dkey}: "
+                      f"{', '.join(repr(w) for w in _bad)} never "
+                      f"appeared in the caller transcript — {_what}",
+                      flush=True)
+        result = run_tool(name, sess.memory, args, sess.objective)
+    return result
+
+
+async def _guard_escalate(name: str, args: dict,
+                          sess: "RealtimeSession", oai_ws,
+                          call_id: str,
+                          _pending_tools: dict) -> tuple[dict, bool]:
+    """
+    Decide whether the call may be given up on, and on what stated reason.
+
+    THE ONE BRANCH THAT IS NOT PURE, which is why it takes the socket and
+    the pending-tool table when its three siblings take neither. A blocked
+    escalation does not merely produce a refusal: it ANSWERS the tool call
+    on the spot, sends the model a nudge saying what to do instead, and
+    ends the handler early — because everything after it in the dispatcher
+    reports and acts on an escalation that is not going to happen.
+
+    So it returns (result, stop). `stop` True means the tool call has
+    already been answered here and the dispatcher must return immediately;
+    False means the ordinary path continues with `result`.
+
+    A tuple rather than an exception, and rather than the _ToolOutcome the
+    old inline code built: the outcome carries three of the dispatcher's
+    own locals, and handing those out so a branch can rebuild them is how
+    a function that was supposed to be liftable acquires a second job.
+    """
         # Clearing sess._give_up_sent stops us RE-SENDING the
         # directive; it cannot unsay it. Once injected, the model has
         # "stop asking and escalate" in its context and will act on
@@ -1179,140 +1172,149 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
         # "can you please give me a minute? I just need to check".
         # So the block has to be here, at the tool call, the same way
         # a fabricated branch is blocked.
-        last_caller = next((t.text for t in reversed(sess.turns)
-                            if t.role == "caller" and t.text
-                            and t.text != "[...]"), "")
-        # Two shapes of "not a refusal", blocked the same way. A hold request
-        # is "wait, I'm getting it"; an invitation is "what do you want?" —
-        # and on call-20260819-2121 the agent answered the second by hanging
-        # up. The caller had asked three screening questions, the budget
-        # counted all three, the give-up directive went out, and then they
-        # said "How can I help you?" — the most willing thing anyone said on
-        # that call — and the agent closed on it.
-        _blocked = ""
-        if not sess.memory.get("branch"):
-            # THE ONE TOOL THE DELETED WAIT COVERED THAT CANNOT DEFER.
-            # _TRANSCRIPT_READING_TOOLS held six tools; five of them are saves
-            # whose guard hands an objection to _resolve_deferred_save when the
-            # words are still in flight. escalate has no such path — it ends
-            # the call — so removing the wait would leave _discarded_location
-            # reading a transcript that has not caught up, and the answer the
-            # caller just gave would be invisible to the guard whose entire job
-            # is noticing it. One turn of grace instead, and ONE-SHOT like every
-            # other injected directive here: the placeholder resolves either
-            # way within a turn, and a guard that can refuse forever is a call
-            # that cannot be ended.
-            if _transcript_pending(sess) and not sess._escalation_held:
-                _blocked = "in flight"
-            elif is_hold_request(last_caller):
-                _blocked = "hold"
-            elif _invites_continuation(last_caller):
-                _blocked = "invitation"
-        if _blocked:
-            if _blocked == "in flight":
-                sess._escalation_held = True
-                result = {"ok": False, "error": (
-                    "NOT ESCALATED — their last turn is still transcribing "
-                    "| NEED: wait one turn; the answer may be in it")}
-                _line = ("🚪 ESCALATION HELD — their last words are still "
-                         "transcribing")
-                _say = ("(system: hold on before ending the call. They have "
-                        "just said something that has not reached you yet. "
-                        "Wait for it — say nothing new and do not end the "
-                        "call.)")
-            elif _blocked == "hold":
-                result = {"ok": False, "error": (
-                    "NOT ESCALATED — caller is mid-lookup, not refusing "
-                    "| NEED: a two-word hold acknowledgement, then "
-                    "silence until they return")}
-                _line = "⏳ ESCALATION BLOCKED — caller is checking"
-                _say = ("(system: disregard the earlier instruction to "
-                        "stop and escalate. They are looking the branch up "
-                        "right now. Wait for them.)")
-            else:
-                result = {"ok": False, "error": (
-                    "NOT ESCALATED — caller just asked what you need "
-                    "| NEED: tell them plainly, in one sentence, which "
-                    "doctor and that you want the branch")}
-                _line = "🚪 ESCALATION BLOCKED — caller asked what you need"
-                _say = ("(system: disregard the earlier instruction to "
-                        "stop and escalate. They have just asked what you "
-                        "want, which means they are willing to help and "
-                        "have not refused anything. Answer them: name the "
-                        "doctor and say you are trying to find out which "
-                        "branch they work out of. One sentence, then "
-                        "wait.)")
-            # The budget put us here, and it was wrong: they were engaging
-            # the whole time. Reset it or the very next ask escalates again.
-            #
-            # NOT FOR "in flight". That one says nothing about whether they
-            # were engaging — the budget may have run out for perfectly good
-            # reasons and we are only asking it to wait for words already on
-            # the way. Resetting there would buy a stall a fresh budget.
-            if _blocked != "in flight":
-                sess.reset_ask_budget("escalation blocked — caller is engaging")
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"{_line}: {last_caller[:60]!r}", flush=True)
-            await oai_ws.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {"type": "message", "role": "user",
-                         "content": [{"type": "input_text", "text": _say}]},
-            }))
-            _pending_tools.pop(call_id, None)
-            await oai_ws.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {"type": "function_call_output",
-                         "call_id": call_id,
-                         "output": json.dumps(result)},
-            }))
-            _agent_text_buf = ""
-            return _ToolOutcome(_agent_text_buf, _closing_sent,
-                                 _pending_response_create, True)
-        _reason = args.get("reason", "")
-        # The inverse guard. Recorded whether or not it blocks:
-        # blocking is one-shot, but a discarded answer must never
-        # leave the call invisible. Without this the artifact says
-        # only "never provided a location", which is the false
-        # claim itself, and nothing downstream can tell.
-        discarded = _discarded_location(_reason, sess)
-        if discarded:
-            sess.memory.update(discarded_location=discarded)
-        bad = _ungrounded_escalation(_reason, sess)
-        if discarded and not sess._discard_blocked:
-            # ONE-SHOT, like every other injected directive here. A
-            # guard that can refuse forever is a call that cannot be
-            # ended: the detector is deliberately conservative, but
-            # "conservative" is not "never wrong", and the failure
-            # mode of blocking twice is an agent stuck on the phone
-            # with a receptionist it has already thanked.
-            sess._discard_blocked = True
+    last_caller = next((t.text for t in reversed(sess.turns)
+                        if t.role == "caller" and t.text
+                        and t.text != "[...]"), "")
+    # Two shapes of "not a refusal", blocked the same way. A hold request
+    # is "wait, I'm getting it"; an invitation is "what do you want?" —
+    # and on call-20260819-2121 the agent answered the second by hanging
+    # up. The caller had asked three screening questions, the budget
+    # counted all three, the give-up directive went out, and then they
+    # said "How can I help you?" — the most willing thing anyone said on
+    # that call — and the agent closed on it.
+    _blocked = ""
+    if not sess.memory.get("branch"):
+        # THE ONE TOOL THE DELETED WAIT COVERED THAT CANNOT DEFER.
+        # _TRANSCRIPT_READING_TOOLS held six tools; five of them are saves
+        # whose guard hands an objection to _resolve_deferred_save when the
+        # words are still in flight. escalate has no such path — it ends
+        # the call — so removing the wait would leave _discarded_location
+        # reading a transcript that has not caught up, and the answer the
+        # caller just gave would be invisible to the guard whose entire job
+        # is noticing it. One turn of grace instead, and ONE-SHOT like every
+        # other injected directive here: the placeholder resolves either
+        # way within a turn, and a guard that can refuse forever is a call
+        # that cannot be ended.
+        if _transcript_pending(sess) and not sess._escalation_held:
+            _blocked = "in flight"
+        elif is_hold_request(last_caller):
+            _blocked = "hold"
+        elif _invites_continuation(last_caller):
+            _blocked = "invitation"
+    if _blocked:
+        if _blocked == "in flight":
+            sess._escalation_held = True
             result = {"ok": False, "error": (
-                f"NOT ESCALATED — reason asserts no location was "
-                f"given; the transcript has one "
-                f"| CALLER SAID: {discarded} "
-                f"| NEED: save_branch with THEIR wording, or an "
-                f"escalation reason that is true")}
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"↩️  DISCARDED ANSWER — escalation blocked: "
-                  f"{discarded[:80]}", flush=True)
-        elif bad:
+                "NOT ESCALATED — their last turn is still transcribing "
+                "| NEED: wait one turn; the answer may be in it")}
+            _line = ("🚪 ESCALATION HELD — their last words are still "
+                     "transcribing")
+            _say = ("(system: hold on before ending the call. They have "
+                    "just said something that has not reached you yet. "
+                    "Wait for it — say nothing new and do not end the "
+                    "call.)")
+        elif _blocked == "hold":
             result = {"ok": False, "error": (
-                f"REJECTED — {bad} | NEED: a reason drawn from this "
-                f"call's events, not an inference about the doctor "
-                f"| FALLBACK: 'could not obtain the location'")}
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                  f"🚫 UNGROUNDED ESCALATION BLOCKED: {args}",
-                  flush=True)
+                "NOT ESCALATED — caller is mid-lookup, not refusing "
+                "| NEED: a two-word hold acknowledgement, then "
+                "silence until they return")}
+            _line = "⏳ ESCALATION BLOCKED — caller is checking"
+            _say = ("(system: disregard the earlier instruction to "
+                    "stop and escalate. They are looking the branch up "
+                    "right now. Wait for them.)")
         else:
-            result = run_tool(name, sess.memory, args, sess.objective)
+            result = {"ok": False, "error": (
+                "NOT ESCALATED — caller just asked what you need "
+                "| NEED: tell them plainly, in one sentence, which "
+                "doctor and that you want the branch")}
+            _line = "🚪 ESCALATION BLOCKED — caller asked what you need"
+            _say = ("(system: disregard the earlier instruction to "
+                    "stop and escalate. They have just asked what you "
+                    "want, which means they are willing to help and "
+                    "have not refused anything. Answer them: name the "
+                    "doctor and say you are trying to find out which "
+                    "branch they work out of. One sentence, then "
+                    "wait.)")
+        # The budget put us here, and it was wrong: they were engaging
+        # the whole time. Reset it or the very next ask escalates again.
+        #
+        # NOT FOR "in flight". That one says nothing about whether they
+        # were engaging — the budget may have run out for perfectly good
+        # reasons and we are only asking it to wait for words already on
+        # the way. Resetting there would buy a stall a fresh budget.
+        if _blocked != "in flight":
+            sess.reset_ask_budget("escalation blocked — caller is engaging")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"{_line}: {last_caller[:60]!r}", flush=True)
+        await oai_ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": _say}]},
+        }))
+        _pending_tools.pop(call_id, None)
+        await oai_ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {"type": "function_call_output",
+                     "call_id": call_id,
+                     "output": json.dumps(result)},
+        }))
+        return result, True
+    _reason = args.get("reason", "")
+    # The inverse guard. Recorded whether or not it blocks:
+    # blocking is one-shot, but a discarded answer must never
+    # leave the call invisible. Without this the artifact says
+    # only "never provided a location", which is the false
+    # claim itself, and nothing downstream can tell.
+    discarded = _discarded_location(_reason, sess)
+    if discarded:
+        sess.memory.update(discarded_location=discarded)
+    bad = _ungrounded_escalation(_reason, sess)
+    if discarded and not sess._discard_blocked:
+        # ONE-SHOT, like every other injected directive here. A
+        # guard that can refuse forever is a call that cannot be
+        # ended: the detector is deliberately conservative, but
+        # "conservative" is not "never wrong", and the failure
+        # mode of blocking twice is an agent stuck on the phone
+        # with a receptionist it has already thanked.
+        sess._discard_blocked = True
+        result = {"ok": False, "error": (
+            f"NOT ESCALATED — reason asserts no location was "
+            f"given; the transcript has one "
+            f"| CALLER SAID: {discarded} "
+            f"| NEED: save_branch with THEIR wording, or an "
+            f"escalation reason that is true")}
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"↩️  DISCARDED ANSWER — escalation blocked: "
+              f"{discarded[:80]}", flush=True)
+    elif bad:
+        result = {"ok": False, "error": (
+            f"REJECTED — {bad} | NEED: a reason drawn from this "
+            f"call's events, not an inference about the doctor "
+            f"| FALLBACK: 'could not obtain the location'")}
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+              f"🚫 UNGROUNDED ESCALATION BLOCKED: {args}",
+              flush=True)
     else:
         result = run_tool(name, sess.memory, args, sess.objective)
+    return result, False
 
+
+def _record_progress(sess: "RealtimeSession",
+                     collected_before: set) -> None:
+    """
+    Did this tool call move the objective on, and say so if it did.
+
+    Between the guards and the reporting, and it has to stay there. The
+    delta is measured against what the call held BEFORE the tool ran, so
+    it cannot be computed later; and the console line it prints belongs
+    ABOVE the per-tool report, because an operator reads the objective
+    moving and then reads what moved it.
+    """
     # Something new was collected: the no-progress ceiling starts over, whether
     # the call is finished or has another field (or another doctor) to go. This
     # is the reset that makes one ceiling work for a multi-field, multi-doctor
     # call without the counter having to know either number.
-    _gained = _collected_pairs(sess) - _collected_before
+    _gained = _collected_pairs(sess) - collected_before
     if _gained:
         # Named with the value it landed on, because a flip and a first
         # collection are now both in here and "collected identity" alone no
@@ -1322,17 +1324,35 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
         print(f"[Realtime] 🎯 {_describe_objective(_objective_of(sess), sess.memory)}",
               flush=True)
 
-    # Report what the tool ACTUALLY did. This used to print
-    # "✅ BRANCH SAVED" unconditionally, without looking at the
-    # result — so a live call logged
-    #     🚫 HALLUCINATED BRANCH BLOCKED: {'branch': 'Downtown'}
-    #     ✅ BRANCH SAVED : {'branch': 'Downtown'}
-    # one line apart. The guard had worked and nothing was saved,
-    # but the log said otherwise. A safeguard that reports itself as
-    # having failed is worse than no log at all: it sends you
-    # hunting a bug that isn't there and hides the one that is.
-    ts = datetime.now().strftime("%H:%M:%S")
-    ok = bool(result.get("ok"))
+
+async def _report_tool_result(name: str, args: dict, result: dict,
+                              ok: bool, ts: str,
+                              sess: "RealtimeSession", oai_ws) -> None:
+    """
+    Say what the tool ACTUALLY did - to the console, to the artifact, and
+    where a refusal needs answering, to the model.
+
+    THIS USED TO PRINT SUCCESS UNCONDITIONALLY. A live call logged
+
+        BLOCKED : {'branch': 'Downtown'}
+        SAVED   : {'branch': 'Downtown'}
+
+    one line apart: the guard had worked and nothing was saved, but the
+    log said otherwise. A safeguard that reports itself as having failed
+    is worse than no log at all - it sends you hunting a bug that is not
+    there and hides the one that is.
+
+    ASYNC BECAUSE REPORTING SOMETIMES HAS TO ANSWER BACK. Three of these
+    branches do more than print: a refused save nudges the model toward
+    the words it needs, a false save claim corrects a model that has just
+    told the caller something untrue. Those are part of reporting, not of
+    the lifecycle, which is why they travel with it rather than with the
+    teardown below.
+
+    `ts` is passed rather than taken here: the teardown stamps its own
+    lines with the same second, and two clocks a few milliseconds apart
+    read as two events in the log.
+    """
     # ── EVERY REFUSAL, ONE RECORD, WITH THE WORDS THAT CAUSED IT ───────────
     # The counter below this only ever covered save_branch, and a choice-field
     # refusal reached the artifact through nothing at all: on
@@ -1506,6 +1526,21 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     else:
         print(f"[{ts}] 🔧 TOOL           : {name}({args}) → {result}", flush=True)
 
+
+def _decide_close(name: str, result: dict,
+                  sess: "RealtimeSession", ts: str) -> bool:
+    """
+    Is the call over, and if it is, may we hang up yet?
+
+    Sets sess.done, and returns whether the close was DEFERRED instead -
+    which the teardown needs, because a deferred close must not fall into
+    the ordinary post-tool path either. Two outcomes, not one flag: done
+    means hang up after the goodbye, deferred means wait for the person.
+
+    ASKED OF THE OBJECTIVE, NOT OF THE TOOL. See the block below - a
+    successful save_branch used to end a call by definition, which was
+    right only while the branch was the only thing any template collected.
+    """
     # WHEN THE CALL IS OVER, asked of the objective rather than of the tool.
     #
     # This was `name in ("save_branch", "escalate")`, which made a successful
@@ -1579,44 +1614,38 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
                   f"          asked: {_unanswered[-70:]!r}", flush=True)
         else:
             sess.done = True
+    return _close_deferred
 
-    await oai_ws.send(json.dumps({
-        "type": "conversation.item.create",
-        "item": {
-            "type":    "function_call_output",
-            "call_id": call_id,
-            "output":  json.dumps(result),
-        },
-    }))
-    # t3 — answered. Everything after this point is OpenAI's, and on the
-    # deferred path (sess.done False) nothing is even ASKED of it until
-    # response.done arrives. That gap is t4-t3 and it is the cost of the
-    # deferral, isolated.
-    if sess._stage is not None and "t3" not in sess._stage:
-        sess._stage["t3"] = time.monotonic()
 
-    # EVERY TOOL IN THE TURN, WITH ITS VERDICT - not just the first.
-    #
-    # t2/t3 above deliberately mark only the FIRST tool, because that is what
-    # the inference_1 interval measures. But a response may carry several tool
-    # calls, and recording only the first made call-20260826-1656 unreadable:
-    # identity is saved `confirmed`, the only save_doctor_identity in the stage
-    # data sits on a turn whose transcript the guard REJECTS, and the stored
-    # quote appears in two different caller turns. Which turn grounded identity
-    # could not be determined from the artifact at all.
-    #
-    # Appended here because `result` is final at this line - every accept,
-    # reject and hold path has converged by the time the output goes out.
-    #
-    # Written with sess._stage[...] rather than .setdefault so it stays inside
-    # the shapes the measure-only test allows: this list is written and never
-    # read by anything that decides behaviour.
-    if sess._stage is not None:
-        if "tools" not in sess._stage:
-            sess._stage["tools"] = []
-        sess._stage["tools"].append(
-            {"tool": name, "ok": bool(result.get("ok"))})
+async def _close_or_continue(sess: "RealtimeSession", oai_ws,
+                             _close_deferred: bool,
+                             _response_had_audio: bool
+                             ) -> tuple[Optional[bool], Optional[bool]]:
+    """
+    What happens to the line once the tool has been answered. Three ways out.
 
+      done              the objective is met and the question outstanding
+                        was answered - say goodbye and hang up, either by
+                        letting the turn just spoken stand as one or by
+                        asking for one.
+      close deferred    the objective is met but the agent has just asked
+                        them something. Say NOTHING. The only correct next
+                        sound on the line is theirs.
+      neither           an ordinary tool call mid-conversation; the model
+                        gets a response to speak the result into.
+
+    The parameter names keep their leading underscores because the
+    comments below argue about them by name, and a history that no longer
+    matches the code it describes is worse than no comment.
+
+    Returns (closing_sent, pending_response_create) for the event loop.
+    """
+    # None, not False, on both. The event loop reads None as 'this tool
+    # call had no opinion' and keeps whatever it already held - see
+    # _ToolOutcome. Returning False here would clobber a closing flag set
+    # by an earlier response, which is the bug that shape exists to stop.
+    _closing_sent: Optional[bool] = None
+    _pending_response_create: Optional[bool] = None
     if sess.done:
         # "_response_had_audio" was being read as "the agent said
         # goodbye", so the call hung up on whatever it happened to
@@ -1685,6 +1714,145 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
         pass
     else:
         _pending_response_create = True
+    return _closing_sent, _pending_response_create
+
+
+async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
+                            _pending_tools: dict,
+                            _response_had_audio: bool) -> _ToolOutcome:
+    """Run one tool call and its guards. Extracted from _oai_to_twilio.
+
+    Pyright refused to analyse that function at all —
+
+        Code is too complex to analyze; reduce complexity by refactoring
+        into subroutines or reducing conditional code paths
+
+    — and when it gives up it can no longer prove any local inside is read, so
+    the editor greyed out ~60 names as unused and stopped seeing the calls the
+    function makes. Raising maxCodeComplexity does NOT help; the ceiling is
+    not the binding constraint. The only fix is the one the message names.
+
+    That mattered beyond the noise. Every recurring bug this week lived in
+    that unanalysed function: the barge-in pre-audio race, the six
+    response.create sites, the five-clause dead-air condition, the audio_rms
+    overwrite, and a dead assignment. Most bugs, least tooling.
+
+    This handler is the largest self-contained piece — 290 lines, 34 branch
+    points, a quarter of the function's total — and its coupling to the loop
+    is three flags and one `continue`, which is why it goes first.
+    """
+    _agent_text_buf: Optional[str] = None
+    _closing_sent: Optional[bool] = None
+    _pending_response_create: Optional[bool] = None
+    call_id  = msg.get("call_id", "")
+    name     = msg.get("name", "")
+    args_str = msg.get("arguments") or _pending_tools.get(call_id, {}).get("args", "{}")
+    try:
+        args = json.loads(args_str)
+    except json.JSONDecodeError:
+        args = {}
+
+    # t2 — the tool call is here.
+    if sess._stage is not None and "t2" not in sess._stage:
+        sess._stage["t2"] = time.monotonic()
+        sess._stage["tool"] = name
+
+    # THERE WAS A BLOCKING WAIT HERE, and it is gone. Every guard below asks
+    # what the caller said, and the model reached this line from audio the
+    # transcript has not necessarily caught up with — so this used to hold the
+    # whole handler up to 1.5s for the words. Measured over 119 artifacts it
+    # never once returned early (14 waits, 12 timeouts, 0 landed) and cost
+    # 1.5s a time; the deferral below does the same job on the transcript event
+    # itself, which is where the evidence actually appears. See the comment
+    # above _transcript_pending for the distribution that settled it.
+
+    # What the call had collected BEFORE this tool ran, so the no-progress
+    # ceiling can be reset by progress rather than by a guess about which tool
+    # constitutes progress. save_branch is not the only way a field arrives —
+    # a template may point a field at a note_* key — and hard-coding the tool
+    # name here is how the success condition ended up inside save_branch in the
+    # first place.
+    #
+    # (name, VALUE) pairs, not names — see _collected_pairs. A field that is
+    # overwritten with a different state is progress this set has to be able to
+    # see, and until 2026-08-31 it could not.
+    _collected_before = _collected_pairs(sess)
+
+    if name == "save_branch":
+        result = _guard_save_branch(name, args, sess)
+    elif name in _CHOICE_SAVE_TOOLS:
+        result = _guard_choice_save(name, args, sess)
+    elif name == "escalate":
+        result, _stop = await _guard_escalate(
+            name, args, sess, oai_ws, call_id, _pending_tools)
+        if _stop:
+            # It answered the tool call itself: the refusal went back to the
+            # model with the nudge saying what to do instead, and everything
+            # below this point reports an escalation that is not happening.
+            # Clearing the buffer is what the original did on this path.
+            _agent_text_buf = ""
+            return _ToolOutcome(_agent_text_buf, _closing_sent,
+                                _pending_response_create, True)
+    else:
+        result = run_tool(name, sess.memory, args, sess.objective)
+
+    _record_progress(sess, _collected_before)
+
+    # Report what the tool ACTUALLY did. This used to print
+    # "✅ BRANCH SAVED" unconditionally, without looking at the
+    # result — so a live call logged
+    #     🚫 HALLUCINATED BRANCH BLOCKED: {'branch': 'Downtown'}
+    #     ✅ BRANCH SAVED : {'branch': 'Downtown'}
+    # one line apart. The guard had worked and nothing was saved,
+    # but the log said otherwise. A safeguard that reports itself as
+    # having failed is worse than no log at all: it sends you
+    # hunting a bug that isn't there and hides the one that is.
+    ts = datetime.now().strftime("%H:%M:%S")
+    ok = bool(result.get("ok"))
+    await _report_tool_result(name, args, result, ok, ts, sess,
+                              oai_ws)
+
+    _close_deferred = _decide_close(name, result, sess, ts)
+
+    await oai_ws.send(json.dumps({
+        "type": "conversation.item.create",
+        "item": {
+            "type":    "function_call_output",
+            "call_id": call_id,
+            "output":  json.dumps(result),
+        },
+    }))
+    # t3 — answered. Everything after this point is OpenAI's, and on the
+    # deferred path (sess.done False) nothing is even ASKED of it until
+    # response.done arrives. That gap is t4-t3 and it is the cost of the
+    # deferral, isolated.
+    if sess._stage is not None and "t3" not in sess._stage:
+        sess._stage["t3"] = time.monotonic()
+
+    # EVERY TOOL IN THE TURN, WITH ITS VERDICT - not just the first.
+    #
+    # t2/t3 above deliberately mark only the FIRST tool, because that is what
+    # the inference_1 interval measures. But a response may carry several tool
+    # calls, and recording only the first made call-20260826-1656 unreadable:
+    # identity is saved `confirmed`, the only save_doctor_identity in the stage
+    # data sits on a turn whose transcript the guard REJECTS, and the stored
+    # quote appears in two different caller turns. Which turn grounded identity
+    # could not be determined from the artifact at all.
+    #
+    # Appended here because `result` is final at this line - every accept,
+    # reject and hold path has converged by the time the output goes out.
+    #
+    # Written with sess._stage[...] rather than .setdefault so it stays inside
+    # the shapes the measure-only test allows: this list is written and never
+    # read by anything that decides behaviour.
+    if sess._stage is not None:
+        if "tools" not in sess._stage:
+            sess._stage["tools"] = []
+        sess._stage["tools"].append(
+            {"tool": name, "ok": bool(result.get("ok"))})
+
+    _closing_sent, _pending_response_create = await _close_or_continue(
+        sess, oai_ws, _close_deferred, _response_had_audio)
     return _ToolOutcome(_agent_text_buf, _closing_sent,
                         _pending_response_create, False)
 
