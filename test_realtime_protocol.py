@@ -4713,15 +4713,42 @@ async def main():
     # Named here as history only; this loop finds patterns by type, so it never
     # needed the name and does not age when one is removed.)
     import re as _re
-    import agents.voice.evidence as _ev
-    import agents.voice.objectives as _obj_mod
     # ACROSS EVERY MODULE THAT HOLDS ONE, and COUNTED. Scoped to `vars(rw)`,
     # this loop shrank silently the moment the guards moved to evidence.py:
     # _LOCATION_NOUN stopped being scanned, the suite reported one check fewer
     # and still said ALL PASSED. A population check that quietly covers less is
     # the exact "passes by finding nothing" shape this file keeps warning about,
     # and the floor below is what makes the next extraction loud instead.
-    _pat_mods = [rw, _ev, _obj_mod]
+    #
+    # IT WAS LOUD, AND THIS IS THE SECOND EXTRACTION. A hand-written module list
+    # ([rw, _ev, _obj_mod]) covered evidence.py while it was one file; when it
+    # became a PACKAGE on 2026-08-31 the list still resolved — `_ev` imports
+    # fine — and quietly stopped seeing anything the proxy __init__ does not
+    # re-export. Six patterns and two string constants dropped out in one
+    # commit: _ANNOUNCES_ASK, _CALLER_ENDS_CALL, _LOCATION_NOUN, _ONLY_AFFIRM,
+    # _DEFER, _WILL_ASK. The floor caught the count, but a floor only says
+    # something shrank — it cannot say what stopped being guarded.
+    #
+    # So the list is DISCOVERED now, not written: walk the package and import
+    # every module under it, subpackages included. A third split changes nothing
+    # here, which is the point — the guard should not need editing every time
+    # the code it guards is rearranged.
+    import importlib as _il, pkgutil as _pkgutil
+    import agents.voice as _av_pkg
+    import agents.voice.objectives as _obj_mod
+    _pat_mods = [rw, _obj_mod]
+    for _mi in _pkgutil.walk_packages(_av_pkg.__path__, _av_pkg.__name__ + "."):
+        try:
+            _m = _il.import_module(_mi.name)
+        except Exception:                       # pragma: no cover - import guard
+            continue
+        if _m not in _pat_mods:
+            _pat_mods.append(_m)
+    check(any(_m.__name__.startswith("agents.voice.evidence.")
+              for _m in _pat_mods),
+          f"the scan reaches inside subpackages ({len(_pat_mods)} modules)",
+          "a package whose __init__ re-exports a subset looks fully covered "
+          "from the outside — that is how the last six dropped out")
     _pats = {(_m.__name__, _n): _v for _m in _pat_mods
              for _n, _v in vars(_m).items() if isinstance(_v, _re.Pattern)}
     check(len(_pats) >= 40,
@@ -9935,9 +9962,25 @@ async def main():
     # farewell guard landed. Nothing in this suite could observe either, which
     # is the whole argument for making the process enforce it.
     import ast as _ast, pathlib as _pl, collections as _co
+    # RGLOB, AND A PACKAGE'S __init__ COUNTS AS ITS MODULE FILE. This was
+    # `glob("*.py")`, which stopped seeing evidence entirely the moment it
+    # became a package on 2026-08-31: `_defined["evidence"]` went empty, the
+    # intersection below went empty, `continue` fired, and the whole six-module
+    # package's surface stopped being guarded — with the check still green,
+    # because an absence assertion over a scan that finds nothing passes for
+    # free. That is the failure this block's own mutation-proof was written
+    # against, arriving through the one door it did not cover.
+    #
+    # A PACKAGE RE-EXPORTS RATHER THAN DEFINES, so for an __init__ the names it
+    # IMPORTS are its surface: `from agents.voice.evidence import _rode_along`
+    # resolves through the proxy, and Pylance greys the name at its definition
+    # unless both the proxy and the submodule that defines it declare it.
     _pkg = _pl.Path("agents/voice")
     _defined, _imported = {}, _co.defaultdict(set)
-    for _p in sorted(_pkg.glob("*.py")):
+    _files = {}
+    for _p in sorted(_pkg.rglob("*.py")):
+        _key = _p.parent.name if _p.name == "__init__.py" else _p.stem
+        _files[_key] = _p
         _tree = _ast.parse(_p.read_text(encoding="utf-8"))
         _names = set()
         for _n in _tree.body:
@@ -9947,8 +9990,12 @@ async def main():
                 _names |= {_t.id for _t in _n.targets if isinstance(_t, _ast.Name)}
             elif isinstance(_n, _ast.AnnAssign) and isinstance(_n.target, _ast.Name):
                 _names.add(_n.target.id)
-        _defined[_p.stem] = {_x for _x in _names
-                             if _x.startswith("_") and not _x.startswith("__")}
+        if _p.name == "__init__.py":
+            for _n in _tree.body:
+                if isinstance(_n, _ast.ImportFrom):
+                    _names |= {_a.asname or _a.name for _a in _n.names}
+        _defined[_key] = {_x for _x in _names
+                          if _x.startswith("_") and not _x.startswith("__")}
         for _n in _ast.walk(_tree):
             if isinstance(_n, _ast.ImportFrom) and (_n.module or "").startswith("agents.voice."):
                 _imported[_n.module.split(".")[-1]] |= {_a.name for _a in _n.names}
@@ -9957,7 +10004,7 @@ async def main():
         _priv = _used & _defined.get(_mod, set())
         if not _priv:
             continue
-        _t = _ast.parse((_pkg / f"{_mod}.py").read_text(encoding="utf-8"))
+        _t = _ast.parse(_files[_mod].read_text(encoding="utf-8"))
         _av = next((_n for _n in _t.body if isinstance(_n, _ast.Assign)
                     and any(getattr(_x, "id", "") == "__all__" for _x in _n.targets)), None)
         _listed = set() if _av is None else {_e.value for _e in _av.value.elts
@@ -9975,6 +10022,20 @@ async def main():
           "and the scan really sees the cross-module surface",
           f"evidence={len(_imported.get('evidence', set()))} "
           f"lifecycle={len(_imported.get('lifecycle', set()))}")
+    # AND IT REACHES INSIDE THE PACKAGE. The line above passed unchanged while
+    # the whole evidence package went unguarded, because it counts what OTHER
+    # modules import BY NAME and that name — "evidence" — survived the split.
+    # What it could not see is that nothing was being intersected against it any
+    # more. So assert the two halves the rglob actually restored: the proxy's
+    # re-export surface, and at least one submodule reached in its own right.
+    check(len(_defined.get("evidence", set())) > 20,
+          "the package's re-exported surface is collected, not just its name",
+          f"evidence defines/re-exports {len(_defined.get('evidence', set()))}")
+    check(len(_defined.get("guards", set())) >= 5
+          and len(_imported.get("patterns", set())) >= 5,
+          "and submodules are scanned on both sides — defined and imported",
+          f"guards defines {len(_defined.get('guards', set()))}, "
+          f"patterns is imported for {len(_imported.get('patterns', set()))}")
 
     print("\n" + "-" * 66)
     print("  Cited in source, untested until now")
