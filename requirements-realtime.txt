@@ -1,0 +1,52 @@
+# The golden path, and nothing else.
+#
+# Twilio places the call, the audio bridges to OpenAI Realtime, the guards
+# decide what reaches the record. That is the whole live system, and this is
+# everything it needs. requirements.txt additionally carries the legacy
+# local-audio pipeline and the pre-Twilio scaffolding — crawl4ai, playwright,
+# langgraph, celery, prometheus-client, psycopg, faster-whisper, webrtcvad —
+# none of which any live module imports.
+#
+# VERIFIED, NOT ASSERTED. The offline suite was re-run with faster_whisper,
+# langgraph, piper, prometheus_client, psycopg, redis and webrtcvad made
+# unimportable by a meta_path blocker, and passed 2164/0. A green run with
+# everything installed proves nothing about a subset; blocking the difference
+# does. CI now re-proves it on every push, because it installs from THIS FILE
+# and runs the suite against it.
+#
+#   pip install -r requirements-realtime.txt
+#
+# For the legacy pipeline (USE_REALTIME=false), see requirements.txt and the
+# "Local/offline experimentation" section of SETUP.md.
+
+# ── Config and models ────────────────────────────────────────────────────────
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+
+# ── The web surface Twilio calls back on ─────────────────────────────────────
+fastapi>=0.110
+uvicorn>=0.29
+# REQUIRED, and it fails late. FastAPI needs it to read Twilio's webhook, which
+# arrives as a form post. Without it /answer returns 400 and the callee hears
+# silence on a call that otherwise looks fine — and it is imported lazily, so
+# nothing complains until a real call is already in flight.
+python-multipart>=0.0.9
+
+# ── Telephony and the model ──────────────────────────────────────────────────
+twilio>=9.0
+openai>=1.30
+# The transport for BOTH legs: Twilio's media stream and the Realtime API. An
+# old version connects and then drops frames.
+websockets>=12.0
+httpx>=0.27
+requests>=2.31          # Twilio recording download
+
+# ── Audio ────────────────────────────────────────────────────────────────────
+numpy>=1.26
+scipy>=1.11             # resampling in core/audio_utils.py
+soundfile>=0.12         # writes the dual-channel call recording
+
+# ── Console and accounting ───────────────────────────────────────────────────
+rich>=13.7              # the per-turn call log
+tiktoken>=0.7           # prompt token ceilings in check_realtime.py and the suite

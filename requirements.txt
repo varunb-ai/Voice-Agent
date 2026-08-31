@@ -1,3 +1,17 @@
+# EVERYTHING, INCLUDING THE LEGACY PIPELINE. For the live agent you want
+# requirements-realtime.txt instead -- 16 packages against this file's 29,
+# and verified sufficient by running the offline suite with the difference
+# made unimportable. CI installs from that file, so it is re-proved on
+# every push.
+#
+#   live agent     pip install -r requirements-realtime.txt
+#   everything     pip install -r requirements.txt
+#
+# What only this file carries: crawl4ai, playwright, beautifulsoup4, lxml
+# (the retired crawler), langgraph, celery, prometheus-client, psycopg,
+# redis (scaffolding no live module imports), and faster-whisper, pyttsx3,
+# sounddevice, webrtcvad (the USE_REALTIME=false local pipeline).
+
 # ── Core ──────────────────────────────────────────────
 pydantic>=2.7
 pydantic-settings>=2.3

@@ -76,8 +76,13 @@ work — everything installs into that environment.
 ## STEP 1 — Install the Python libraries
 
 ```powershell
-pip install -r requirements.txt
+pip install -r requirements-realtime.txt
 ```
+
+Sixteen packages, and they are the whole live system. `requirements.txt`
+is the everything-file: it additionally carries the retired crawler and
+the local Whisper/Piper pipeline, none of which the golden path imports.
+Install that one only if you are doing the legacy section at the bottom.
 
 Two of these are worth knowing about, because both fail in a confusing way:
 

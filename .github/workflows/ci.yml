@@ -16,6 +16,12 @@ on:
   push:
   pull_request:
 
+# Back-to-back pushes would otherwise run parallel full suites at ~8 minutes
+# each. Only the newest commit on a ref is worth the runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -31,19 +37,17 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # THE GOLDEN PATH ONLY. requirements.txt still carries the legacy
-      # scaffolding (crawl4ai, playwright, langgraph, celery); none of it is on
-      # the realtime path and none of it is imported by the suite. Installing
-      # the subset keeps CI honest about what the live agent actually needs —
-      # if a real dependency is missing from this list, the suite says so here
-      # rather than on a phone call.
+      # THE GOLDEN PATH ONLY, FROM THE FILE. requirements.txt still carries the
+      # legacy scaffolding (crawl4ai, playwright, langgraph, celery, psycopg);
+      # none of it is on the realtime path and none of it is imported by the
+      # suite. This list lived inline here for exactly one commit, which is one
+      # copy too many: a second copy of the golden-path list is the same drift
+      # this whole exercise has been hunting. It is in one place now, and every
+      # push re-proves that place is sufficient by running the suite against it.
       - name: Install the realtime path's dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            pydantic pydantic-settings python-dotenv httpx requests rich \
-            numpy scipy fastapi uvicorn websockets python-multipart twilio \
-            tiktoken openai soundfile
+          pip install -r requirements-realtime.txt
 
       # ── The offline suite ────────────────────────────────────────────────
       # Exit code 0 means every assertion passed. It prints its own PASS/FAIL
@@ -58,11 +62,19 @@ jobs:
         run: python test_realtime_protocol.py
 
       # ── Types ────────────────────────────────────────────────────────────
-      # EVERY path, named explicitly. The scoping mistake this gate exists to
-      # prevent was running pyright on agents/ and core/ and reporting the
-      # result as if it covered the repo.
+      # PINNED. Unpinned, pyright floats on latest and a new release can turn
+      # this red with zero repo changes — a gate should no more drift than it
+      # should forget. 1.1.413 is the version the two errors this step exists
+      # for were found and fixed under.
+      #
+      # NO PATH ARGUMENTS. `include` in pyrightconfig.json is the one list, and
+      # a copy of it here is the same drift as the dependency list above — the
+      # two HAD already diverged: check_refusals.py was in the CLI arguments
+      # and missing from the config. The scoping mistake this step exists to
+      # prevent was running pyright over three of four paths and reporting the
+      # result as though it covered the repo.
       - name: Pyright
-        run: npx --yes pyright test_realtime_protocol.py check_refusals.py agents core
+        run: npx --yes pyright@1.1.413
 
       # ── Repository hygiene ───────────────────────────────────────────────
       # A tracked file that .gitignore also matches is living on borrowed time:

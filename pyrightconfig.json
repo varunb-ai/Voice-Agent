@@ -1,33 +1,42 @@
+// Added 2026-08-18. There is deliberately NO maxCodeComplexity override here.
+//
+// Pylance used to grey out ~60 names in agents/voice/realtime_worker.py as
+// 'not accessed'. Every one was a false positive: pyright was refusing to
+// analyse _oai_to_twilio at all —
+//
+//   'Code is too complex to analyze; reduce complexity by refactoring into
+//    subroutines or reducing conditional code paths'
+//
+// — and once it gives up on a function it can no longer prove any local in it
+// is read, nor see the calls that function makes, so module-level helpers used
+// only from inside it were greyed too. Confirmed independently: an AST pass
+// found ZERO assigned-but-never-read locals and ZERO unreferenced
+// module-level names in that file.
+//
+// Raising maxCodeComplexity does NOT fix it. Tried 4096, 16384, 65536 and
+// 262144 — the bail persisted at every value. The only fix is the one the
+// message names, so _oai_to_twilio was split: 1,264 lines / 161 branch points
+// down to 599 / 91, and the diagnostic cleared on its own.
+//
+// If it ever comes back, split the function again rather than adding a ceiling
+// here. The setting would hide the warning while leaving the code unanalysed,
+// and every recurring bug of that session — the barge-in pre-audio race, the
+// six response.create sites, the dead-air condition, the audio_rms overwrite —
+// lived in exactly that unanalysed region.
+//
+// A REAL // COMMENT, not a "//" KEY. Pyright reads JSONC, so the prose
+// above is a comment; as a key it was an unrecognised setting and pyright
+// said so on every single run — a warning printed by every green build is
+// a warning nobody reads.
+//
+// `include` IS THE ONE LIST. CI runs bare `npx pyright`, so the set of
+// checked paths lives here and nowhere else. It used to be duplicated as
+// CLI arguments in the workflow, and the two had already drifted:
+// check_refusals.py was in the workflow's list and missing from this one.
 {
-  "//": [
-    "Added 2026-08-18. There is deliberately NO maxCodeComplexity override here.",
-    "",
-    "Pylance used to grey out ~60 names in agents/voice/realtime_worker.py as",
-    "'not accessed'. Every one was a false positive: pyright was refusing to",
-    "analyse _oai_to_twilio at all —",
-    "",
-    "  'Code is too complex to analyze; reduce complexity by refactoring into",
-    "   subroutines or reducing conditional code paths'",
-    "",
-    "— and once it gives up on a function it can no longer prove any local in it",
-    "is read, nor see the calls that function makes, so module-level helpers used",
-    "only from inside it were greyed too. Confirmed independently: an AST pass",
-    "found ZERO assigned-but-never-read locals and ZERO unreferenced",
-    "module-level names in that file.",
-    "",
-    "Raising maxCodeComplexity does NOT fix it. Tried 4096, 16384, 65536 and",
-    "262144 — the bail persisted at every value. The only fix is the one the",
-    "message names, so _oai_to_twilio was split: 1,264 lines / 161 branch points",
-    "down to 599 / 91, and the diagnostic cleared on its own.",
-    "",
-    "If it ever comes back, split the function again rather than adding a ceiling",
-    "here. The setting would hide the warning while leaving the code unanalysed,",
-    "and every recurring bug of that session — the barge-in pre-audio race, the",
-    "six response.create sites, the dead-air condition, the audio_rms overwrite —",
-    "lived in exactly that unanalysed region."
-  ],
   "include": [
     "agents",
+    "check_refusals.py",
     "core",
     "run_twilio.py",
     "test_realtime_protocol.py"
