@@ -36,16 +36,22 @@ venv/
 # `corpus sweep NOT run` in test_realtime_protocol.py. Everything that sweep
 # proves semantically is also asserted on hand-built calls that travel with
 # the repo, so a bare clone loses the regression sweep and nothing else.
-data/
+#
+# `data/*`, NOT `data/`, AND THE STAR IS THE WHOLE FIX. Git will not descend
+# into an excluded DIRECTORY, so with `data/` the negations below never ran —
+# `git check-ignore -v --no-index data/db/doctors.json` answered `data/` for
+# every one of the thirteen files they were supposed to re-admit. They kept
+# working only because they were already tracked, which is precisely the trap
+# the note below warns about, sprung by the fix written for it. `data/*`
+# excludes the CONTENTS instead, so git descends and a negation can be heard.
+data/*
 *.wav
 *.mp3
 
 # NOT EVERYTHING UNDER data/ IS CALL OUTPUT, and a blanket rule with no
-# negations would have been a trap rather than a policy: git leaves files that
-# are ALREADY tracked alone, so these would have kept working here and
-# vanished the first time anyone removed and re-added one. Re-admitted
-# explicitly, directory first — git will not look inside an excluded
-# directory, so the folder has to be un-ignored before a file in it can be.
+# negations would be a trap rather than a policy: git leaves files that are
+# ALREADY tracked alone, so these would keep working here and vanish the first
+# time anyone removed and re-added one.
 #
 #   backchannels/  pre-rendered "mm-hm"/"okay" audio, read at runtime by
 #                  agents/voice/backchannel.py. Built by
@@ -53,15 +59,33 @@ data/
 #   db/            the JSON backend core/db.py reads when no database is
 #                  configured — seed data the program starts FROM.
 #   voice_samples/ redistributable Piper samples.
+#
+# The directory negation is enough for the first two: nothing below re-excludes
+# their contents. voice_samples needs its own line because `*.wav` above would
+# otherwise catch the files inside it, and the last matching rule wins.
 !data/backchannels/
-!data/backchannels/**
 !data/db/
-!data/db/**
 !data/voice_samples/
 !data/voice_samples/*.wav
 
+# VERIFY AFTER EDITING THIS BLOCK. Every tracked file must be one git does not
+# also ignore, or it is living on borrowed time:
+#
+#   for f in $(git ls-files); do git check-ignore -q --no-index "$f" \
+#       && echo "TRAPPED: $f"; done
+#
+# That loop found data/calls.json (57 legacy call logs, 56 with transcripts)
+# still tracked under the data/ policy, and then found the thirteen files this
+# block claims to re-admit. It runs in CI.
+
 # Stray editor/patch temp files
 *.tmp.*
+
+# Suite output, when a run is redirected to a file in the repo root.
+# Caught by the tracked-but-ignored audit above: `git add -A` staged
+# 374 KB of console log as source.
+test_out.txt
+test_err.txt
 
 # ── Piper TTS voice models ───────────────────────────────────────────────────
 # ~345 MB of redistributable model weights, used only by the CLASSIC pipeline
