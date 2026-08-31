@@ -9971,6 +9971,24 @@ async def main():
           "but a vague answer the caller actually gave still flags",
           "'clinic' is in the tool's invalid-word set and is NOT a sentinel - "
           "the caller said something and the probe could not use it")
+    # AND THE TWO WORD SETS ARE PINNED APART. The reason SENTINELS does not just
+    # import _INVALID_BRANCH_WORDS is that the wider set holds vague ANSWERS
+    # alongside the assertions of absence — merging them would silence every
+    # "she's at the clinic" finding. That rationale is only true while the
+    # words actually sit on the sides claimed, so assert it rather than
+    # describe it. They overlap on six words and diverge on the rest, which is
+    # why this is a shape check and not a subset check.
+    check(_cr.SENTINELS & _tools._INVALID_BRANCH_WORDS
+          and not _cr.SENTINELS <= _tools._INVALID_BRANCH_WORDS,
+          "the sentinel set overlaps the invalid-branch set without being it",
+          f"{len(_cr.SENTINELS & _tools._INVALID_BRANCH_WORDS)} shared of "
+          f"{len(_cr.SENTINELS)}")
+    check(not {"clinic", "office", "campus", "location"} & _cr.SENTINELS
+          and {"clinic", "office", "campus", "location"}
+              <= _tools._INVALID_BRANCH_WORDS,
+          "the vague-place words are the tool's business and never sentinels",
+          "if one migrated into SENTINELS, every vague-answer finding would go "
+          "quiet and this file's own argument for the split would be false")
 
     # ── A REFUSAL THAT CAUSED THE ANSWER — call-20260831-1704 ──────────────
     # PREMATURE means "the caller was made to say it again, in words the probe

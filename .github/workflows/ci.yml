@@ -87,10 +87,18 @@ jobs:
       #
       # --no-index is load-bearing: without it git suppresses the match for
       # exactly the files this is looking for, and the loop reports nothing.
+      #
+      # `-z` AND A NUL-DELIMITED READ, not `for f in $(git ls-files)`. Word
+      # splitting turns "data/3 cases jsons/x.json" into four paths that do not
+      # exist, and `git check-ignore -q` on a path that does not exist exits
+      # non-zero — so the loop finds nothing and the gate PASSES. A false
+      # negative, in the check whose entire job is catching false negatives. No
+      # tracked path has a space today; this repo writes them constantly
+      # ("3 cases jsons", "3 cases voice"), so it was one `git add` away.
       - name: No tracked file is also ignored
         run: |
-          trapped=$(for f in $(git ls-files); do
-            git check-ignore -q --no-index "$f" && echo "  $f"
+          trapped=$(git ls-files -z | while IFS= read -r -d '' f; do
+            git check-ignore -q --no-index "$f" && printf '  %s\n' "$f"
           done)
           if [ -n "$trapped" ]; then
             echo "Tracked AND ignored — these vanish the first time they are re-added:"
@@ -100,11 +108,35 @@ jobs:
           echo "clean: index and ignore rules agree"
 
       # Secrets have never been committed and the point is to keep it that way.
-      # Cheap, and it fails on the commit rather than after the push.
-      - name: No secrets in the index
+      #
+      # THIS ASSERTS .gitignore RATHER THAN RESTATING IT, and the difference is
+      # the whole design. The first version carried its own regex of
+      # secret-shaped paths — a second copy of the patterns at the top of
+      # .gitignore, agreeing today with nothing making them agree tomorrow,
+      # which is the drift this repo keeps finding.
+      #
+      # It does not need to scan the index at all. The step above proves no
+      # TRACKED file is ignored; this one proves a secret-shaped file WOULD be
+      # ignored. Together: if a secret were ever added, .gitignore matches it
+      # (proved here) and the step above then fails on it. Two properties that
+      # compose, rather than one property written twice.
+      #
+      # The shapes below are the canonical list and live in exactly one place.
+      - name: .gitignore still covers the secret shapes
         run: |
-          bad=$(git ls-files | grep -E '(^|/)\.env$|\.key$|\.pem$|\.p12$|credentials\.json$' || true)
-          if [ -n "$bad" ]; then
-            echo "Secret-shaped files are tracked:"; echo "$bad"; exit 1
+          fail=0
+          for shape in .env .env.production private.key server.pem cert.p12 \
+                       credentials.json agents/secret.key; do
+            if git check-ignore -q --no-index "$shape"; then
+              echo "  ignored: $shape"
+            else
+              echo "  NOT IGNORED: $shape"; fail=1
+            fi
+          done
+          # And the one that must stay visible, or a new clone has no template.
+          if git check-ignore -q --no-index .env.example; then
+            echo "  .env.example is ignored — the setup template would vanish"; fail=1
+          else
+            echo "  tracked as intended: .env.example"
           fi
-          echo "clean: no secret-shaped paths tracked"
+          exit $fail

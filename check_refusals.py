@@ -74,13 +74,21 @@ TOOL_TO_ARG = {
 # save_branch is not that. It is the model reaching for a placeholder because
 # the caller had none to give, and the guard blocking it is the system working.
 #
-# NOT `_INVALID_BRANCH_WORDS` from tools.py, though it contains every word
-# here. That set answers a different question — "is this a usable branch?" —
-# and it is much wider: "campus", "office", "clinic", "location" are in it too.
-# Those are VAGUE ANSWERS, not assertions of absence, and a caller who says
-# "she's at the clinic" has given us something the probe arguably should have
-# read. Importing the wider set to save a dozen strings would silence a whole
-# class of finding this scan exists to surface.
+# NOT `_INVALID_BRANCH_WORDS` from tools.py, and the two sets OVERLAP BY SIX
+# WORDS, not by all of them: unknown, none, nothing, nobody, nowhere, no one.
+# The other seventeen here ("n/a", "not provided", "no branch", "unclear" …)
+# are absent from it, and most of its eighty-seven are absent from this.
+#
+# They answer different questions. That set asks "is this a usable branch?" and
+# is much wider — "campus", "office", "clinic", "location" are all in it. Those
+# are VAGUE ANSWERS, not assertions of absence, and a caller who says "she's at
+# the clinic" has given us something the probe arguably should have read.
+# Importing the wider set to save a dozen strings would silence a whole class
+# of finding this scan exists to surface.
+#
+# Nor is the overlap a drift risk in the direction it looks like: if a word
+# were dropped from the tool's set, save_branch would ACCEPT it, there would be
+# no refusal, and nothing here would ever be consulted about it.
 #
 # So it is deliberately narrow, and it is about the shape of the value rather
 # than the field: a choice tool cannot reach here with "unknown" (its own valid
