@@ -9967,6 +9967,79 @@ async def main():
           "'clinic' is in the tool's invalid-word set and is NOT a sentinel - "
           "the caller said something and the probe could not use it")
 
+    # ── A REFUSAL THAT CAUSED THE ANSWER — call-20260831-1704 ──────────────
+    # PREMATURE means "the caller was made to say it again, in words the probe
+    # finally recognised". Two shapes land inside its literal definition —
+    # refused, then the field arrived — while meaning the opposite.
+    #
+    # THE NAME REPAIR. The caller said "Yes, Dr. Rayas, one of our
+    # oncologists."; the line had mangled the surname, the identity guard
+    # caught it and told the agent to spell ours out; the caller answered THAT
+    # and identity saved confirmed. The scan reported a probe gap and offered
+    # "Dr. Rayas" as the phrasing to fix. Joined on the caller TURN, which
+    # name_mismatches and save_refusals both record, rather than on the
+    # refusal's wording — reading it for "SPELL IT" works until somebody
+    # rewords the message.
+    _nm_call = _call(
+        collected=["identity"],
+        # TWO agent turns before the refusal, deliberately. With only one, the
+        # refused-before-any-question exemption fires instead and this fixture
+        # would pass while testing nothing — the two exemptions have to be
+        # separable or neither is really pinned.
+        transcript=[{"role": "agent", "text": "Hi, this is David...",
+                     "timestamp": "17:05:02"},
+                    {"role": "caller", "text": "Go ahead.", "timestamp": "17:05:14"},
+                    {"role": "agent", "text": "Is this Dr. Reyes?", "timestamp": "17:05:17"},
+                    {"role": "caller", "text": "Yes, Dr. Rayas, one of our oncologists.",
+                     "timestamp": "17:05:29"}],
+        name_mismatches=[{"heard": "rayas", "ours": "reyes",
+                          "said": "Yes, Dr. Rayas, one of our oncologists.",
+                          "after_spelling": False}],
+        save_refusals=[{"tool": "save_doctor_identity",
+                        "args": {"identity": "confirmed"},
+                        "why": "they named 'rayas'",
+                        "heard": "Yes, Dr. Rayas, one of our oncologists.",
+                        "at": "17:05:29"}])
+    check(_cr.audit_dict(_nm_call) == [],
+          "a refusal the NAME guard caused is not a probe gap",
+          "the spelling repair produced better evidence than existed before — "
+          "nobody was made to repeat themselves")
+    # THE SAME REFUSAL WITHOUT THE REPAIR still flags: the exemption is the
+    # recorded mismatch, not the fact that identity was refused.
+    _nm_bare = dict(_nm_call, name_mismatches=None)
+    check(len(_cr.audit_dict(_nm_bare)) == 1,
+          "and an identity refusal with no mismatch behind it still flags",
+          "otherwise the exemption would swallow every identity finding")
+
+    # REFUSED BEFORE ANYTHING WAS ASKED. The model called save_doctor_identity
+    # on the greeting turn, against "Yeah, I did it." — the caller's reply to
+    # "is now a good time?" — two seconds before the agent asked who the doctor
+    # was. There is no probe gap because there was no question. Counted in
+    # agent turns rather than by matching the ask: importing the objective's
+    # probes would couple this offline audit to the template it audits.
+    _early = _call(
+        collected=["identity"],
+        transcript=[{"role": "agent", "text": "Hi, this is David...",
+                     "timestamp": "17:05:02"},
+                    {"role": "caller", "text": "Yeah, I did it.", "timestamp": "17:05:14"}],
+        save_refusals=[{"tool": "save_doctor_identity",
+                        "args": {"identity": "confirmed"},
+                        "why": "nothing the caller said reads as that answer",
+                        "heard": "Yeah, I did it.", "at": "17:05:15"}])
+    check(_cr.audit_dict(_early) == [],
+          "a save refused before any question was asked is not a probe gap",
+          "one agent turn before the refusal can only be the greeting")
+    # ONE MORE AGENT TURN AND IT COUNTS AGAIN — the exemption is "nothing has
+    # been asked yet", not "identity refusals are exempt".
+    _late = dict(_early, transcript=[
+        {"role": "agent", "text": "Hi, this is David...", "timestamp": "17:05:02"},
+        {"role": "caller", "text": "Go ahead.", "timestamp": "17:05:10"},
+        {"role": "agent", "text": "Is this Dr. Reyes?", "timestamp": "17:05:12"},
+        {"role": "caller", "text": "Yeah, I did it.", "timestamp": "17:05:14"}])
+    check(len(_cr.audit_dict(_late)) == 1,
+          "and the same refusal AFTER a question does flag",
+          "the exemption is the missing question, not the field")
+
     # AGAINST THE REAL CORPUS: it must find the two gaps fixed by hand today,
     # and nothing else. A scan with false positives is one that gets ignored.
     #
@@ -9992,16 +10065,44 @@ async def main():
               "above still ran. Put a corpus in 'data/3 cases jsons' to "
               "restore it")
     else:
+        # A MANIFEST, NOT A COUNT. `len(_found) == 2` asserted an exact number
+        # over data that grows every time anybody picks up the phone, so a
+        # perfectly clean call turned the suite red — which happened on
+        # 2026-08-31 and is what sent someone looking at the verdict logic in
+        # the first place.
+        #
+        # The fix is NOT to freeze the corpus. A frozen fixture would have kept
+        # this green while the two false positives sat in it, and the whole
+        # value of sweeping live calls is that a new one can tell you something
+        # a fixture cannot. So the expectation is keyed on IDENTITY: these two
+        # gaps, by call and field, and nothing else. A new clean call changes
+        # nothing here; a new REAL gap fails loudly and names itself, which is
+        # exactly the report a person wants.
+        #
+        # Adding a row here is a decision, not a chore: it means a probe could
+        # not read a phrasing and you are choosing to leave it that way.
+        _MANIFEST = {
+            ("call-20260827-1130-ed9f", "referral"),    # "It's depend upon situation"
+            ("call-20260827-1428-9f82", "accepting"),   # "Right now, no."
+        }
         _found = [f for _p in _real for f in _cr.audit(_p)]
-        _ids = {(f["call_id"][:18], f["field"]) for f in _found}
-        check(("call-20260827-1130", "referral") in _ids,
+        _ids = {(f["call_id"], f["field"]) for f in _found}
+        check(("call-20260827-1130-ed9f", "referral") in _ids,
               "the corpus scan finds \"It's depend upon situation\" (COST)",
               f"{sorted(_ids)}")
-        check(("call-20260827-1428", "accepting") in _ids,
+        check(("call-20260827-1428-9f82", "accepting") in _ids,
               'and finds "Right now, no." (PREMATURE)')
-        check(len(_found) == 2,
-              f"and flags nothing else across {len(_real)} calls",
-              f"{[(f['call_id'], f['field']) for f in _found]}")
+        check(_ids == _MANIFEST,
+              f"and flags exactly the known gaps across {len(_real)} calls",
+              f"unexpected: {sorted(_ids - _MANIFEST)} | "
+              f"missing: {sorted(_MANIFEST - _ids)}")
+        # AND ONE ROW PER GAP. The manifest is a set, so it cannot see the same
+        # finding reported twice — which is the double-count bug that reached
+        # this corpus once already, through branch_rejections and save_refusals
+        # recording one event.
+        check(len(_found) == len(_MANIFEST),
+              "each gap is reported once, not once per record of it",
+              f"{len(_found)} findings for {len(_MANIFEST)} distinct gaps")
         # PINNED BY NAME, because the count alone cannot say WHICH call went
         # quiet. This artifact broke the scan in two independent ways at once —
         # the double-count and the sentinel — and a corpus check that only

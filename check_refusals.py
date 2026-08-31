@@ -149,6 +149,7 @@ def _refusals(call: dict) -> list[dict]:
         _val = _attempted(_tool, r.get("args"))
         _add({"tool": _tool, "why": r.get("why", ""),
               "heard": r.get("heard", ""), "value": _val,
+              "at": r.get("at", ""),
               "when": "on the spot"},
              (_tool, _val, r.get("at") or f"sr{i}"))
     for i, d in enumerate(call.get("deferred_saves") or []):
@@ -158,15 +159,80 @@ def _refusals(call: dict) -> list[dict]:
         _val = _attempted(_tool, d.get("args"))
         _add({"tool": _tool, "why": d.get("why", ""),
               "heard": (d.get("args") or {}).get("heard", ""), "value": _val,
+              "at": d.get("at", ""),
               "when": "after the words landed"},
              (_tool, _val, d.get("at") or f"ds{i}"))
     for i, b in enumerate(call.get("branch_rejections") or []):
         _val = str(b.get("value", "") or "").strip().lower()
         _add({"tool": "save_branch", "why": b.get("why", ""),
               "heard": b.get("value", ""), "value": _val,
+              "at": b.get("at", ""),
               "when": "on the spot"},
              ("save_branch", _val, b.get("at") or f"br{i}"))
     return out
+
+
+def _repaired_by_spelling(call: dict, r: dict) -> bool:
+    """This refusal WAS the name guard, and it carried its own repair.
+
+    When the caller names a different doctor, the identity guard refuses and
+    tells the agent to spell ours out one letter at a time. The caller then
+    answers THAT question and the field saves. Refused, then landed — which is
+    the literal shape of PREMATURE, and the exact opposite of what PREMATURE
+    means. Nobody was made to repeat themselves in words a probe finally
+    recognised; a repair was performed and it produced better evidence than
+    existed before.
+
+    On call-20260831-1704 the caller said "Yes, Dr. Rayas, one of our
+    oncologists." The line had mangled the surname, the guard caught it, the
+    agent spelled R-E-Y-E-S, the caller said "Yes, that's correct." and
+    identity saved confirmed. The scan reported that as a probe gap and handed
+    a reviewer "Dr. Rayas" as a phrasing to go and fix.
+
+    JOINED ON THE TURN, not on the wording of the refusal. `name_mismatches`
+    records the caller turn that caused each mismatch, and it is the same
+    string `save_refusals` stores as `heard`, so the two rows can be matched
+    exactly. Reading the guard's message for "SPELL IT" would work today and
+    break the first time anybody rewords it.
+    """
+    said = {m.get("said") for m in (call.get("name_mismatches") or []) if m.get("said")}
+    return bool(r.get("heard")) and r["heard"] in said
+
+
+def _before_any_question(call: dict, r: dict) -> bool:
+    """Refused while the agent had said nothing but its opening line.
+
+    A model that calls save_doctor_identity on the greeting turn has not been
+    told anything about the doctor — on call-20260831-1704 it fired at 17:05:15
+    on "Yeah, I did it.", the caller's reply to "is now a good time?", two
+    seconds before the agent asked who the doctor was. Refusing that is the
+    guard working. There is no probe gap because there was no question.
+
+    COUNTED IN AGENT TURNS, not by matching the ask. The scan is deliberately
+    model-free and pattern-free — importing the objective's probes to decide
+    whether a question had been asked would couple an offline audit to the
+    live template it audits. One agent turn before the refusal can only be the
+    greeting, which asks about nothing this scan tracks.
+
+    Only reachable for on-the-spot refusals: deferred saves record `waited_s`
+    rather than a clock, and by construction they happen a turn late, long
+    after the question.
+    """
+    at = r.get("at")
+    if not at:
+        return False
+    # NO TRANSCRIPT IS NOT EVIDENCE THAT NOTHING WAS ASKED, and reading it that
+    # way exempted every refusal on any artifact without one — which the
+    # suite's own hand-built calls are, so it took the COST case to zero
+    # findings and crashed on the empty list. Absence of a signal is not the
+    # signal, the same rule the grounding checks are built on: claim the agent
+    # said nothing but its greeting only when the turns are there to show it.
+    turns = call.get("transcript") or []
+    if not turns:
+        return False
+    before = [t for t in turns
+              if t.get("role") == "agent" and (t.get("timestamp") or "") < at]
+    return len(before) <= 1
 
 
 def audit(path: pathlib.Path) -> list[dict]:
@@ -204,6 +270,13 @@ def audit_dict(call: dict) -> list[dict]:
         # PREMATURE would say the caller was made to repeat something they
         # never said.
         if r.get("value") in SENTINELS:
+            continue
+        # A REFUSAL THAT CAUSED THE ANSWER IS NOT A REFUSAL THAT COST ONE.
+        # Both of these are the guard working, and both land in the middle of
+        # PREMATURE's definition — refused, then the field arrived — because
+        # that definition assumes the caller was made to repeat themselves.
+        # See each predicate for the call that produced it.
+        if _repaired_by_spelling(call, r) or _before_any_question(call, r):
             continue
         if field in missing:
             verdict = "COST"
