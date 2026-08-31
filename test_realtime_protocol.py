@@ -64,9 +64,32 @@ import agents.voice.session as _rwsession
 # that reads one module after its subject moves does not fail — it finds
 # nothing and passes, which is how four checks went quiet and were only caught
 # by diffing check names against a baseline.
+#
+# RGLOB, NOT GLOB, and the paragraph above is the reason. A subpackage is a
+# move like any other: when evidence became agents/voice/evidence/ every claim
+# resting on this string stopped seeing six modules, and — exactly as described
+# — found nothing and passed. Caught when grounding followed it.
 _PKG_SRC = "\n".join(
     _p.read_text(encoding="utf-8")
-    for _p in sorted(pathlib.Path("agents/voice").glob("*.py")))
+    for _p in sorted(pathlib.Path("agents/voice").rglob("*.py")))
+
+
+def _mod_src(mod) -> str:
+    """Every line of a module, or of every module in a package.
+
+    `pathlib.Path(mod.__file__).read_text()` is the same trap one level down:
+    for a package __file__ points at __init__.py, which for both packages here
+    is a proxy of re-exports, so a source scan over it reads fifty lines of
+    imports and reports that the code it was guarding is absent. Three checks
+    on grounding failed this way the moment it became a package — they failed
+    loudly only because they assert presence; a check asserting ABSENCE would
+    have gone green and stayed there.
+    """
+    p = pathlib.Path(mod.__file__)
+    if p.name == "__init__.py":
+        return "\n".join(q.read_text(encoding="utf-8")
+                         for q in sorted(p.parent.rglob("*.py")))
+    return p.read_text(encoding="utf-8")
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────────────
@@ -2400,7 +2423,7 @@ async def main():
           f"{rw._MAX_SAVE_REJECTIONS}")
     # The tool-call rejection path moved to agents/voice/grounding.py with
     # _handle_tool_call. Same assertions, read from where the code now lives.
-    _rsrc = _plb.Path(_rwground.__file__).read_text(encoding="utf-8")
+    _rsrc = _mod_src(_rwground)
     _rej = _rsrc[_rsrc.find("sess._save_rejections += 1"):][:1800]
     check(_rej, "found the rejection-counting site")
     # Guessing is not the exit. The caller's words are already on the
@@ -2889,7 +2912,7 @@ async def main():
     # was thrown away. Two rejections saying only "NEED: wording the caller
     # used out loud" are why the model reached for words: "out loud" reads as
     # "as spoken". It must no longer say that, and must pass the detail on.
-    _gsrc = _plb.Path(_rwground.__file__).read_text(encoding="utf-8")
+    _gsrc = _mod_src(_rwground)
     check("REJECTED — {ungrounded} " in _gsrc,
           "the grounding rejection carries the specific reason")
     # Asserted POSITIVELY, on the clause that must be there. The obvious
@@ -3997,9 +4020,13 @@ async def main():
     # went red — the third time this particular check has under-counted, after
     # the '[a-z]{4,}' pattern and the de-duplicating set. The population is the
     # DIRECTIVES THIS PACKAGE INJECTS, and that was never a property of a file.
-    _worker_src = NL.join(
-        _p.read_text(encoding="utf-8")
-        for _p in sorted(pathlib.Path("agents/voice").glob("*.py")))
+    # FOURTH TIME, AND THE LAST COPY. The comment above records this check
+    # under-counting three times; the fourth was this glob, which stopped
+    # seeing grounding the day it became a package and quietly dropped six
+    # directives. _PKG_SRC is the same string, derived once, with rglob — a
+    # private re-derivation here is how the population and the guard over it
+    # drift apart in the first place.
+    _worker_src = _PKG_SRC
     # The first word may be short. '[a-z]{4,}' silently skipped every directive
     # opening with a three-letter word, which was both of the ones beginning
     # "you ..." — including the ask-budget directive that ENDS the call. The
@@ -4749,25 +4776,61 @@ async def main():
           f"the scan reaches inside subpackages ({len(_pat_mods)} modules)",
           "a package whose __init__ re-exports a subset looks fully covered "
           "from the outside — that is how the last six dropped out")
-    _pats = {(_m.__name__, _n): _v for _m in _pat_mods
-             for _n, _v in vars(_m).items() if isinstance(_v, _re.Pattern)}
-    check(len(_pats) >= 40,
-          f"the pattern population is still being found ({len(_pats)})",
+    # DEDUPED ON (name, object) — NOT on the module, and NOT on the object
+    # alone. Each half of that is a bug this check has actually had.
+    #
+    # Keyed by (module, name), a package proxy re-exporting the same compiled
+    # pattern under a second module name is counted twice: 95 sightings of 39
+    # distinct constants, a per-pattern check run twice, and a floor reading
+    # high for the wrong reason. The floor moved 40 -> 35 to match: 40 was
+    # calibrated against the inflated count, and raising a number by counting
+    # duplicates is how a guard comes to certify its own inflation.
+    #
+    # Keyed by the object alone, it collapses constants that merely SHARE a
+    # value. DISABLED_REASON, _PROVIDER_VERIFICATION_HINT and _US_TRANSCRIBE_HINT
+    # are all "" — CPython interns it, so one id — and all three names vanished
+    # from the report. Harmless for THIS assertion, since "" cannot contain a
+    # control character, and exactly the wrong shape anyway: the check earns its
+    # keep by naming what it scanned, and a guard that silently stops naming
+    # three constants is the population problem in miniature.
+    #
+    # Same name and same object is the one thing that really is a duplicate.
+    _pats, _strs = {}, {}
+    for _m in _pat_mods:
+        for _n, _v in vars(_m).items():
+            if isinstance(_v, _re.Pattern):
+                _pats.setdefault((_n, id(_v)), (_m.__name__, _n, _v))
+            elif isinstance(_v, str) and not _n.startswith("__"):
+                _strs.setdefault((_n, id(_v)), (_m.__name__, _n, _v))
+    # THE FLOOR MOVED 40 -> 35, AND IT IS NOT A RELAXATION. 40 was calibrated
+    # on a population that counted re-exports: realtime_worker alone re-exports
+    # about forty names from evidence and grounding, so most patterns were
+    # being counted two or three times and the "95" this printed before
+    # deduping was mostly the same objects over again. There are 38 distinct
+    # compiled patterns in this package. A floor of 40 over deduped objects
+    # would fail on a truthful count, and raising the number by counting
+    # duplicates is how a guard comes to certify its own inflation.
+    #
+    # Both numbers are printed. `distinct` is the population actually checked;
+    # `sightings` is how many namespaces they were reached through, and a
+    # collapse in THAT is what a module dropping out of the walk looks like.
+    _sightings = sum(1 for _m in _pat_mods for _v in vars(_m).values()
+                     if isinstance(_v, _re.Pattern))
+    check(len(_pats) >= 35 and _sightings >= 60,
+          f"the pattern population is still being found "
+          f"({len(_pats)} distinct, {_sightings} sightings)",
           "scoped to one module it falls to whatever survived the last move, and reports success for everything it no longer looks at")
-    for (_mod, _name), _val in _pats.items():
+    for _mod, _name, _val in _pats.values():
         check(not any(ord(c) < 32 and c not in "\t\n" for c in _val.pattern),
               f"no control characters in {_name}")
     # Plain string constants too, not just regexes. A 0x01 sentinel landed in
     # _ABBREV_MARK and the regex-only guard could not see it — the third
     # control byte to reach this file. Read renders them invisibly, so nothing
     # catches these by eye.
-    _strs = {(_m.__name__, _n): _v for _m in _pat_mods
-             for _n, _v in vars(_m).items()
-             if isinstance(_v, str) and not _n.startswith("__")}
     check(len(_strs) >= 12,
           f"the string-constant population is still being found ({len(_strs)})",
           "same reason as the patterns above")
-    for (_mod, _name), _val in _strs.items():
+    for _mod, _name, _val in _strs.values():
         check(not any(ord(c) < 32 and c not in "\t\n" for c in _val),
               f"no control characters in string {_name}")
 
@@ -4835,8 +4898,7 @@ async def main():
     # _handle_tool_call; parsing one module after that split would find zero and
     # the judging loop below would pass over an empty list — the exact
     # vacuous-pass this check's own lower bound was written to catch.
-    _rej_src = (_pl.Path(rw.__file__).read_text(encoding="utf-8") + chr(10)
-                + _pl.Path(_rwground.__file__).read_text(encoding="utf-8"))
+    _rej_src = _mod_src(rw) + chr(10) + _mod_src(_rwground)
     for _node in _ast.walk(_ast.parse(_rej_src)):
         if not isinstance(_node, _ast.Dict):
             continue
@@ -5529,7 +5591,7 @@ async def main():
     # The claim was never about a file: response.create has ONE sender anywhere.
     _senders = set()
     _pkg_trees = [_ast.parse(_p.read_text(encoding="utf-8"))
-                  for _p in sorted(_pl.Path(rw.__file__).parent.glob("*.py"))]
+                  for _p in sorted(_pl.Path(rw.__file__).parent.rglob("*.py"))]
     for _mod_tree in _pkg_trees:
         for _fn_node in _ast.walk(_mod_tree):
             if not isinstance(_fn_node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
