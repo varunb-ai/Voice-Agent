@@ -44,6 +44,33 @@ import time
 log = logging.getLogger(__name__)
 
 
+def _collected_pairs(sess: "RealtimeSession") -> set:
+    """Every collected field as (name, value), not just its name.
+
+    A SET OF NAMES CANNOT SEE A STATE FLIP, and on call-20260831-1048 that hid
+    the exact moment the call was decided. `identity` was already collected
+    when it was overwritten `confirmed` -> `unsure`, so the difference of the
+    two name-sets was empty, the 🎯 line did not print, and the objective went
+    PARTIAL -> COMPLETE with nothing whatsoever in the log to say so. The one
+    line that would have told an operator why the call ended three seconds
+    later was suppressed by the very write that ended it — the same shape as
+    the metrics that tidied away the repeat before it could be counted.
+
+    A FLIP IS ALSO PROGRESS, which is the other half of what `_gained` feeds.
+    confirmed -> not_here is the caller putting us right, and a no-progress
+    counter that cannot see it would keep ticking through the most informative
+    turn of the call. The regression to `unsure` that motivated this is refused
+    in _save_state now and never reaches here.
+
+    Values are read through the field's own memory_key and lowercased, so this
+    compares the same strings `present()` accepted rather than a second opinion
+    about them.
+    """
+    obj = _objective_of(sess)
+    return {(f.name, str(sess.memory.get(f.memory_key) or "").strip().lower())
+            for f in obj.fields if f.present(sess.memory)}
+
+
 def _objective_of(sess: "RealtimeSession") -> CallObjective:
     """The objective this call is working to.
 
@@ -846,7 +873,11 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     # a template may point a field at a note_* key — and hard-coding the tool
     # name here is how the success condition ended up inside save_branch in the
     # first place.
-    _collected_before = set(_objective_of(sess).collected(sess.memory))
+    #
+    # (name, VALUE) pairs, not names — see _collected_pairs. A field that is
+    # overwritten with a different state is progress this set has to be able to
+    # see, and until 2026-08-31 it could not.
+    _collected_before = _collected_pairs(sess)
 
     # Grounding check. On a live call the model called save_branch
     # with {'branch': 'Riverside Clinic', 'city': 'Atlanta'} when
@@ -1281,9 +1312,13 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     # the call is finished or has another field (or another doctor) to go. This
     # is the reset that makes one ceiling work for a multi-field, multi-doctor
     # call without the counter having to know either number.
-    _gained = set(_objective_of(sess).collected(sess.memory)) - _collected_before
+    _gained = _collected_pairs(sess) - _collected_before
     if _gained:
-        sess.reset_ask_budget("collected " + ", ".join(sorted(_gained)))
+        # Named with the value it landed on, because a flip and a first
+        # collection are now both in here and "collected identity" alone no
+        # longer says which happened.
+        _what = ", ".join(f"{n}={v}" for n, v in sorted(_gained))
+        sess.reset_ask_budget("collected " + _what)
         print(f"[Realtime] 🎯 {_describe_objective(_objective_of(sess), sess.memory)}",
               flush=True)
 
@@ -1484,12 +1519,66 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     # a reportable success when the call is over; it must not decide when to
     # stop asking. A template that accepts a partial as success still wants the
     # rest of what it came for.
+    #
+    # ESCALATE IS NOT DEFERRABLE and the branch below does not touch it. It is
+    # the model saying it has given up; holding that open for an answer is how
+    # a call that has already failed stays on the line. Only the objective path
+    # can be deferred, because only it can finish WITHOUT anyone deciding to.
+    _close_deferred = False
     if name == "escalate" and result.get("ok"):
         sess.done = True
     elif (result.get("ok")
             and (name == "save_branch" or name in _CHOICE_SAVE_TOOLS)
             and _objective_of(sess).outcome(sess.memory) is Outcome.COMPLETE):
-        sess.done = True
+        # THE OBJECTIVE FINISHED ON A QUESTION WE HAVE NOT HEARD BACK ON.
+        #
+        # call-20260831-1048, and it is the second half of the same defect the
+        # `sounded_like_a_goodbye` test below was written for. That test asks
+        # the right question — an utterance ending in "?" is not a farewell —
+        # and then has nowhere to put the answer: its only two branches are
+        # "let the model's line stand as the goodbye" and "ask for a goodbye
+        # anyway". Neither is "do not hang up yet". So the agent asked "would
+        # scheduling be the best group to ask about where she sees patients?",
+        # the objective flipped COMPLETE inside the same response, a goodbye
+        # was requested with allow_when_done (which bypasses the playback
+        # guard), and its audio began 1.43s BEFORE the question had finished
+        # playing out. The caller was talked over and hung up on, mid-question.
+        #
+        # The third branch, then. The objective really is complete and nothing
+        # here disputes that — the close is deferred, not cancelled, and it
+        # re-arms the moment they answer (see _close_when_answered, consumed in
+        # _handle_caller_transcript). If they never answer, the silence
+        # watchdog still ends the call on its own budget, so this cannot hold a
+        # line open indefinitely.
+        # UNANSWERED, WHICH IS NOT THE SAME AS "the last agent turn ends in ?".
+        # The happy path ends every call on a question the caller then answered
+        # — "which location is Dr. Okafor practising at?", "She's at the
+        # Northgate campus." — and the save that completes the objective is
+        # grounded in that very answer. Reading only the last AGENT turn would
+        # defer the close on every well-run call in the suite. So walk back
+        # from the end: a real caller turn in between means the question was
+        # answered and nothing is owed. A "[...]" placeholder does not — that
+        # is their answer still in flight, which is a reason to wait, not to
+        # hang up.
+        _unanswered = ""
+        for _t in reversed(sess.turns):
+            if _t.role == "caller":
+                if (_t.text or "").strip() != "[...]":
+                    break
+                continue
+            if _t.role == "agent":
+                if (_t.text or "").rstrip().endswith("?"):
+                    _unanswered = _t.text.rstrip()
+                break
+        if _unanswered:
+            sess._close_when_answered = True
+            _close_deferred = True
+            print(f"\n[{ts}] ⏸️  CLOSE DEFERRED  : objective complete, but "
+                  f"the turn just spoken is a question they have not "
+                  f"answered — waiting for them\n"
+                  f"          asked: {_unanswered[-70:]!r}", flush=True)
+        else:
+            sess.done = True
 
     await oai_ws.send(json.dumps({
         "type": "conversation.item.create",
@@ -1578,6 +1667,22 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
                                    allow_when_done=True,
                                    allow_when_active=True)
             _closing_sent = True  # skip tool-call response.done, close on closing's
+    elif _close_deferred:
+        # NO CONVERSATION ITEM AND NO response.create. The response carrying
+        # this tool call has already put a question to them; the only correct
+        # next sound on this line is theirs.
+        #
+        # Which is why this is its own branch and not a fall-through to the
+        # `else`. `_pending_response_create` fires a create at the next
+        # response.done — that is right after an ordinary tool call, where the
+        # model has a result to speak to, and wrong here, where speaking again
+        # is the whole thing being avoided. It would talk over the question by
+        # the same 1.4s the injected goodbye did, minus the goodbye.
+        #
+        # Left as None in the outcome below rather than set False, so the event
+        # loop keeps whatever it already had — see _ToolOutcome on why None is
+        # not False.
+        pass
     else:
         _pending_response_create = True
     return _ToolOutcome(_agent_text_buf, _closing_sent,
@@ -1735,6 +1840,7 @@ __all__ = [
     "_handle_tool_call",
     "_hint_vocabulary",
     "_is_bare_hint_word",
+    "_collected_pairs",
     "_objective_of",
     "_resolve_deferred_save",
     "_strip_ungrounded_detail",

@@ -12,7 +12,7 @@ from typing import Optional, cast, Any
 
 from core import llm
 from core.models import Doctor
-from agents.experiment.memory import CallMemory
+from core.memory import CallMemory
 from agents.experiment.prompts import build_system_prompt, build_greeting, build_closing
 from agents.voice.tools import TOOL_SCHEMAS, run_tool
 

@@ -16,15 +16,49 @@ venv/
 *.egg-info/
 
 # ── Generated data ───────────────────────────────────────────────────────────
-data/*.db
-data/crawled/
 .crawl4ai/
 *.log
 
-# Call artefacts: audio is large and contains recorded third-party voices.
-# Transcripts/JSON are kept so results are reviewable in-repo.
-data/3 cases voice/*.wav
-data/3 cases voice/*.mp3
+# ── Call artefacts and audio ─────────────────────────────────────────────────
+# Untracked 2026-08-31. Two reasons, and the second is the one that decided it:
+#
+#   1. They are OUTPUTS. Every file under data/ is written by a call — the
+#      artifact JSON, the WAV, the MP3 Twilio hands back, and the doctors.json
+#      / master.json rows the run upserts into. Committing them versions the
+#      results of running the program alongside the program.
+#   2. They are RECORDED THIRD-PARTY SPEECH. Every transcript is a receptionist
+#      who did not agree to be in a repository, named practices included. The
+#      audio was already excluded on that ground; the transcripts say the same
+#      words and were not.
+#
+# The offline suite's corpus sweep reads 'data/3 cases jsons' when it is there
+# and REPORTS that it did not run when it is not — see the block around
+# `corpus sweep NOT run` in test_realtime_protocol.py. Everything that sweep
+# proves semantically is also asserted on hand-built calls that travel with
+# the repo, so a bare clone loses the regression sweep and nothing else.
+data/
+*.wav
+*.mp3
+
+# NOT EVERYTHING UNDER data/ IS CALL OUTPUT, and a blanket rule with no
+# negations would have been a trap rather than a policy: git leaves files that
+# are ALREADY tracked alone, so these would have kept working here and
+# vanished the first time anyone removed and re-added one. Re-admitted
+# explicitly, directory first — git will not look inside an excluded
+# directory, so the folder has to be un-ignored before a file in it can be.
+#
+#   backchannels/  pre-rendered "mm-hm"/"okay" audio, read at runtime by
+#                  agents/voice/backchannel.py. Built by
+#                  scripts/make_backchannels.py; fixtures, not output.
+#   db/            the JSON backend core/db.py reads when no database is
+#                  configured — seed data the program starts FROM.
+#   voice_samples/ redistributable Piper samples.
+!data/backchannels/
+!data/backchannels/**
+!data/db/
+!data/db/**
+!data/voice_samples/
+!data/voice_samples/*.wav
 
 # Stray editor/patch temp files
 *.tmp.*

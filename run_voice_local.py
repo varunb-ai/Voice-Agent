@@ -37,7 +37,7 @@ from rich.table import Table
 from core.config import settings
 from core.models import Doctor, TranscriptTurn
 from agents.experiment.brain import VoiceBrain
-from agents.experiment.memory import CallMemory
+from core.memory import CallMemory
 from agents.recording.agent import record_call
 
 console = Console()

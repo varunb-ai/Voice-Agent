@@ -41,7 +41,7 @@ from fastapi import WebSocket
 
 from core.config import settings, persona_for_voice
 from core.models import Doctor, DoctorStatus as DoctorStatus, Source as Source, TranscriptTurn as TranscriptTurn
-from agents.experiment.memory import CallMemory as CallMemory
+from core.memory import CallMemory as CallMemory
 from agents.voice.objectives import (
     ACCEPTING_ASK,
     IDENTITY_ASK,
@@ -53,7 +53,7 @@ from agents.voice.objectives import (
 )
 from agents.voice.templates import get_template
 from agents.voice.tools import run_tool as run_tool, TOOL_SCHEMAS
-from agents.experiment.audio_utils import resample, _mulaw_decode, _mulaw_encode as _mulaw_encode
+from core.audio_utils import resample, _mulaw_decode, _mulaw_encode as _mulaw_encode
 # The evidence guards, in their own module now. See evidence.py for why the
 # line falls where it does. Split in two on purpose:
 #

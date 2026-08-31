@@ -1120,6 +1120,40 @@ async def _suppress_reply_to(sess: "RealtimeSession", oai_ws, text: str) -> str:
     })
     return outcome
 
+
+def _rearm_close_if_answered(sess: "RealtimeSession", ts: str = "") -> bool:
+    """The caller answered the question a pending close was waiting on.
+
+    The objective can finish inside a response that has just asked them
+    something — the save that completes it and the question are in the same
+    turn. The tool handler holds the teardown rather than hanging up
+    mid-question (see the _close_deferred branch in grounding); this is the
+    event it was waiting for, and it is a person speaking rather than anything
+    on a clock. Called from _handle_caller_transcript the moment their words
+    are in sess.turns.
+
+    HANDED TO _close_after_response, NOT STRAIGHT TO sess.done. Closing here
+    would drop the line on the answer they just gave, with the agent never
+    acknowledging it — the same discourtesy one turn later, and on
+    call-20260831-1048 the discourtesy WAS the bug. The model's reply to this
+    turn becomes the closing turn instead, and the block at response.done then
+    makes the call it already knows how to make: does that reply stand as a
+    goodbye, or does one have to be asked for.
+
+    A separate function because it is a decision, and because a re-arm that
+    only exists inline in a 300-line handler cannot be tested on its own — a
+    deferral with no re-arm is a call that never ends, which is the failure
+    mode this half has to be checked against.
+    """
+    if not sess._close_when_answered or sess.done:
+        return False
+    sess._close_when_answered = False
+    sess._close_after_response = True
+    print(f"[{ts}] ▶️  CLOSE RE-ARMED — they answered; closing after the "
+          f"agent replies", flush=True)
+    return True
+
+
 async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) -> None:
     """One completed caller transcript: log it, and run the turn-level guards.
 
@@ -1480,6 +1514,9 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         # earlier. Anything held for it is judged now, against the words
         # themselves — this is the event the 1.5s wait was standing in for.
         await _resolve_deferred_save(sess, oai_ws)
+
+        # THEY ANSWERED THE QUESTION THE CLOSE WAS DEFERRED FOR.
+        _rearm_close_if_answered(sess, ts)
 
         # ── THEY ANSWERED SOMETHING NOBODY ASKED ────────────────────────────
         # A front desk volunteers. "She's at Riverside, and she's not taking
@@ -2067,6 +2104,7 @@ __all__ = [
     "_is_reintroduction",
     "_norm_clause",
     "_pending_expectation",
+    "_rearm_close_if_answered",
     "_reads_as_hint_vocabulary",
     "_silence_watchdog",
     "_strip_hint_run",

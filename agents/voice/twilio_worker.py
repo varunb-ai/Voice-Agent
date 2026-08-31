@@ -27,8 +27,8 @@ from fastapi.responses import Response
 
 from core.config import settings
 from core.models import Doctor, TranscriptTurn
-from agents.experiment.memory import CallMemory
-from agents.experiment.audio_utils import telnyx_to_float32, float32_to_telnyx, wav_to_float32, resample
+from core.memory import CallMemory
+from core.audio_utils import telnyx_to_float32, float32_to_telnyx, wav_to_float32, resample
 
 # ── Classic pipeline dependencies (USE_REALTIME=false only) ──────────────────
 # webrtcvad, the Piper/Whisper brain and the recording agent are needed only by
@@ -260,7 +260,7 @@ class _Session:
     def _prebuild_tts(self) -> None:
         import re
         from agents.experiment.tts_local import synthesize
-        from agents.experiment.audio_utils import wav_to_float32, resample
+        from core.audio_utils import wav_to_float32, resample
         from agents.experiment.prompts import _FIRST_ASK, _REPEAT_ASK, _HOLD_ACKS, _CLOSINGS, _GREETINGS
         from core.config import settings
         clean = re.sub(r"^Dr\.?\s+", "", self.doctor.doctor_name, flags=re.I).strip()

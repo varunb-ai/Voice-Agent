@@ -18,7 +18,7 @@ Split from realtime_worker 2026-08-26. RealtimeSession moved whole and verbatim
 from __future__ import annotations
 
 import logging
-from agents.experiment.memory import CallMemory
+from core.memory import CallMemory
 from agents.voice.audio import _outbound_conditioned, _effective_output_format, _agent_wire_sample_rate, _agent_wire_samples, _agent_wire_to_pcm16, _agent_to_caller_rate, _wire_sample_rate, _wire_to_pcm16
 from agents.voice.evidence import _is_location_ask, _revisit_grounding
 from agents.voice.grounding import _objective_of, hospital_mismatch
@@ -441,6 +441,14 @@ class RealtimeSession:
         # that is already in flight." Set by _resolve_deferred_save, acted on
         # at response.done — see the comment there for why it cannot be both.
         self._close_after_response: bool = False
+        # "The objective finished while the caller was still owed an answer to
+        # the question we had just asked them; close once they have given it."
+        # Set by the tool handler, consumed in _handle_caller_transcript, which
+        # hands it on to _close_after_response so the agent's REPLY to that
+        # answer is the turn that closes. Two flags because they mark different
+        # moments: one waits on a response we already asked for, this one waits
+        # on a person. See call-20260831-1048.
+        self._close_when_answered: bool = False
         # escalate refused once because the caller's last turn was still
         # transcribing. ONE-SHOT: the placeholder resolves within a turn either
         # way, and a guard that can refuse forever cannot end a call.

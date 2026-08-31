@@ -3,7 +3,7 @@
 Split from realtime_worker 2026-08-26, verbatim.
 
 - Not a second audio_utils. Mu-law and resampling come from
-  agents/experiment/audio_utils; here is only what means something inside a
+  core/audio_utils; here is only what means something inside a
   CALL - which format each leg negotiated, how many samples a buffer holds,
   where one utterance sits in the caller recording.
 - The wire constants came too. Each has exactly one reader, and splitting a
@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional
 import numpy as np
 
 from core.config import settings
-from agents.experiment.audio_utils import resample, _mulaw_decode
+from core.audio_utils import resample, _mulaw_decode
 from agents.voice.outbound_audio import DISABLED_REASON as OUTBOUND_UNAVAILABLE
 from agents.voice.latency import _stage_row, _fmt_stages
 from agents.voice.evidence import _LOW_AUDIO_RMS, _QUIET_FRACTION

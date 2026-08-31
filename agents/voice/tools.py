@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agents.experiment.memory import CallMemory
+from core.memory import CallMemory
 
 # ── Tool schemas (OpenAI-compatible) ─────────────────────────────────────────
 
@@ -722,6 +722,10 @@ def _save_state(memory: CallMemory, value: str, heard: str,
 
     GROUNDING IS NOT DONE HERE. It needs the transcript and the per-turn audio
     measurements, neither of which this module has — same split as save_branch.
+
+    THE ONE THING IT DOES REFUSE ON ITS OWN IS A REGRESSION TO `unsure`, and
+    that is a fact about the VALUES rather than about the evidence, so it
+    belongs here and not in the guard. See the block below.
     """
     text = (value or "").strip().lower()
     if text not in valid:
@@ -729,6 +733,39 @@ def _save_state(memory: CallMemory, value: str, heard: str,
         if recognised is None:
             return _reject(f"REJECTED {value!r}: not one of the states", options)
         text = recognised.value
+
+    # THE REGRESSION LOCK. `unsure` is not a correction — it is the ABSENCE of
+    # an answer — so it must never replace one the call already has.
+    #
+    # call-20260831-1048: identity was saved `confirmed` at 10:49:25 on "Yes.
+    # [She] is one of a cardiologist." Twenty seconds later the caller answered
+    # a question about the BRANCH with "I don't know the branch name", the
+    # model called this tool again with `unsure`, and the write went straight
+    # through. `memory.update` ignores Nones, so the second call did not even
+    # replace the row — it merged into it, leaving a state from turn 9 beside a
+    # `detail` from turn 3 and a quote from turn 9. A composite nobody uttered.
+    #
+    # That single write then ended the call: identity gates every other field
+    # (see _IF_RIGHT_DOCTOR in templates.py), so `unsure` made branch,
+    # accepting, scheduling and referral all not-required, the objective read
+    # COMPLETE, and the teardown fired on a question the caller was still being
+    # asked. The window fix in evidence.py stops that particular turn reaching
+    # here; this stops the class of it, from any turn, on any of the four
+    # fields — and it stops it in the layer that owns the value, so a future
+    # caller of run_tool cannot route around the guard.
+    #
+    # A REAL CORRECTION IS STILL ALLOWED. confirmed -> not_here, yes -> no,
+    # always -> depends: those carry information and are exactly what a caller
+    # putting us right sounds like. Only the move to `unsure` is barred, and
+    # only when there is something definite to lose. unsure -> anything is an
+    # upgrade and passes untouched.
+    current = str(memory.get(key) or "").strip().lower()
+    if text == "unsure" and current in valid and current != "unsure":
+        return _reject(
+            f"REJECTED 'unsure': already {current!r}, and 'unsure' does not "
+            f"correct it",
+            f"nothing further on this; {current!r} stands")
+
     memory.update(**{
         key: text,
         f"{key}_heard": (heard or "").strip() or None,

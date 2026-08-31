@@ -94,7 +94,7 @@ async def synthesize_stream_chunks(text: str):
     import asyncio
     import numpy as np
     from openai import OpenAI
-    from agents.experiment.audio_utils import resample, float32_to_telnyx
+    from core.audio_utils import resample, float32_to_telnyx
 
     OPENAI_SR = 24_000
     BYTES_PER_SAMPLE = 2

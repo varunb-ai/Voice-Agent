@@ -1276,6 +1276,37 @@ def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
     return " and ".join(missing)
 
 
+def _other_field_probes(sess: "RealtimeSession", probe) -> tuple:
+    """Every OTHER field's ask-probe on this call's objective.
+
+    Read off the objective rather than listed here, for the same reason `probe`
+    is passed into _ungrounded_choice rather than chosen inside it: a template
+    that adds a field would otherwise get an evidence ceiling that cannot see
+    the new field's ask, and that one field would silently go back to having no
+    upper bound at all.
+
+    IDENTITY, not equality. The probes are module-level singletons in
+    objectives.py, so `is not` says exactly what is meant — "every ask that is
+    not the one anchoring this window" — and two fields sharing one pattern
+    would be a template bug rather than something for this to guess around.
+
+    DEFENSIVE, because this module is routinely handed a namespace carrying
+    only `turns` — see `double()` in the suite, and _objective_of's docstring
+    for the same argument on the other side of the line. A guard that raises on
+    a test double is a guard that stops being tested, and no objective means no
+    ceiling, which is precisely the behaviour that shipped before this existed.
+    """
+    try:
+        obj = getattr(sess, "objective", None)
+        if obj is None or not getattr(obj, "fields", None):
+            from agents.voice.objectives import default_objective
+            obj = default_objective()
+        return tuple(f.probe for f in obj.fields
+                     if f.probe is not None and f.probe is not probe)
+    except Exception:                       # pragma: no cover - double safety
+        return ()
+
+
 def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
                        arg: str, probe, classifier, states,
                        label: str, since_at_least: int = 0,
@@ -1337,12 +1368,55 @@ def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
     # had just refused three times. The model cannot be allowed to move the
     # goalposts by talking, which is the same principle as _ungrounded_terms
     # excluding the agent's words from `heard`.
+    # BOUNDED ABOVE AS WELL, and the ceiling is the half that was missing.
+    #
+    # `since` is a floor with nothing over it, so once an ask matched, every
+    # later caller turn stayed evidence for that field for the rest of the
+    # call. On call-20260831-1048 the agent asked "could you confirm this is
+    # Dr. Jennifer, Cardiology, at New York Baptist Hospital?" at turn 2 and
+    # the caller confirmed; six turns later it asked "which branch does Dr.
+    # Jennifer work out of?" and the caller said "I don't know the branch
+    # name." `classify_identity` reads "don't know" as UNSURE — correctly, in
+    # isolation — and that turn was still inside the identity window, so an
+    # answer about a BUILDING overwrote an identity that had been grounded and
+    # confirmed eight turns earlier. It cost more than the row: identity is the
+    # gate every other field hangs off (see _IF_RIGHT_DOCTOR), so flipping it
+    # to `unsure` made branch, accepting, scheduling and referral all
+    # not-required, the objective went COMPLETE, and the call hung up on the
+    # question it had just asked.
+    #
+    # IDENTITY_ASK's lookahead deliberately refuses to match a branch ask, so
+    # the identity guard cannot be anchored ON a branch turn — which is right,
+    # and which also meant a branch ask could never move the anchor OFF
+    # identity. The window had no way to close. So an ask for ANY OTHER FIELD
+    # closes it: turns from the other question onwards belong to that question.
+    _others = _other_field_probes(sess, probe)
     since = 0
     asked = False
+    until: Optional[int] = None
     for i, t in enumerate(sess.turns):
-        if t.role == "agent" and _is_ask_for(t.text or "", probe):
-            since = i + 1
-            asked = True
+        if t.role != "agent":
+            continue
+        _text = t.text or ""
+        if _is_ask_for(_text, probe):
+            # OUR OWN ASK FIRST, and `continue` rather than falling through.
+            # One turn routinely names two fields ("thanks — and which branch
+            # is she at?"), and a turn that asks for THIS field re-opens the
+            # window; it must never be able to close it in the same breath.
+            since, asked, until = i + 1, True, None
+            continue
+        if until is None and any(_is_ask_for(_text, p) for p in _others):
+            until = i
+
+    # NO CEILING WHEN WE NEVER ASKED. The never-asked path below exists to
+    # honour an answer the caller VOLUNTEERED, and on call-20260825-0915 that
+    # arrived ("we are full right now, but I can put you on the list") while
+    # the agent was still asking about the branch. Bounding an unanchored
+    # window at the first other-field ask would throw away exactly the turn the
+    # path was widened for. `states_in_its_own_right` is that path's gate and
+    # stays the only one.
+    if not asked:
+        until = None
 
     # A FLOOR UNDER THE ANCHOR, for a caller that supersedes its own earlier
     # answer. Only identity passes one, and only after the name was spelled
@@ -1365,7 +1439,16 @@ def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
     floored = since_at_least > since
     if floored:
         since = since_at_least
-    usable = [t for t in sess.turns[since:]
+    # THE FLOOR OUTRANKS A CEILING IT HAS ALREADY PASSED. The floor marks a
+    # fresher and more specific question than any ask — we spelled the name out
+    # and put it to them directly — so a topic change from before it is not
+    # bounding anything any more. Without this the two anchors could cross and
+    # leave an empty window with the wrong reason attached to it.
+    if until is not None and until <= since:
+        until = None
+    # `sess.turns[since:None]` is `sess.turns[since:]`, so the unbounded case
+    # needs no branch of its own.
+    usable = [t for t in sess.turns[since:until]
               if t.role == "caller" and t.text.strip() != "[...]"]
     if not usable:
         if floored:
@@ -1376,6 +1459,17 @@ def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
             # supersede, which is the defect this floor exists to close.
             return (f"{label}={status!r} — {floor_reason} | NEED: their answer "
                     f"to THAT question, in their own words")
+        if until is not None:
+            # THE WINDOW CLOSED WITH NOTHING IN IT. We asked, then moved on to
+            # a different question before they said anything — so the turns
+            # that exist belong to the other question and there is no evidence
+            # for this field at all. Distinct from the silence below, and it
+            # has to be: telling the model "nothing has been transcribed" when
+            # the caller has been talking the whole time invites it to re-ask
+            # the wrong thing.
+            return (f"{label}={status!r} — you moved on to another question "
+                    f"before they answered this one | NEED: ask about "
+                    f"{label} again, and use what they say to THAT")
         # NOTHING TRANSCRIBED SINCE WE ASKED.
         #
         # THIS STOOD DOWN, AND ON call-20260825-1731 THAT CONFIRMED THE DOCTOR
@@ -1859,6 +1953,7 @@ __all__ = [
     "_stem",
     "_surnames_named",
     "_turn_asserts",
+    "_other_field_probes",
     "_ungrounded_choice",
     "_ungrounded_detail",
     "_ungrounded_terms",

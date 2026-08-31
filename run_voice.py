@@ -18,7 +18,7 @@ from rich.console import Console
 
 from core.models import Doctor
 from agents.experiment.brain import VoiceBrain
-from agents.experiment.memory import CallMemory
+from core.memory import CallMemory
 
 console = Console()
 

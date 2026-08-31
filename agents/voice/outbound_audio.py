@@ -53,7 +53,7 @@ import logging
 
 import numpy as np
 
-from agents.experiment.audio_utils import _mulaw_encode
+from core.audio_utils import _mulaw_encode
 
 log = logging.getLogger(__name__)
 
