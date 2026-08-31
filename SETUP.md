@@ -1,301 +1,338 @@
-# 🧸 Setup Guide — From Zero to a Working System (Kid-Level)
+# Setup Guide — from zero to a real phone call
 
-This guide turns the code into a real, running system on your Windows 11 PC.
-Follow it **top to bottom**. After every step there's a ✅ **"Did it work?"** check
-so you never move forward broken.
+This project makes **outbound phone calls to medical offices** and asks a
+receptionist where a doctor practises, then writes the verified answer into a
+directory record. Everything below is written for someone who has never seen
+the repo.
 
-Think of it like building a robot:
-- 🧠 **Ollama** = the robot's brain (the AI)
-- 🗄️ **PostgreSQL** = the robot's notebook (where it writes facts)
-- ⚡ **Redis** = the robot's short-term memory (what it's thinking *right now*)
-- ☎️ **LiveKit** = the robot's telephone (so it can call hospitals)
-- 🐍 **Python** = the glue that holds the robot together
+There are two ways to run it. Do the first one.
 
-You do **not** need all of them at once. The system already works with **none** of
-them (it uses pretend stand-ins). You turn each piece "real" one at a time.
+| | **Golden path** *(this is the system)* | **Local/offline** *(legacy)* |
+|---|---|---|
+| speech | OpenAI Realtime API, `gpt-realtime-2` | Whisper + Piper, on your machine |
+| phone | Twilio | Twilio, or nothing |
+| needs | an OpenAI key and a Twilio trial | ~4 GB of models and a lot of patience |
+| setting | `USE_REALTIME=true` *(the default)* | `USE_REALTIME=false` |
+| section | **Steps 0–6**, below | [Local/offline experimentation](#localoffline-experimentation-use_realtimefalse), at the bottom |
+
+> **If you read one thing:** the golden path does **not** need Ollama, Qwen,
+> PostgreSQL, Redis, LiveKit, or Piper. Earlier versions of this guide told you
+> to install all of them. They are not on the live path any more, and
+> installing them will not get you a phone call.
+
+---
+
+## How a call actually flows
+
+```
+  you                run_twilio.py            Twilio              the office
+   |                       |                    |                     |
+   |--- run the command -->|                    |                     |
+   |                       |--- place call ---->|------ rings ------->|
+   |                       |                    |                     |
+   |              +--------+--------+           |                 picks up
+   |              | FastAPI :8000   |<-- POST /answer <----------------|
+   |              |  (your machine) |--> TwiML <Connect><Stream> ----->|
+   |              +--------+--------+           |                     |
+   |                       |<=== WebSocket: 8 kHz u-law audio ========>|
+   |                       |                    |                     |
+   |              +--------+--------+                                 |
+   |              | OpenAI Realtime |   speech in -> speech out        |
+   |              | gpt-realtime-2  |   + tool calls (save_branch, ...)|
+   |              +--------+--------+                                 |
+   |                       |                                          |
+   |            eight guards sit between the model and the record     |
+   |                       |
+   |            data/3 cases jsons/call-....json   transcript, cost, verdicts
+   |            data/3 cases voice/call-....wav    both sides
+   +----------- data/3 cases jsons/doctors.json    the enriched row
+```
+
+Twilio has to reach **your laptop** over the public internet, which is what the
+tunnel in Step 3 is for. That is the only genuinely fiddly part.
 
 ---
 
 ## STEP 0 — Open the right window
 
-1. Press the **Windows key**, type `powershell`, press **Enter**.
-2. A blue/black window opens. This is the **terminal** — where you type commands.
-3. Go into the project folder by copy-pasting this and pressing Enter:
+Windows: press `Win`, type **PowerShell**, press Enter.
+macOS/Linux: open **Terminal**.
+
+Then go to the project folder and make a virtual environment:
 
 ```powershell
-cd C:\Users\salom\OneDrive\Desktop\conversational_ai
+cd path\to\conversational_ai
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-✅ **Did it work?** The start of the line should now end with `conversational_ai>`.
+macOS/Linux: `source .venv/bin/activate`
 
-> 💡 To paste in PowerShell: **right-click**. That's the paste button here.
+Your prompt should now start with `(.venv)`. If it does not, nothing below will
+work — everything installs into that environment.
 
 ---
 
-## STEP 1 — Python libraries (the glue)
-
-The robot's glue needs some extra parts. Install them all at once:
+## STEP 1 — Install the Python libraries
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-This takes a few minutes. Lots of text scrolls by — that's normal.
+Two of these are worth knowing about, because both fail in a confusing way:
 
-Then install the pretend web-browser the crawler uses:
-
-```powershell
-python -m playwright install chromium
-```
-
-✅ **Did it work?** Run this:
-
-```powershell
-python run_validation.py --selftest
-```
-
-You should see a table with green ✅ marks. **If you see the table, the glue works!**
-🎉 The system is already alive — it's just using pretend stand-ins for now.
+- **`python-multipart`** — FastAPI needs it to read Twilio's webhook, which
+  arrives as a form post. Without it, `/answer` returns a 400 and the callee
+  hears silence on a call that otherwise looks fine. It is imported lazily, so
+  nothing complains until a real call is already in flight.
+- **`websockets`** — the transport for both legs (Twilio's media stream and the
+  Realtime API). An old version connects and then drops frames.
 
 ---
 
-## STEP 2 — The Brain 🧠 (Ollama + Qwen)
+## STEP 2 — Your two keys (`.env`)
 
-This lets the robot actually *think* about messy text.
-
-1. Open your web browser, go to **https://ollama.com/download**
-2. Click **Download for Windows**, run the installer, click Next → Next → Finish.
-3. Ollama now runs quietly in the background (look for its icon near the clock).
-4. Back in PowerShell, download the AI brain (this is a big file — be patient):
-
-```powershell
-ollama pull qwen3:8b
-```
-
-> 💡 We use `qwen3:8b` (the small brain) because it fits on a normal PC.
-> The design's `qwen3:32b` (big brain) needs a very powerful computer. Same family,
-> just smaller. You can change this later in the `.env` file.
-
-✅ **Did it work?** Run:
-
-```powershell
-ollama run qwen3:8b "say hello in 3 words"
-```
-
-If it replies with a few words, **the brain is on!** Type `/bye` to exit.
-
----
-
-## STEP 3 — The Notebook 🗄️ (PostgreSQL)
-
-This is where verified doctors get permanently saved.
-
-1. Go to **https://www.postgresql.org/download/windows/**
-2. Click **"Download the installer"**, pick the newest version, run it.
-3. During install it asks for a **password** — type `postgres` and **remember it**.
-   (Keep every other setting default. Port stays **5432**.)
-4. Finish the install. (You can skip "Stack Builder" at the end — click Cancel.)
-
-Now make a notebook called `doctors`. In PowerShell:
-
-```powershell
-& "C:\Program Files\PostgreSQL\17\bin\createdb.exe" -U postgres doctors
-```
-
-> 💡 If your version isn't 17, change the number to match the folder inside
-> `C:\Program Files\PostgreSQL\`. It will ask for the password (`postgres`).
-
-✅ **Did it work?** Run:
-
-```powershell
-& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d doctors -c "\dt"
-```
-
-If it says **"Did not find any relations"** — that's perfect! It means the empty
-notebook exists. (The tables get created automatically when you run the pipeline.)
-
----
-
-## STEP 4 — Tell the robot your secrets (.env file)
-
-The robot reads its settings from a file called `.env`. Make it from the example:
+Copy the template and open it:
 
 ```powershell
 copy .env.example .env
 notepad .env
 ```
 
-Notepad opens. Change these lines to match what you set up:
+macOS/Linux: `cp .env.example .env` then `nano .env`
 
-```
-LLM_MODEL=qwen3:8b
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/doctors
-```
+The golden path needs **five values**. Everything else in that file belongs to
+the legacy path and can stay empty.
 
-(If you used a different Postgres password, put it where the second `postgres` is.)
-
-Press **Ctrl+S** to save, then close Notepad.
-
-✅ **Did it work?** Run the whole pipeline for real now:
-
-```powershell
-python run_pipeline.py --selftest
-```
-
-Look at the top line. If it says `db backend: postgres` (not `json`) — **your robot
-is now writing to the real notebook!** 🎉
-
-✅ **Double-check the notebook has doctors in it:**
-
-```powershell
-& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d doctors -c "SELECT doctor_name, branch, confidence_score FROM doctors;"
-```
-
-You should see John Smith, Jane Doe, Robert Lee with their branches. **The robot
-remembered them!**
-
----
-
-## STEP 5 — Short-term memory ⚡ (Redis) — *optional*
-
-Only needed for **real phone calls** and **running many hospitals at once**. Skip
-this if you're not making live calls yet.
-
-Windows doesn't have official Redis, so use **Memurai** (Redis for Windows):
-
-1. Go to **https://www.memurai.com/get-memurai**, download the free Developer edition.
-2. Run the installer, click Next → Next → Finish. It starts automatically.
-
-✅ **Did it work?** Run:
-
-```powershell
-python run_queue.py --selftest
-```
-
-If the top line says `celery mode: distributed (Redis)` instead of `EAGER` —
-**short-term memory is connected!**
-
----
-
-## STEP 6 — Email 📧 (so the robot can send real emails) — *optional*
-
-1. Get a Gmail App Password (full steps in the chat history):
-   - Turn on 2-Step Verification: https://myaccount.google.com/security
-   - Make an app password: https://myaccount.google.com/apppasswords
-   - Copy the 16-letter code (remove spaces).
-2. Open `.env` again (`notepad .env`) and fill in:
-
-```
-EMAIL_ADDRESS=youremail@gmail.com
-EMAIL_PASSWORD=your16lettercode
-```
-
-Save and close.
-
-✅ **Did it work?** Run a real send:
-
-```powershell
-python run_email.py --to youremail@gmail.com --live
-```
-
-Check that Gmail inbox — if a "Verifying doctor branch" email arrived, **the robot
-can send mail!**
-
----
-
-## STEP 7 — The Telephone ☎️ (LiveKit) — *the hard one, do last*
-
-This is the only advanced part. It lets the robot make **actual phone calls**.
-You need three things working together: LiveKit (the switchboard), a SIP trunk (the
-phone line), Whisper (ears) and CosyVoice (voice).
-
-> ⚠️ **Honest heads-up:** this step is genuinely complex and costs a little money
-> (a phone-line provider). Do the first 6 steps first and make sure everything else
-> works. Then tackle this when you're ready. Here's the path:
-
-1. **Make a LiveKit account (free tier):** https://cloud.livekit.io
-   - It gives you a `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`.
-   - (Or self-host: https://docs.livekit.io/home/self-hosting/ — advanced.)
-2. **Get a phone line (SIP trunk)** from a provider like Twilio or Telnyx, and
-   connect it to LiveKit following: https://docs.livekit.io/sip/
-3. **Install the voice libraries:**
-
-```powershell
-pip install livekit-agents livekit-plugins-silero faster-whisper
-```
-
-4. **Install CosyVoice 2** (the open-source voice) by following its repo:
-   https://github.com/FunAudioLLM/CosyVoice
-5. **Add the LiveKit keys** to `.env`:
-
-```
-LIVEKIT_URL=wss://your-project.livekit.cloud
-LIVEKIT_API_KEY=...
-LIVEKIT_API_SECRET=...
-```
-
-6. **Open `agents/voice/livekit_adapters.py`** and look for the `TODO(livekit)`
-   notes. The exact function names in the LiveKit library change between versions,
-   so you (or I, in a new session) confirm them against the version you installed by
-   checking: https://docs.livekit.io/agents/
-
-✅ **Did it work?** Start the voice worker:
-
-```powershell
-python -m agents.voice.worker
-```
-
-If it connects to LiveKit and waits for calls without crashing, **the telephone is
-wired up.** Real calls then flow: phone → Whisper → Qwen → CosyVoice → phone.
-
----
-
-## STEP 8 — Watch it work 📊 (Prometheus + Grafana) — *optional, fun*
-
-This draws live charts of what the robot is doing.
-
-1. **Prometheus** (collects numbers): download from
-   https://prometheus.io/download/ → unzip → in that folder run:
-
-```powershell
-.\prometheus.exe --config.file="C:\Users\salom\OneDrive\Desktop\conversational_ai\monitoring\prometheus.yml"
-```
-
-2. **Tell the robot to publish numbers** (in a separate PowerShell window):
-
-```powershell
-cd C:\Users\salom\OneDrive\Desktop\conversational_ai
-python run_queue.py --serve-metrics
-```
-
-3. **Grafana** (draws charts): download from https://grafana.com/grafana/download
-   → install → open http://localhost:3000 (login admin/admin) →
-   add a Prometheus data source pointing at `http://localhost:9090` →
-   Dashboards → Import → upload `monitoring/grafana_dashboard.json`.
-
-✅ **Did it work?** You'll see boxes like "Doctors Processed" and "Verified %"
-filling up as you run the pipeline. **You can now watch your robot live!**
-
----
-
-## 🏁 The finish line — how to run the real thing
-
-Once Steps 1–4 are done, this one command runs the **entire system for real**,
-crawling a hospital and saving doctors to PostgreSQL:
-
-```powershell
-python run_pipeline.py https://some-hospital.com/our-doctors
-```
-
-## 🆘 If something breaks
-
-| What you see | What to do |
+| variable | where it comes from |
 |---|---|
-| `db backend: json` (wanted postgres) | PostgreSQL isn't running, or `.env` `DATABASE_URL` is wrong. Re-check Step 3 & 4. |
-| `celery mode: EAGER` (wanted Redis) | Redis/Memurai isn't running. Re-check Step 5. |
-| Crawler finds 0 doctors | The page may need a different URL (look for the hospital's "Our Doctors" page), or it blocks bots. |
-| `ollama` command not found | Close and reopen PowerShell after installing Ollama. |
-| Anything else | Run that agent's `--selftest` — if the self-test passes, the code is fine and the problem is the service/config. |
+| `OPENAI_API_KEY` | platform.openai.com → API keys. **Must have Realtime API access.** |
+| `TWILIO_ACCOUNT_SID` | Twilio Console, front page |
+| `TWILIO_AUTH_TOKEN` | Twilio Console, front page |
+| `TWILIO_FROM_NUMBER` | the number you bought, in `+15551234567` form |
+| `SERVER_PUBLIC_URL` | your tunnel URL — **Step 3 fills this in for you** |
 
-**Golden rule:** every part has a `--selftest`. If the self-test is green, the code
-is healthy — any problem is a service that's off or a setting in `.env`.
+Twilio gives about $15 of trial credit without a card. A call costs roughly
+**$0.11–0.15 per minute all-in** (OpenAI audio tokens plus Twilio minutes), so
+trial credit is worth on the order of a hundred short calls.
+
+> **Trial accounts can only call verified numbers.** Twilio Console → Phone
+> Numbers → Verified Caller IDs → add the number you want to call, and answer
+> the confirmation call. Skip this and the call fails with error 21219 before
+> any of our code runs.
+
+---
+
+## STEP 3 — The tunnel (Twilio has to reach your laptop)
+
+Twilio posts a webhook to your machine and then opens a WebSocket to it. Your
+laptop has no public address, so a tunnel provides one.
+
+**Install ngrok**, then in a **second terminal window** — leave it running:
+
+```powershell
+ngrok http 8000
+```
+
+Now, back in your first window:
+
+```powershell
+python update_ngrok_url.py
+```
+
+That reads the live tunnel URL and writes it into `SERVER_PUBLIC_URL` for you.
+Do not copy it by hand.
+
+> **The URL changes every time you restart the tunnel.** A stale
+> `SERVER_PUBLIC_URL` fails *silently*: the call connects, Twilio's webhook goes
+> to a dead host, and the callee hears nothing. `run_twilio.py` refuses to place
+> a call when it detects a stale URL, which is the only reason that mistake is
+> survivable. Re-run `update_ngrok_url.py` after every tunnel restart.
+
+`cloudflared` works too — `update_ngrok_url.py` handles both. It is supported
+because Windows Defender has been known to delete `ngrok.exe` on sight.
+
+---
+
+## STEP 4 — Preflight (free, no phone call)
+
+```powershell
+python check_realtime.py
+```
+
+This resolves your settings, renders the call template, checks the prompt-cache
+split, then opens one WebSocket to the Realtime model and sends a single
+`session.update`. It never asks for a response, so **no audio is generated and
+nothing is billed** beyond the connection itself.
+
+If this is green, your key, your model access, and your prompt are all fine.
+Everything after this point is telephony.
+
+---
+
+## STEP 5 — Make the call
+
+```powershell
+python run_twilio.py --doctor "Dr. Jennifer" --hospital "New York Baptist Hospital" --specialty "Cardiology" --to "+15551234567"
+```
+
+| flag | required | why |
+|---|---|---|
+| `--doctor` | yes | the doctor to ask about |
+| `--hospital` | yes | used to confirm you reached the right practice |
+| `--specialty` | **effectively yes** | how a receptionist tells two doctors of the same name apart. Without it a resolved record can never reach COMPLETE — it files as PARTIALLY_VERIFIED however well the call went. |
+| `--to` | yes | the number to ring, with `+` and country code |
+| `--port` | no | defaults to 8000; must match your tunnel |
+
+The command starts the FastAPI server **and** places the call. Watch the
+terminal: it prints every turn, every guard verdict, the reply latency, and a
+full cost breakdown when the call ends.
+
+---
+
+## STEP 6 — What you get back
+
+| where | what |
+|---|---|
+| `data/3 cases jsons/call-....json` | the artifact: transcript, per-turn audio RMS, token and cost breakdown, every guard verdict, every refusal |
+| `data/3 cases voice/call-....wav` | both sides of the call, on separate channels |
+| `data/3 cases voice/twilio-call-....mp3` | Twilio's own recording, for adjudicating audio problems |
+| `data/3 cases jsons/doctors.json` | the enriched directory row |
+
+**These are not in git.** Call artifacts are outputs, and every transcript is a
+receptionist who did not agree to be in a repository. They stay on your machine.
+
+---
+
+## The feedback loop — when the agent mishears
+
+This is the part people miss, and it is the most useful tool in the repo.
+
+The agent's guards refuse anything the caller did not demonstrably say. That is
+the point: a fabricated directory row is worse than an empty one, because the
+empty one is visibly a gap. But a guard can also be *too strict* and throw away
+a real answer, and when that happens the call looks fine and the field is
+simply missing.
+
+**Do not guess at which phrasing broke.** Run the sweep:
+
+```powershell
+python check_refusals.py
+```
+
+It reads every artifact you have and reports refusals the call itself went on
+to contradict. Two verdicts:
+
+| verdict | meaning |
+|---|---|
+| **COST** | the field was refused and never landed. The guard did not delay the answer, it destroyed it. |
+| **PREMATURE** | the field was refused and landed *later*. The caller was made to repeat themselves in words the probe finally recognised. |
+
+Each finding hands you the caller's exact words. That string is the deliverable:
+
+```
+  COST      call-20260827-1130-ed9f   field=referral   refused after the words landed
+      caller said : "It's depend upon situation"
+      guard said  : referral='depends' - nothing the caller said since you asked ...
+```
+
+The workflow is fixed, and please follow it in order:
+
+1. Run the sweep. Read the `caller said` string.
+2. Widen the pattern in `agents/voice/objectives.py` so it reads that phrasing.
+3. **Pin the exact phrase in `test_realtime_protocol.py`, and check that the
+   test fails before your fix and passes after.** A guard written past the real
+   bug ships silently broken — that has happened here more than once, which is
+   why this step is not optional.
+4. Re-run the sweep. The line stops appearing.
+
+Useful flags:
+
+```powershell
+python check_refusals.py --since 20260831
+python check_refusals.py --dir "some/other/dir"
+```
+
+Exit code is 1 when anything is flagged, so it can gate a batch.
+
+---
+
+## The offline test suite
+
+```powershell
+python test_realtime_protocol.py
+```
+
+Around three minutes, ~2,100 assertions, **no network and no API cost**. It
+drives complete scripted calls through fake Twilio and OpenAI sockets and
+asserts on the actual wire traffic. Exit code 0 means green.
+
+Run it before every commit. If you have no call artifacts on disk it will
+report `corpus sweep NOT run` — that is deliberate. The sweep needs real calls,
+and a check that measures nothing while printing nothing is worse than one that
+says so out loud.
+
+---
+
+## Choosing what the agent asks
+
+`CALL_TEMPLATE` in `.env` picks the script:
+
+| template | what it collects |
+|---|---|
+| `forage_data_collection` *(default)* | the branch only |
+| `forage_ai_disclosed` | the same, and announces up front that it is automated |
+| `provider_verification` | identity → branch → accepting new patients → scheduling → referral. Everything after the first is gated on identity coming back `confirmed`. |
+
+A template declares its *objective* — the fields, their probes, and when each
+one is required. The objective decides when a call is finished; no tool decides
+that by name.
+
+---
+
+## If something breaks
+
+| what you see | what to do |
+|---|---|
+| callee hears silence, call otherwise fine | stale tunnel URL. Re-run `python update_ngrok_url.py`, then `python check_realtime.py`. |
+| Twilio error 21219 | trial account, unverified number. See Step 2's note. |
+| `/answer` returns 400 | `python-multipart` missing. Re-run Step 1. |
+| connection refused in `check_realtime.py` | your key has no Realtime API access — a normal OpenAI key does not get it automatically. |
+| a field is missing from a call that clearly answered it | `python check_refusals.py`. That is exactly what it is for. |
+| the agent repeats a question | look at `save_refusals` in the artifact. A refusal with no repair is a re-ask. |
+| suite red on `corpus sweep NOT run` | you have no artifacts on disk. Expected on a fresh clone. |
+
+**Golden rule:** `check_realtime.py` proves the model and the prompt.
+`test_realtime_protocol.py` proves the code. If both are green, the problem is
+telephony or `.env`.
+
+---
+
+## Local/offline experimentation (`USE_REALTIME=false`)
+
+> **Legacy. Not the production path.** Kept because it runs without an OpenAI
+> key and without a network, which is occasionally useful when working on turn
+> logic. It is slower, noticeably worse at conversation, and none of the
+> latency or cost numbers quoted anywhere in this repo describe it.
+
+The classic pipeline is **VAD → Whisper → a local LLM → Piper**, in
+`agents/experiment/`. Set `USE_REALTIME=false` and supply:
+
+| what | how |
+|---|---|
+| **Ollama + a Qwen model** | install from ollama.com, then `ollama pull qwen3:8b`. Set `LLM_BASE_URL=http://localhost:11434/v1`, `LLM_API_KEY=ollama`, `LLM_MODEL=qwen3:8b`. |
+| **Whisper** | `WHISPER_MODEL=small` is fine on a CPU. |
+| **Piper voices** | ~345 MB of weights, **not in git** — they made the repo unpushable and were purged from history. Fetch from <https://huggingface.co/rhasspy/piper-voices>. |
+| **PostgreSQL** *(optional)* | `DATABASE_URL=...`. Without it, `core/db.py` falls back to JSON files in `data/db/`, which is fine for one machine. |
+| **Redis** *(optional)* | `REDIS_URL=...`. Without it, call memory is in-process. |
+
+Run it with `python run_voice_local.py`, or `python run_voice.py --selftest`.
+
+Related, also not on the live path:
+
+- **`agents/email/`** — an earlier email-first approach to the same problem.
+  `python run_email.py --selftest`.
+- **`monitoring/`** — Prometheus and Grafana dashboards.
+- **`archive/experiment_telephony/`** — the provider survey that lost to Twilio
+  (Exotel, Telnyx, Vonage, LiveKit) plus the local-audio edges. Nothing imports
+  it. See `archive/README.md` for what each one was and why it is kept.
