@@ -10037,11 +10037,20 @@ async def main():
     # IMPORTS are its surface: `from agents.voice.evidence import _rode_along`
     # resolves through the proxy, and Pylance greys the name at its definition
     # unless both the proxy and the submodule that defines it declare it.
+    # KEYED ON THE FULL DOTTED PATH, not the file's basename. Two packages may
+    # legitimately hold a module of the same name — evidence/probes.py and
+    # grounding/vocabulary.py did until it was renamed — and a basename key collapses
+    # them: sorted() puts evidence first, grounding overwrites it, and from that
+    # moment evidence/probes.py is not guarded at all. Verified by deleting
+    # _is_ask_for from its __all__ while two sibling modules imported it: this
+    # check passed. `_imported` is keyed off ast's own `n.module`, which is
+    # already the full path, so the two sides only ever agreed by accident.
     _pkg = _pl.Path("agents/voice")
     _defined, _imported = {}, _co.defaultdict(set)
     _files = {}
     for _p in sorted(_pkg.rglob("*.py")):
-        _key = _p.parent.name if _p.name == "__init__.py" else _p.stem
+        _parts = _p.with_suffix("").parts
+        _key = ".".join(_parts[:-1] if _p.name == "__init__.py" else _parts)
         _files[_key] = _p
         _tree = _ast.parse(_p.read_text(encoding="utf-8"))
         _names = set()
@@ -10060,7 +10069,7 @@ async def main():
                           if _x.startswith("_") and not _x.startswith("__")}
         for _n in _ast.walk(_tree):
             if isinstance(_n, _ast.ImportFrom) and (_n.module or "").startswith("agents.voice."):
-                _imported[_n.module.split(".")[-1]] |= {_a.name for _a in _n.names}
+                _imported[_n.module] |= {_a.name for _a in _n.names}
     _undeclared = {}
     for _mod, _used in sorted(_imported.items()):
         _priv = _used & _defined.get(_mod, set())
@@ -10079,25 +10088,50 @@ async def main():
     # AND THE CHECK ITSELF HAS TO BE ABLE TO FAIL — an absence assertion over a
     # scan that finds nothing passes for free. Prove the scan sees the surface
     # it is guarding.
-    check(len(_imported.get("evidence", set())) > 20
-          and len(_imported.get("lifecycle", set())) >= 3,
+    check(len(_imported.get("agents.voice.evidence", set())) > 20
+          and len(_imported.get("agents.voice.lifecycle", set())) >= 3,
           "and the scan really sees the cross-module surface",
-          f"evidence={len(_imported.get('evidence', set()))} "
-          f"lifecycle={len(_imported.get('lifecycle', set()))}")
+          f"evidence={len(_imported.get("agents.voice.evidence", set()))} "
+          f"lifecycle={len(_imported.get("agents.voice.lifecycle", set()))}")
     # AND IT REACHES INSIDE THE PACKAGE. The line above passed unchanged while
     # the whole evidence package went unguarded, because it counts what OTHER
     # modules import BY NAME and that name — "evidence" — survived the split.
     # What it could not see is that nothing was being intersected against it any
     # more. So assert the two halves the rglob actually restored: the proxy's
     # re-export surface, and at least one submodule reached in its own right.
-    check(len(_defined.get("evidence", set())) > 20,
+    _ev_pkg = _defined.get("agents.voice.evidence", set())
+    _ev_guards = _defined.get("agents.voice.evidence.guards", set())
+    _ev_pat_used = _imported.get("agents.voice.evidence.patterns", set())
+    check(len(_ev_pkg) > 20,
           "the package's re-exported surface is collected, not just its name",
-          f"evidence defines/re-exports {len(_defined.get('evidence', set()))}")
-    check(len(_defined.get("guards", set())) >= 5
-          and len(_imported.get("patterns", set())) >= 5,
+          f"evidence defines/re-exports {len(_ev_pkg)}")
+    check(len(_ev_guards) >= 5 and len(_ev_pat_used) >= 5,
           "and submodules are scanned on both sides — defined and imported",
-          f"guards defines {len(_defined.get('guards', set()))}, "
-          f"patterns is imported for {len(_imported.get('patterns', set()))}")
+          f"guards defines {len(_ev_guards)}, "
+          f"patterns is imported for {len(_ev_pat_used)}")
+    # THE BOTTOM LAYER OF EACH PACKAGE, SCANNED SEPARATELY. For one day both
+    # were called probes.py, and under the old basename key sorted() put
+    # evidence first and grounding overwrote it — so evidence/probes.py stopped
+    # being guarded the moment grounding was split. Proven by deleting
+    # _is_ask_for from its __all__ while two sibling modules imported it and
+    # watching this whole block pass.
+    #
+    # grounding's was renamed to vocabulary.py, which it should have been
+    # anyway: it holds patterns, thresholds and the tool registry, not probe
+    # functions. That is the fix a reader benefits from. It is NOT the fix this
+    # check rests on — the key is the full dotted path now, so the next pair to
+    # collide is caught whether or not anyone thinks to rename them.
+    _ev_probes = _defined.get("agents.voice.evidence.probes", set())
+    _gr_vocab = _defined.get("agents.voice.grounding.vocabulary", set())
+    check(len(_ev_probes) >= 5 and len(_gr_vocab) >= 5,
+          "each package's bottom layer is scanned in its own right",
+          f"evidence.probes={len(_ev_probes)} grounding.vocabulary={len(_gr_vocab)}")
+    # THE GENERAL GUARD, and the one that matters. One key per file, always.
+    _py_files = list(_pkg.rglob("*.py"))
+    check(len(_files) == len(_py_files),
+          "and no two modules collapse onto one key",
+          f"{len(_files)} keys for {len(_py_files)} files — a collision "
+          f"silently unguards whichever one sorts first")
 
     print("\n" + "-" * 66)
     print("  Cited in source, untested until now")

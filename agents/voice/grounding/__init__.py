@@ -29,7 +29,7 @@ ImportFrom nodes to learn what the package re-exports, so a star would leave it
 guarding nothing. That check went silently vacuous once already when evidence
 became a package - see the rglob block in test_realtime_protocol.py.
 """
-from agents.voice.grounding._core import (
+from agents.voice.grounding.vocabulary import (
     _CALLER_WILL_ACT,
     _CALL_SHAPE_EXITS,
     _CHOICE_SAVE_TOOLS,
@@ -44,24 +44,32 @@ from agents.voice.grounding._core import (
     _SELF_ID_WEAK,
     _STREET_ADDRESS,
     _STREET_SUFFIX,
-    _ToolOutcome,
+    _claims_saved,
+    _hint_vocabulary,
+    _is_bare_hint_word,
+    _spoken_farewell,
+    is_hold_request,
+)
+from agents.voice.grounding.handlers import (
     _address_dropped,
     _address_offered,
     _candidate_location,
-    _claims_saved,
-    _collected_pairs,
-    _create_response,
     _discarded_location,
-    _handle_tool_call,
-    _hint_vocabulary,
-    _is_bare_hint_word,
-    _objective_of,
-    _resolve_deferred_save,
-    _spoken_farewell,
     _strip_ungrounded_detail,
     _ungrounded_escalation,
     hospital_mismatch,
-    is_hold_request,
+)
+from agents.voice.grounding.telemetry import (
+    _collected_pairs,
+    _objective_of,
+)
+from agents.voice.grounding.teardown import (
+    _create_response,
+    _resolve_deferred_save,
+)
+from agents.voice.grounding.dispatcher import (
+    _ToolOutcome,
+    _handle_tool_call,
 )
 
 __all__ = [
