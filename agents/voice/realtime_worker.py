@@ -285,6 +285,9 @@ GIVE_UP_MARKERS = {
     # absence assertion can vouch for — that is what the paired length check
     # in the suite is there to force.
     "no_response": "the line has gone quiet",
+    # The hard-refusal exit. Same rule as the one above it: a trigger with no
+    # marker is a trigger no absence assertion can vouch for.
+    "refused": "refused to give you the information",
 }
 
 # _sentences and _clauses moved to objectives.py (imported above). The reason

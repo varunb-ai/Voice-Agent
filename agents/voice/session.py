@@ -463,6 +463,21 @@ class RealtimeSession:
         # The agent said goodbye while nothing had ended the call. One-shot,
         # and recorded: a guard that fires invisibly cannot be checked after.
         self._farewell_nudged: bool = False
+        self._refusal_nudged: bool = False
+        self.hard_refusal: str = ""
+        # Deferred, exactly like _claimed_done_at above it: a farewell is
+        # judged 1.5s after it is spoken, so a tool call belonging to the
+        # same response has landed and sess.done is knowable. Judging it at
+        # transcript time fires on every correct close.
+        # Last inbound frame loud enough to be a person rather than our own
+        # echo, and how loud. Written only while agent audio is playing out;
+        # read only by the drain barge-in, which will not fire without a
+        # recent one.
+        self._last_voiced_frame_at: float = 0.0
+        self._last_voiced_frame_rms: float = 0.0
+        self.drain_barge_ins: list[dict] = []
+        self._farewell_at: float = 0.0
+        self._farewell_said: str = ""
         self.farewell_without_close: list[str] = []
         # Answers the caller gave to questions nobody had asked, with the state
         # they read as. Non-empty means the guard caught a field the ordinary

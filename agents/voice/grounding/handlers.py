@@ -405,8 +405,6 @@ def _guard_save_branch(name: str, args: dict,
     # bounded by _MAX_SAVE_REJECTIONS, which counts up while this counts
     # down. Charging a rejected save to both is double jeopardy, and the
     # person paying it is the caller who answered.
-    if str(args.get("branch") or "").strip():
-        sess.reset_ask_budget("caller named a place")
     heard_any = any(t.role == "caller" and t.text.strip() != "[...]"
                     for t in sess.turns)
     # QUALIFIED, not just asserted. Grounding accepts on one content word,
@@ -426,8 +424,12 @@ def _guard_save_branch(name: str, args: dict,
     # address check, and passes the organisation check — all three were
     # measured false on call-20260821-1705 while "Suite" sat in args.
     _val = str(args.get("branch") or "")
+    _bears_an_answer = True
     if _is_bare_hint_word(_val, getattr(sess, "transcribe_hint", "") or ""):
         sess.memory.update(untrusted_location=_val)
+        # A generic hint word on a turn that carried no speech. Nothing was
+        # said, so nothing was answered.
+        _bears_an_answer = False
         result = {
             "ok": False,
             "error": (
@@ -531,6 +533,24 @@ def _guard_save_branch(name: str, args: dict,
         })
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
               f"🚫 HALLUCINATED BRANCH BLOCKED: {args}", flush=True)
+        # UNGROUNDED IS TWO DIFFERENT EVENTS AND ONLY ONE OF THEM IS
+        # "they did not answer".
+        #
+        # call-20260821-1931: the caller said "Mission Bay Clinic, 1825
+        # 4th Street", the transcript mangled it to "Ford Street", and
+        # grounding rejected the model's CORRECT reading. They had
+        # answered; only the rendering was wrong, and charging that to
+        # the budget is what fired the give-up on a caller who then
+        # repeated the address cleanly into a call already told to stop.
+        #
+        # call-20260902-1716: six location asks, and the caller named
+        # nowhere at all.
+        #
+        # _candidate_location is exactly this question already asked and
+        # answered elsewhere -- "did the caller say ANYTHING, when we are
+        # about to record that they said nothing?" It finds Mission on
+        # the 1931 turns and nothing on the 1716 ones.
+        _bears_an_answer = bool(_candidate_location(sess))
     elif (_dropped := _address_dropped(args, sess)) and not sess._address_nudged:
         # ONE-SHOT. The value being saved is CORRECT, only less complete
         # than what they said, so this must never be able to stop the call
@@ -566,6 +586,38 @@ def _guard_save_branch(name: str, args: dict,
               f"🏥 WRONG ORGANISATION: {mismatch}", flush=True)
     else:
         result = run_tool(name, sess.memory, args, sess.objective)
+    # CHARGED ON THE GUARD'S VERDICT, NOT THE MODEL'S CLAIM.
+    #
+    # The reset used to stand ABOVE the guard, on the mere fact that the model
+    # had put a value in the argument. That reads the model's belief that it
+    # heard an answer as evidence that one was given, and the guard one line
+    # below exists precisely because that belief is sometimes false. So every
+    # time the guard caught a hallucinated save it also, silently, bought the
+    # model a fresh budget to hallucinate into again.
+    #
+    # call-20260902-1716: six location asks answered with 'But man, I know,
+    # right?', 'My rabbit' and 'Would the bulbous man'. The model twice claimed
+    # an identity nobody gave it -- once lifted verbatim from 'I am Salome
+    # speaking, how can I help you?' -- and both claims reset the budget
+    # seconds before the guard rejected them with 'nothing the caller said
+    # since you asked reads as that answer'. no-progress ended the call at 2 of
+    # 8 and nothing ever gave up.
+    #
+    # This is the failure reset_ask_budget's own docstring names -- a guard
+    # silently undoing another guard's work -- running the other way.
+    #
+    # ONLY THE UNGROUNDED VERDICTS MEAN 'they did not answer'. Every other
+    # refusal here is about the SHAPE of a value the caller really did give --
+    # an address left out, the wrong organisation -- and the double jeopardy
+    # argument that put the reset up top still holds for those: the person
+    # paying it would be the caller who answered.
+    if str(args.get("branch") or "").strip():
+        if _bears_an_answer:
+            sess.reset_ask_budget("caller named a place")
+        else:
+            print("[Realtime] budget NOT reset - that value was refused as "
+                  "ungrounded, so nothing the caller said bought it",
+                  flush=True)
     return result
 
 
@@ -585,13 +637,8 @@ def _guard_choice_save(name: str, args: dict,
     Same contract as _guard_save_branch: reads the transcript, writes the
     session's own records, touches neither the socket nor the lifecycle.
     """
-        # THE CALLER ANSWERED, whatever becomes of the value — same reasoning as
-        # the save_branch reset above. The model only reaches here because it
-        # believed it heard a state, so the budget that exists to stop the agent
-        # pestering someone who will not engage has no business counting it.
     _arg, _guard, _need, _gkey = _CHOICE_SAVE_TOOLS[name]
-    if str(args.get(_arg) or "").strip():
-        sess.reset_ask_budget(f"caller answered: {name}")
+    _bears_an_answer = True
     ungrounded_choice = _guard(args, sess)
     # ── THE EVIDENCE HAS NOT ARRIVED YET IS NOT THE SAME AS THE EVIDENCE
     #    CONTRADICTS YOU, and until now both ended in the same refusal.
@@ -656,6 +703,10 @@ def _guard_choice_save(name: str, args: dict,
             f"| NEED: {_need}")}
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
               f"🚫 UNGROUNDED ANSWER BLOCKED: {name}({args})", flush=True)
+        # The guard has just said, of this very turn, that nothing the caller
+        # said reads as this answer. That is the plainest evidence there is
+        # that the ask went unanswered, and it must not buy a fresh budget.
+        _bears_an_answer = False
     else:
         sess.memory.update(**{_gkey: "verified against caller transcript"})
         # THE QUALIFIER IS DROPPED, NOT THE SAVE. The status is grounded and
@@ -675,6 +726,17 @@ def _guard_choice_save(name: str, args: dict,
                       f"appeared in the caller transcript — {_what}",
                       flush=True)
         result = run_tool(name, sess.memory, args, sess.objective)
+    # CHARGED ON THE GUARD'S VERDICT, NOT THE MODEL'S CLAIM -- see the note at
+    # the foot of _guard_save_branch for the call this comes from. A HELD save
+    # still resets: the words are in flight, not absent, and refusing to credit
+    # a caller whose answer is merely late is the expensive direction.
+    if str(args.get(_arg) or "").strip():
+        if _bears_an_answer:
+            sess.reset_ask_budget(f"caller answered: {name}")
+        else:
+            print(f"[Realtime] budget NOT reset - {name} was refused as "
+                  f"ungrounded, so nothing the caller said bought it",
+                  flush=True)
     return result
 
 

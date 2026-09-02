@@ -26,8 +26,8 @@ if TYPE_CHECKING:                    # pragma: no cover - typing only
 
 from agents.voice import backchannel
 from agents.voice.audio import _audio_carried_nothing, _SILENT_AUDIO_RMS, _audio_was_silent
-from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, _is_location_ask, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
-from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, is_hold_request, _create_response, _RETIRED_VOCAB_TEXT, _resolve_deferred_save
+from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, is_hard_refusal, _is_location_ask, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
+from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _spoken_farewell, is_hold_request, _create_response, _RETIRED_VOCAB_TEXT, _resolve_deferred_save
 from agents.voice.objectives import AnswerKind, clauses as _clauses, expected_answers, norm_quotes as _norm_quotes, sentences as _sentences
 from core.config import settings
 from core.models import TranscriptTurn
@@ -340,6 +340,10 @@ GIVE_UP_REASONS = {
     # continues, escalate"), which is a rule the model has to remember from
     # 6,000 tokens back at the one moment it has stopped being spoken to.
     "no_response": "caller stopped responding and did not come back",
+    # Not a budget outcome. The caller drew a line, and the record has to say
+    # that rather than "engaged but never provided a location", which reads as
+    # a call that might work next time.
+    "refused": "caller refused to give the information",
 }
 
 def _field_vocabulary(field) -> Optional[Callable]:
@@ -531,6 +535,10 @@ def give_up_directive(sess: "RealtimeSession", trigger: str) -> str:
     if trigger == "no_response":
         opening = ("(system: the line has gone quiet and they have not come "
                    "back after being checked on twice. ")
+    elif trigger == "refused":
+        opening = ("(system: they have just refused to give you the "
+                   "information, or asked not to be called. That is final and "
+                   "asking again in any wording is badgering them. ")
     elif trigger == "unanswered":
         opening = (f"(system: you have asked {sess._unanswered_asks} times "
                    f"and they have not answered. ")
@@ -1562,6 +1570,40 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         # AFTER _resolve_deferred_save, so a save whose evidence landed in this
         # very turn is still applied. Ending the call must not cost a field the
         # caller already gave.
+        # ── THEY DREW A LINE ────────────────────────────────────────────────
+        # A hard refusal is not a budget event and must not wait for one. The
+        # budget exists to stop the agent pestering someone who will not engage,
+        # and it measures that indirectly, over many turns; this is the caller
+        # saying it outright, once, and it is the cheapest signal on the call.
+        #
+        # call-20260902-1716: "Can't share the information with you, thank you
+        # but don't call me again." Nothing read it. The agent had asked six
+        # times, the budget stood at 2 of 8, and the caller hung up six seconds
+        # later. Measured across the corpus before being wired in -- 5 hits in
+        # 762 caller turns, all real, none on a call that got a branch.
+        #
+        # THE DIRECTIVE, NOT A HANG-UP, for the reason the whole file gives:
+        # escalate is what writes the reason down, and cutting the line here
+        # would leave a call with no outcome. _give_up_sent is set too, so the
+        # budget path cannot fire a second directive on top of this one.
+        if (not sess.done and not sess._refusal_nudged
+                and is_hard_refusal(text)):
+            sess._refusal_nudged = True
+            sess._give_up_sent = True
+            sess._give_up_at_turn = len(sess.turns)
+            sess._give_up_trigger = "refused"
+            sess.hard_refusal = text[:160]
+            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                  f"⛔ THEY REFUSED - stopping the asks and escalating: "
+                  f"{text[:70]!r}", flush=True)
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text",
+                                      "text": give_up_directive(
+                                          sess, "refused")}]},
+            }))
+
         if not sess.done and _caller_ends_call(text):
             sess.done = True
             sess.ended_by_caller = text[:120]
@@ -1811,6 +1853,24 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         if (_claims_saved(text) and not sess.memory.get("branch")
                 and not sess.memory.get("escalated") and not sess.done):
             sess._claimed_done_at = time.time()
+
+        # ── Signed off ──────────────────────────────────────────────────────
+        # RECORDED ON EVERY AGENT TURN, which is the fix. This check used to
+        # live at the tool site, inside the save_branch-REJECTED branch — so it
+        # could only see a goodbye that happened to share a turn with a refused
+        # branch save. It saw neither close on 2026-09-02: 1544 signed off with
+        # save_branch long since succeeded, 1511 signed off carrying no tool at
+        # all. farewell_without_close was null on both, which read as "the agent
+        # closed properly" on two calls the CALLER had to end.
+        #
+        # Deferred for the same reason as the claim check above, and it matters
+        # more here: the close path sets sess.done from the tool handler, and a
+        # model that says its goodbye in the same response as the tool that
+        # completes the objective is behaving correctly. Judged now, that is
+        # indistinguishable from signing off with nothing recorded.
+        if _spoken_farewell(text) and not sess.done:
+            sess._farewell_at = time.time()
+            sess._farewell_said = text
 
         # Enforce the exit condition the prompt never had.
         #

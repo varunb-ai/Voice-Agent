@@ -247,6 +247,53 @@ _NON_PLACE = frozenset({
 
 # Words that carry no identifying information, so their presence in the
 # transcript proves nothing about whether the caller named a real place.
+# A HARD REFUSAL: they will not tell us, or they want the calls to stop.
+#
+# Distinct from every "no" this project already reads. "No." is a valid ANSWER
+# to whether they take new patients; "I don't know" and "we don't have that"
+# are ignorance, and a caller who does not know is one the agent may help by
+# asking differently. This is about WILLINGNESS or PERMISSION, which no
+# rephrasing changes -- so it is the one caller move that should end a call on
+# its first occurrence rather than on a budget.
+#
+# call-20260902-1716 ended with "Can't share the information with you, thank
+# you but don't call me again." Nothing read it. The agent had already asked
+# six times and the budget stood at 2 of 8.
+#
+# PRECISION OVER RECALL, because a false positive ends a call that was going
+# fine. Every branch needs a refusal verb AND its object, or an explicit
+# instruction to stop calling. A bare negative can never reach it.
+_HARD_REFUSAL = re.compile(
+    r"(?:"
+    # not willing / not permitted to hand the information over
+    r"(?:can'?t|cannot|can not|won'?t|will not|not going to|unable to|"
+    r"not allowed to|not permitted to|not authoris(?:ed|ez)|not at liberty)"
+    r"\s+(?:be\s+)?(?:give|giving|share|sharing|provide|providing|"
+    r"disclose|disclosing|release|releasing|hand\s+(?:out|over)|pass\s+on|"
+    r"tell|telling|discuss|discussing)"
+    r"(?:\s+(?:out|you|that|this|any|the|it|them|us))*"
+    r"|"
+    # "we don't give out that information" - present tense, policy voice
+    r"(?:do\s+not|don'?t|doesn'?t|does\s+not)"
+    r"\s+(?:give\s+out|disclose|release|share)"
+    r"|"
+    # against policy, however phrased
+    r"(?:against|violat\w*)\s+(?:our\s+|company\s+|hospital\s+)?"
+    r"(?:polic\w+|rules|hipaa)"
+    r"|(?:confidential|privacy\s+polic\w+|hipaa)"
+    r"\s+(?:information|and|so|reasons?)"
+    r"|"
+    # stop contacting us
+    r"(?:do\s+not|don'?t|please\s+(?:do\s+not|don'?t))"
+    r"\s+(?:call|phone|ring|contact)"
+    r"(?:\s+(?:me|us|here|back|this\s+number))*"
+    r"\s+(?:again|any\s*more|anymore)"
+    r"|stop\s+(?:calling|phoning|ringing|contacting)"
+    r"|(?:take|remove)\s+(?:me|us)\s+(?:off|from)"
+    r")", re.I)
+
+
+
 _UNGROUNDED_STOPWORDS = {
     "the", "a", "an", "of", "at", "in", "on", "our", "their", "and",
     "branch", "branches", "office", "offices", "campus", "campuses",
@@ -576,6 +623,7 @@ __all__ = [
     "_POSSESSIVE",
     "_QUIET_FRACTION",
     "_REPORTS_FAILURE",
+    "_HARD_REFUSAL",
     "_UNGROUNDED_STOPWORDS",
     "_VETTING_OPENER",
     "_WILL_ASK",

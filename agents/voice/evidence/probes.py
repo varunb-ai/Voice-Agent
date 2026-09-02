@@ -30,7 +30,9 @@ from agents.voice.evidence.patterns import (
     _INVITATION,
     _LOW_AUDIO_RMS,
     _MEANING_CLASSES,
+    _HARD_REFUSAL,
     _NOT_AN_ASK,
+    _NUMBER_WORD_VALUE,
     _ORG_STOPWORDS,
     _QUIET_FRACTION,
     _REPORTS_FAILURE,
@@ -226,6 +228,89 @@ def _grounded_loosely(word: str, heard: str) -> bool:
 
 
 
+_TENS_VALUES = frozenset(range(20, 100, 10))
+
+
+def _number_grounded_indices(words: list, heard: str) -> set:
+    """Which of these words are numbers the caller gave as DIGITS.
+
+    `_grounded_loosely` compares letters, so a qualifier that spells a number
+    the transcriber wrote in figures fails every one of its three tests. On
+    call-20260902-1544 the caller said "you would be the number 22nd in the
+    queue"; the model wrote "twenty second"; both words were judged ungrounded
+    and trimmed, and the field reached doctors.json as "You would be the number
+    in the queue" — a fluent sentence with its only fact deleted. That is the
+    expensive direction: the guard did not block an invention, it destroyed an
+    answer the caller actually gave.
+
+    _NUMBER_WORD_VALUE already existed for the branch path and was simply never
+    consulted here.
+
+    COMPOSED, NOT PER-WORD, and that is the whole difficulty. Checked one at a
+    time, "twenty" is 20 and "second" is 2, and neither is 22 — the pair only
+    grounds as a pair. So a tens word joins the unit word beside it and the sum
+    is tested. This is the one English compound (twenty-two, thirty-first) and
+    deliberately not a general parser: `_NUMBER_WORD_VALUE` records at length
+    why "eighteen forty fourth" must not be resolved, and nothing here tries.
+
+    EXACT DIGIT RUNS, never substrings. "2" appears inside "1825" and grounding
+    a queue position on a house number is the failure this guard exists to
+    stop, so the composed value must equal a whole run of digits in what they
+    said.
+    """
+    runs = set(re.findall(r"\d+", heard))
+    if not runs:
+        return set()
+    out: set = set()
+    for i, w in enumerate(words):
+        val = _NUMBER_WORD_VALUE.get(w)
+        if val is None:
+            continue
+        if str(val) in runs:
+            out.add(i)
+            continue
+        # tens + unit, in either direction, so both halves of a pair that
+        # only grounds together are cleared together.
+        for j in (i + 1, i - 1):
+            if not 0 <= j < len(words):
+                continue
+            other = _NUMBER_WORD_VALUE.get(words[j])
+            if other is None:
+                continue
+            tens, unit = ((val, other) if val in _TENS_VALUES
+                          else (other, val) if other in _TENS_VALUES
+                          else (None, None))
+            # Both halves narrowed explicitly. They are only ever assigned
+            # together, but nothing in the types says so.
+            if tens is None or unit is None or not 1 <= unit <= 9:
+                continue
+            if str(tens + unit) in runs:
+                out.add(i)
+                out.add(j)
+                break
+    return out
+
+
+
+def is_hard_refusal(text: str) -> bool:
+    """Have they refused to tell us, or asked us to stop calling?
+
+    NOT the same question as "did they say no". A "no" is a valid ANSWER to
+    whether they are taking new patients, and "I don't know" or "we don't have
+    that" is ignorance -- a caller who does not know is one a different question
+    may still reach. This is willingness or permission, which no rephrasing
+    changes, and it is the one caller move that should end a call the first time
+    it happens instead of on a budget.
+
+    Measured before it was wired in: 5 hits across all 762 caller turns in the
+    corpus, every one a real refusal, and not one of them on a call that got a
+    branch. Precision is what matters here -- a false positive ends a call that
+    was going fine -- so _HARD_REFUSAL requires a refusal verb AND its object.
+    """
+    return bool(_HARD_REFUSAL.search(text or ""))
+
+
+
 def _meaning_class(word: str) -> str:
     """Which meaning class this word belongs to, or "" for ordinary content."""
     w = word.replace("'", "").lower()
@@ -331,6 +416,8 @@ __all__ = [
     "_drop_lost_substance",
     "_grounded_in",
     "_grounded_loosely",
+    "_number_grounded_indices",
+    "is_hard_refusal",
     "_invites_continuation",
     "_is_ask_for",
     "_is_hint_echo",
