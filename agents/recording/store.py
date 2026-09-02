@@ -41,67 +41,29 @@ def _to_record(snap: dict, call_id: str, audio_path: str | None,
 
 
 def save(record: CallRecord) -> str:
-    """Try PostgreSQL first, fall back to JSON. Returns backend name."""
-    try:
-        return _save_postgres(record)
-    except Exception:
-        return _save_json(record)
+    """Write the call to disk. Returns the path of the per-call JSON.
 
+    THERE WAS A POSTGRES BRANCH HERE AND IT NEVER RAN, not once. It opened with
+    `from core.db import get_connection`, and core.db exposed get_backend() --
+    never get_connection -- so the import raised ImportError on every call and
+    `except Exception` fell through to JSON every time. The module it imported
+    from was itself unreachable: nothing in the repo called get_backend() or
+    slug(), and PostgresBackend loaded a schema from agents/database/schema.sql,
+    a path that does not exist.
 
-def _save_postgres(record: CallRecord) -> str:
-    # NOT A TYPING PROBLEM. core.db exposes get_backend(), never get_connection,
-    # so this import raises ImportError on EVERY call and save() has always
-    # fallen through to _save_json. Postgres persistence from this path has
-    # never run.
-    #
-    # Left as-is on purpose: get_backend() is a different API (this function
-    # wants a raw DB-API connection for its own CREATE TABLE and %s-parameterised
-    # INSERT), so rewiring it would start writing to Postgres for the first
-    # time. That is a data decision, not a fix for a type error.
-    from core.db import get_connection  # type: ignore[attr-defined]
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS calls (
-            call_id TEXT PRIMARY KEY,
-            doctor_name TEXT,
-            hospital_name TEXT,
-            branch TEXT,
-            resolved BOOLEAN,
-            duration_seconds INTEGER,
-            cost_usd REAL,
-            summary TEXT,
-            audio_path TEXT,
-            transcript JSONB,
-            recorded_at TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
-    # Add cost_usd column if it doesn't exist yet (for existing tables)
-    cur.execute("""
-        ALTER TABLE calls ADD COLUMN IF NOT EXISTS cost_usd REAL
-    """)
-    cur.execute("""
-        INSERT INTO calls
-            (call_id, doctor_name, hospital_name, branch, resolved,
-             duration_seconds, cost_usd, summary, audio_path, transcript, recorded_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT (call_id) DO UPDATE SET
-            branch=EXCLUDED.branch, resolved=EXCLUDED.resolved,
-            cost_usd=EXCLUDED.cost_usd,
-            summary=EXCLUDED.summary, audio_path=EXCLUDED.audio_path,
-            transcript=EXCLUDED.transcript
-    """, (
-        record.call_id, record.doctor_name, record.hospital_name,
-        record.branch, record.resolved, record.duration_seconds,
-        record.cost_usd,
-        record.summary, record.audio_path,
-        json.dumps([t.model_dump() for t in record.transcript]),
-        record.recorded_at,
-    ))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return "PostgreSQL"
+    A previous pass left it standing on the grounds that rewiring it to
+    get_backend() would start writing to Postgres for the first time, which is a
+    data decision rather than a fix. That reasoning still holds -- and it is an
+    argument for not REWIRING it, not for keeping fifty lines of CREATE TABLE
+    and INSERT that have never touched a database. Deleted with core/db.py.
+    Bringing Postgres back is a deliberate piece of work, and it should start
+    from a schema that exists.
+
+    No behaviour changes: every call already took the JSON path. The summary
+    line said "Returns backend name" and never did -- _save_json returns the
+    per-call file path, which is what the one caller has always received.
+    """
+    return _save_json(record)
 
 
 def _save_json(record: CallRecord) -> str:
