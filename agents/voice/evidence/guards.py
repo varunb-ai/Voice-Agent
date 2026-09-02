@@ -37,6 +37,7 @@ from agents.voice.evidence.probes import (
     _class_present,
     _grounded_in,
     _grounded_loosely,
+    _number_grounded_indices,
     _is_ask_for,
     _is_hint_echo,
     _meaning_class,
@@ -100,10 +101,17 @@ def _ungrounded_detail(args: dict, sess: "RealtimeSession", key: str) -> list:
     # whitespace token leaves "front-desk" whole, and `.isalpha()` is False for
     # it, so a hyphenated invention was skipped without ever being compared \u2014
     # and "front-desk" is exactly the shape of the word this has to catch.
-    for w in re.findall(r"[a-z']+", value.lower()):
-        w = w.strip("'")
+    _words = [w.strip("'") for w in re.findall(r"[a-z']+", value.lower())]
+    # A NUMBER THEY GAVE IN FIGURES IS STILL A NUMBER THEY GAVE. Computed over
+    # the whole list rather than per word, because a tens/unit pair only
+    # grounds as a pair - see _number_grounded_indices for the call where
+    # "twenty second" against their "22nd" cost the field its only fact.
+    _numeric = _number_grounded_indices(_words, heard)
+    for i, w in enumerate(_words):
         if (not w or len(w) <= 2 or w in _UNGROUNDED_STOPWORDS
                 or w in _DETAIL_FUNCTION_WORDS or w in out):
+            continue
+        if i in _numeric:
             continue
         if _grounded_loosely(w, heard):
             continue

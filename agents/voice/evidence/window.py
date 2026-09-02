@@ -25,6 +25,7 @@ if TYPE_CHECKING:                       # pragma: no cover - typing only
 
 from agents.voice.objectives import (
     norm_quotes as _norm_quotes,
+    sentences,
 )
 from agents.voice.evidence.patterns import (
     _LOCATION_ANCHORS,
@@ -167,10 +168,32 @@ def _turn_asserts(text: str, sess: "RealtimeSession", *,
         return True
     if classifier is None or not state:
         return False        # PLACE, and any caller that did not opt in.
-    if not _ONLY_AFFIRM.match((text or "").strip()):
-        return False        # It said something past the affirmative. Vetting.
-    got = classifier(text)
-    return got is not None and got.value == state
+    _t = (text or "").strip()
+    if _ONLY_AFFIRM.match(_t):
+        got = classifier(_t)
+        return got is not None and got.value == state
+    # ── ANSWERED, AND THEN ASKED ────────────────────────────────────────────
+    # _ONLY_AFFIRM asks whether the WHOLE turn is a bare affirmative, which
+    # rescues "Yes?" and nothing else. A front desk's normal shape is to answer
+    # and staple a screening question to it in one breath, and that turn was
+    # discounted entirely: on call-20260902-1822 the caller said "Yes, Dr.
+    # Okafor is one of our physicians here. What do you need to be seen for?"
+    # and the save was refused as "they have only asked back, not answered".
+    # The agent re-asked "does Dr. Okafor work there?" fifteen seconds later.
+    # That call's own metrics record the caller stapling on 2 of its 3 answers,
+    # so this is the common case and not an edge one.
+    #
+    # PER CLAUSE, AND ONLY THE ONES THAT ARE NOT QUESTIONS. The question half
+    # is still vetting and still proves nothing; what changes is that it stops
+    # taking the answer beside it down with it. A turn that is ALL question
+    # reaches no clause here and is refused exactly as before.
+    for _part in sentences(_t):
+        if "?" in _part:
+            continue
+        got = classifier(_part)
+        if got is not None and got.value == state:
+            return True
+    return False
 
 
 def _transcript_pending(sess: "RealtimeSession") -> bool:
@@ -258,8 +281,16 @@ def _other_field_probes(sess: "RealtimeSession", probe) -> tuple:
         if obj is None or not getattr(obj, "fields", None):
             from agents.voice.objectives import default_objective
             obj = default_objective()
+        # DECLARED EXEMPTIONS, and only declared ones. A field may name other
+        # fields whose ask does not close its window -- see
+        # Field.shares_answers_with for why this is a per-template declaration
+        # and never inferred. Nothing declares one by default, so every
+        # objective that has not opted in keeps the exact ceiling it had.
+        _mine = next((f for f in obj.fields if f.probe is probe), None)
+        _shared = set(getattr(_mine, "shares_answers_with", ()) or ())
         return tuple(f.probe for f in obj.fields
-                     if f.probe is not None and f.probe is not probe)
+                     if f.probe is not None and f.probe is not probe
+                     and f.name not in _shared)
     except Exception:                       # pragma: no cover - double safety
         return ()
 

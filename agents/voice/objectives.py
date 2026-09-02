@@ -405,6 +405,31 @@ def states_in_its_own_right(text: str, state_value: str,
     return got is not None and got.value == state_value
 
 
+# A waiting list the caller is DENYING the existence of.
+#
+# _negated_before reads verbal negation ("we do not have a waiting list") and
+# misses the determiner, which is how people actually say it: "there is no
+# waiting list". Both spellings have to reach the same state.
+#
+# Its own predicate, applied ONLY to the WAITLIST branch, so YES / NO / UNSURE
+# keep byte-identical behaviour.
+#
+# THE NEGATOR MUST MODIFY THE NOUN, with nothing between them but an article.
+# A "nearby negator" window was the first cut and it inverted "Yeah, no no, we
+# are full right now, so." -- where "no no" is a discourse marker meaning
+# roughly "actually", the opposite of a denial. That sentence is a caller
+# saying they are FULL, which is the state this branch exists to record.
+# "no problem, there is a waiting list" is the same trap wearing a comma.
+_NO_SUCH_LIST = re.compile(
+    r"(?:\bno|\bnot|\bnone|n't|\bwithout)"
+    r"\s+(?:a|an|any|the|such\s+a)?\s*$", re.I)
+
+
+def _denied_before(text: str, at: int) -> bool:
+    """Is the phrase at `at` being denied rather than offered?"""
+    return bool(_NO_SUCH_LIST.search(text[:at]))
+
+
 def classify_choice(text: str) -> Optional[ChoiceAnswer]:
     """Which of the four states this caller turn expresses, or None.
 
@@ -421,9 +446,23 @@ def classify_choice(text: str) -> Optional[ChoiceAnswer]:
         m = pattern.search(t)
         if not m:
             continue
-        # Only YES inverts under negation. A negated WAITLIST or UNSURE is not
-        # a different state, and NO is already the negative.
+        # Only YES inverts under negation. A negated UNSURE is not a different
+        # state, and NO is already the negative.
         if state is ChoiceAnswer.YES and _negated_before(t, m.start()):
+            return ChoiceAnswer.NO
+        # A DENIED WAITING LIST IS `no`, NOT `waitlist`. This branch used to be
+        # excluded with UNSURE -- "a negated WAITLIST is not a different state"
+        # -- and for UNSURE that holds. For this one it does not: the template
+        # defines the pair as "waitlist: full, but a list or queue exists ...
+        # no if there is genuinely nothing", so a caller denying the list is
+        # giving the OTHER state, not a shade of this one.
+        #
+        # Found by replaying the evidence-window change across 137 artifacts:
+        # every sentence containing the words scored WAITLIST, including four
+        # plain denials, and call-20260902-1538 ("For now there is no waiting
+        # list, sorry for that.") would have had a correct `no` overwritten.
+        if state is ChoiceAnswer.WAITLIST and (
+                _negated_before(t, m.start()) or _denied_before(t, m.start())):
             return ChoiceAnswer.NO
         # ...and the same courtesy in the other direction. NO is tested first,
         # so without this a negative about something else wins over the answer
@@ -832,6 +871,28 @@ class Field:
     # how it wants that said rather than have the agent read an identifier to a
     # receptionist.
     spoken: str = ""
+
+    # Other fields on this objective whose ASK does not close this field's
+    # evidence window.
+    #
+    # _other_field_probes bounds a field's window at the next ask for any other
+    # field, and that ceiling is load-bearing: without it an answer about a
+    # BUILDING once overwrote a confirmed identity, which un-required every
+    # field behind it and ended the call. So the default stays "any other ask
+    # closes it" and the exceptions are DECLARED, per template, one pair at a
+    # time -- never inferred from the gate graph, which would readmit exactly
+    # that identity/branch pair.
+    #
+    # The one pair that needs it: asking "is there a waiting list?" is asking
+    # the new-patient question again in narrower words. `waitlist` is a state
+    # of accepting_new_patients, and the template says so -- "waitlist: full,
+    # but a list or queue exists ... no if there is genuinely nothing". The
+    # script then makes the bad ordering the DEFAULT: the moment the answer is
+    # `no`, the agent is told to ask about the list, and that ask shut the
+    # window on the answer that would have corrected `no` to `waitlist`. On
+    # call-20260902-1842 and -1839 the directory recorded `no` for practices
+    # that named a queue position and offered a place in it.
+    shares_answers_with: tuple = ()
 
     @property
     def label(self) -> str:
@@ -1348,6 +1409,10 @@ def patient_discovery_fields() -> tuple[Field, ...]:
         Field(name="accepting_new_patients", memory_key=NEW_PATIENT_STATUS_KEY,
               kind=AnswerKind.CHOICE, probe=ACCEPTING_ASK, required=True,
               states=CHOICE_STATES, required_when=_IF_DOCTOR_IS_HERE,
+              # The waiting-list ask is this question in narrower words, and
+              # `waitlist` is one of THIS field's states. See
+              # Field.shares_answers_with.
+              shares_answers_with=("waitlist_available",),
               spoken="whether they're taking new patients"),
         # FREE, not CHOICE. "There's a list, it's about three months" and "no,
         # nothing like that" are both complete answers and the second is worth

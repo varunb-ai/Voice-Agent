@@ -9671,7 +9671,23 @@ async def main():
     check(obj.classify_referral("Right now no.") is obj.ReferralAnswer.NO,
           "and the referral vocabulary gets the same parity")
     # THE DETERMINER MUST NOT FLIP, which is what bounds the trailing form.
-    for _t, _want in [("There is no waitlist.", "waitlist"),
+    #
+    # "There is no waitlist." MOVED waitlist -> no on 2026-09-02, and the row it
+    # was written to protect is untouched. That row is about the NO probe not
+    # eating a determiner, and it still does not: WAITLIST is tested first and
+    # matches "waitlist", so the NO probe never sees this sentence at all. What
+    # changed is the WAITLIST branch, which now inverts under a denial -- the
+    # template defines the pair as "waitlist: full, but a list or queue exists
+    # ... no if there is genuinely nothing", so a caller denying the list is
+    # giving the other state. `_denied_before` requires the negator to modify
+    # the noun, which is what keeps "Yeah, no no, we are full right now" and
+    # "No problem, there is a waiting list" on the waitlist side; both are
+    # asserted below and in the classify sweep.
+    for _t, _want in [("There is no waitlist.", "no"),
+                      ("For now there is no waiting list, sorry.", "no"),
+                      ("Yeah, no no, we are full right now, so.", "waitlist"),
+                      ("No problem, there is a waiting list you can join.",
+                       "waitlist"),
                       ("We're full, but I can put you on the list.", "waitlist"),
                       ("No idea.", "unsure"),
                       ("She is accepting new patients.", "yes"),
