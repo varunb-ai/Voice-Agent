@@ -66,8 +66,14 @@ def _caller_is_vetting(text: str, sess: "RealtimeSession") -> bool:
     known |= {w for w in re.findall(r"[a-z]+",
                                     (getattr(sess.doctor, "doctor_name", "") or "").lower())
               if len(w) > 2}
-    if sess.agent_name:
-        known.add(sess.agent_name.lower())
+    # BY WORD, like the two lines above it. `known.add(name.lower())` put the
+    # whole string in as one key, and the loop below tests SINGLE words — fine
+    # while every persona was one first name ("Sarah"), silently useless the
+    # moment a template introduced itself with two. patient_discovery speaks as
+    # a synthetic person, so "emile keswick" went in whole and "Keswick" was
+    # matched by nothing: our own invented surname, one word from a location
+    # anchor, read as the caller naming a place.
+    known |= _distinctive(sess.agent_name or "")
     #
     # A proper noun alone is not enough: the first live case was "This is
     # Northside Medical Group and I'm Varun. Sorry, who's calling again?" —

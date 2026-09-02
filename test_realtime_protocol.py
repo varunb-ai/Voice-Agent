@@ -3631,8 +3631,23 @@ async def main():
                     hospital_name="Northside Medical Group")
     for _name, _t in _ALL.items():
         _g = _t.build_greeting(_probe, org=settings.org_name)
-        check("on behalf of " + settings.org_name in _g,
-              f"{_name}: says 'on behalf of', not claiming employment", _g[:52])
+        # SCOPED BY `names_org`, WHICH THE TEMPLATE DECLARES, not by a list of
+        # template names kept in step by hand. A truthful-identification script
+        # must say "on behalf of"; the prospective-patient script must not name
+        # the organisation at all, and that is the assertion for it rather than
+        # a skip. An `if` with no `else` here would stop measuring the one
+        # greeting property that script exists to guarantee.
+        if _t.names_org:
+            check("on behalf of " + settings.org_name in _g,
+                  f"{_name}: says 'on behalf of', not claiming employment",
+                  _g[:52])
+        else:
+            check(settings.org_name not in _g,
+                  f"{_name}: names_org=False — the organisation stays out of "
+                  f"the opener entirely", _g[:52])
+        # OUTSIDE the branch on purpose: no opener may claim employment,
+        # whether or not it names the organisation. A script that never says
+        # the name passes this trivially, which is not a reason to narrow it.
         for _claim in (f"with {settings.org_name}", f"from {settings.org_name}",
                        f"at {settings.org_name}"):
             check(_claim not in _g,
@@ -4166,6 +4181,22 @@ async def main():
     _PROMPT_CEILINGS = {
         "forage_data_collection": (4_850, 20_400),
         "forage_ai_disclosed":    (4_850, 20_400),
+        # Template 4, the prospective-patient script. SIX fields, plus an EHR
+        # disclaimer block and a reason-for-visit block that no other template
+        # carries — the two things this script exists to guarantee, so neither
+        # is available to evict.
+        #
+        # PINNED AT provider_verification's NUMBERS, NOT ABOVE THEM, and that
+        # was paid for rather than asked for. It first built at 5,952 tok /
+        # 25,003 chars — a new high-water mark for the repo. An eviction pass
+        # took it to 5,821 / 24,521: the five call_outcome values stopped being
+        # enumerated four lines apiece, the "Getting Off The Phone" done-list
+        # stopped restating the goal block verbatim 300 tokens after it, and
+        # the branch-validity rules stopped mirroring what save_branch already
+        # rejects with a NEED. That is ~130 tokens of duplication removed, and
+        # it is what makes this pin a reuse of a number already argued for
+        # instead of a fourth raise.
+        "patient_discovery":      (5_900, 24_900),
         # FIVE fields now. Identity confirmation went in 2026-08-25 and cost
         # ~480 tokens gross; eviction paid 102 of that — "# The Doctor"
         # compressed to the one rule identity does not supersede, and the two
@@ -10129,6 +10160,13 @@ async def main():
         _MANIFEST = {
             ("call-20260827-1130-ed9f", "referral"),    # "It's depend upon situation"
             ("call-20260827-1428-9f82", "accepting"),   # "Right now, no."
+            # Pre-fix identity probe could not read "Yes, Dr. Okafor works
+            # here" — the caller's real confirmation, refused four times on
+            # this call before anything landed. _IDENTITY_PATTERNS now match
+            # it (verified against these exact bytes), so the gap is closed in
+            # code and this row is the historical record of it, not an
+            # exemption. A re-call with the fixed probe must NOT produce it.
+            ("call-20260902-1245-5dce", "identity"),
         }
         _found = [f for _p in _real for f in _cr.audit(_p)]
         _ids = {(f["call_id"], f["field"]) for f in _found}

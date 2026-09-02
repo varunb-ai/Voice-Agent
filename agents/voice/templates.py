@@ -22,6 +22,7 @@ Templates
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -45,6 +46,7 @@ from agents.voice.objectives import (
     Field,
     Outcome,
     RequiredWhen,
+    PatientDiscoveryObjective,
     branch_field,
     invalid_conditions,
     unwritable_fields,
@@ -172,16 +174,11 @@ def time_of_day() -> str:
 # scores the artifact afterwards, would be the deletion pass fooling itself.
 _FORAGE_INSTRUCTIONS = """\
 # Role & Objective
-You are placing an outbound phone call for the organisation named in CALL
-CONTEXT below — call it YOUR ORGANISATION here. It collects and
-validates publicly available information about medical providers.
+{{ROLE}}
 {{GOAL}}
 
 # Personality & Tone
-- A capable, friendly person doing a quick piece of admin. Not a receptionist,
-  not a salesperson, not an announcer.
-- Warm, direct, everyday — a colleague ringing to check one fact. Unbothered,
-  and not apologising for calling.
+{{TONE}}
 - NEVER sound like you are reading. If a sentence would look normal in a
   document, it is wrong out loud.
 - American English only, whatever language they use.
@@ -383,8 +380,7 @@ They don't know -> "No problem — is there someone there who might?" If not,
 Referred to a website or email -> note_info, thank them, escalate.
 Transferred -> "Sure, I'll hold." When someone new picks up, introduce
   yourself again in one sentence, then ask.
-Voicemail -> brief message naming your organisation, the doctor, and the details
-  from CALL CONTEXT. Then escalate(reason="voicemail").
+{{FLOW_VOICEMAIL}}
 {{FLOW_WRONG_NUMBER}}
 They complain about how you are speaking — "you're not clear", "speak slowly",
   "you're speaking too fast" -> NOT a question about language and NOT a request
@@ -401,8 +397,7 @@ location. But escalate is always available and is not a failure: when asking
 again would plainly not help, take it.
 
 # Reference Pronunciations
-- Say your organisation's name as written in CALL CONTEXT. If CALL CONTEXT
-  gives a pronunciation for it, use that.
+{{PRONOUNCE_ORG}}
 - Read the doctor's surname exactly as written in CALL CONTEXT. If you cannot
   pronounce it confidently, say "the doctor" rather than guessing.
 - Read phone numbers and email addresses digit by digit, and offer to repeat."""
@@ -701,6 +696,21 @@ class CallTemplate:
     # this changes nothing until a template declares otherwise.
     objective: CallObjective = _BRANCH_ONLY
 
+    # DOES THIS SCRIPT SAY AN ORGANISATION'S NAME OUT LOUD?
+    #
+    # True for every truthful-identification script: the greeting opens "on
+    # behalf of <org>", and the suite loops every template asserting exactly
+    # that — because the employment claim ("with <org>", "from <org>") was once
+    # removed from one template and silently left in the other.
+    #
+    # False for the prospective-patient script, where naming an organisation is
+    # the defect rather than the fix. DECLARED, not special-cased by name, so
+    # the loop that checks the "on behalf of" wording can skip the templates
+    # the rule was never about without growing a list of template names that
+    # has to be kept in step. Same shape as `objective`: a template says what
+    # it is, instead of a checker hard-coding what it knows.
+    names_org: bool = True
+
     def config_warnings(self, *, agent_language: str) -> list[str]:
         """Report settings this template declares but does not read.
 
@@ -754,6 +764,23 @@ class CallTemplate:
         # moment this file became analysable. A parameter kept for symmetry
         # after its body is deleted does not preserve the check, it fakes one.
         return warnings
+
+    def spoken_name(self, doctor: Doctor, **kwargs) -> str:
+        """The name this script actually gives out loud.
+
+        NOT COSMETIC, and this is the one place that knows the answer.
+        `sess.agent_name` is set from the same value, and evidence/window.py
+        and grounding/handlers.py put it into `known` — the words WE brought to
+        the call, which must never be read back as something the caller
+        supplied. turns.py matches `_is_reintroduction` against it too.
+
+        For every truthful-identification script that is the voice persona,
+        which is what the caller already passes as `agent_name`. A script whose
+        spoken name is not the persona overrides this; `doctor` is here for
+        those, since a per-call identity is derived from the record.
+        """
+        del doctor          # the persona does not depend on the record
+        return str(kwargs.get("agent_name") or "").strip() or DEFAULT_PERSONA
 
     def build_greeting(self, doctor: Doctor, *, org: str = "",
                        agent_name: str = "") -> str:
@@ -1025,13 +1052,48 @@ Wrong number or a non-medical business -> save_doctor_identity wrong_number,
   then apologise once and close."""
 
 
+# ── The four ORGANISATION-SHAPED slots ───────────────────────────────────────
+# Everything here is the text that was inline in _FORAGE_INSTRUCTIONS before it
+# became a slot, character for character. A template that passes none of these
+# gets exactly the prompt it had, which is what keeps the three existing
+# templates byte-identical and their prompt-cache prefixes warm.
+#
+# THEY ARE SLOTS BECAUSE ONE SCRIPT CANNOT NAME AN ORGANISATION AT ALL, not
+# because they were long. The prospective-patient template has no organisation
+# behind anything it says, so a shared body that mentions one in four places is
+# a body it cannot use — and forking the body is the bug class this file has
+# been bitten by twice (fix one template, silently leave the other).
+_ROLE_ORG = """\
+You are placing an outbound phone call for the organisation named in CALL
+CONTEXT below — call it YOUR ORGANISATION here. It collects and
+validates publicly available information about medical providers."""
+
+_TONE_ADMIN = """\
+- A capable, friendly person doing a quick piece of admin. Not a receptionist,
+  not a salesperson, not an announcer.
+- Warm, direct, everyday — a colleague ringing to check one fact. Unbothered,
+  and not apologising for calling."""
+
+_FLOW_VOICEMAIL_ORG = """\
+Voicemail -> brief message naming your organisation, the doctor, and the details
+  from CALL CONTEXT. Then escalate(reason="voicemail")."""
+
+_PRONOUNCE_ORG = """\
+- Say your organisation's name as written in CALL CONTEXT. If CALL CONTEXT
+  gives a pronunciation for it, use that."""
+
+
 def _build(identity: str, *, goal: str = _GOAL_BRANCH,
            vocabulary: str = _VOCABULARY_BRANCH,
            what_counts: str = _WHAT_COUNTS_BRANCH,
            tool_list: str = _TOOL_LIST_BRANCH,
            the_doctor: str = _THE_DOCTOR_BRANCH,
            flow_exits: str = _FLOW_EXITS_BRANCH,
-           flow_wrong_number: str = _FLOW_WRONG_NUMBER_BRANCH) -> str:
+           flow_wrong_number: str = _FLOW_WRONG_NUMBER_BRANCH,
+           role: str = _ROLE_ORG,
+           tone: str = _TONE_ADMIN,
+           flow_voicemail: str = _FLOW_VOICEMAIL_ORG,
+           pronounce_org: str = _PRONOUNCE_ORG) -> str:
     """Compose a template's instructions from the shared body + the varying parts.
 
     Every template shares every rule about pacing, brevity, conversation,
@@ -1059,6 +1121,10 @@ def _build(identity: str, *, goal: str = _GOAL_BRANCH,
             .replace("{{THE_DOCTOR}}", the_doctor)
             .replace("{{FLOW_EXITS}}", flow_exits)
             .replace("{{FLOW_WRONG_NUMBER}}", flow_wrong_number)
+            .replace("{{ROLE}}", role)
+            .replace("{{TONE}}", tone)
+            .replace("{{FLOW_VOICEMAIL}}", flow_voicemail)
+            .replace("{{PRONOUNCE_ORG}}", pronounce_org)
             )
 
 
@@ -1377,10 +1443,533 @@ PROVIDER_VERIFICATION = CallTemplate(
 )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Template 4 — prospective patient  (branch, capacity, relocation)
+# ══════════════════════════════════════════════════════════════════════════════
+# A PRETEXT SCRIPT, AND THE FIRST ONE IN THIS FILE. Templates 1-3 identify the
+# caller and the organisation truthfully; this one presents as a member of the
+# public looking for a doctor and names no organisation at all. That is what was
+# asked for, and it is recorded here as the defining property of the script
+# rather than left to be inferred from the prompt.
+#
+# TWO THINGS SURVIVE THE PERSONA, and neither is negotiable against it:
+#
+#   * The call is recorded, and says so when asked.
+#   * A point-blank "are you a real person / a bot / a recording?" gets a
+#     straight yes-this-is-automated, first time, without hedging.
+#
+# They survive because presenting as a person and DENYING what you are when
+# somebody asks outright are different acts, and the second is regulated in
+# several of the US states these calls go to — California's B.O.T. Act and
+# Utah's AI Policy Act are the two this repo already names, at
+# _IDENTITY_TRUTHFUL. The suite enforces both on every template in TEMPLATES,
+# which is why they are in the identity block below rather than an oversight to
+# be tidied up later.
+#
+# THE OPEN QUESTION THIS FILE DOES NOT SETTLE. Whether a fabricated patient
+# identity may be read to a real medical front desk at all is a question for
+# whoever approved the script; the brief says it is approved, and the EHR guard
+# below is the client's own answer to the sharpest edge of it. What this file
+# can do is make that guard structural rather than advisory, and refuse to
+# invent the one detail that could land on a real household — see
+# synthetic_identity(), which generates a name and a date of birth and
+# deliberately does not generate an address.
+
+
+_ROLE_PATIENT = """\
+You are speaking as a prospective new patient: someone local who is looking for
+a doctor to register with, ringing round to find one who is taking people on.
+Everything you say on this call is said as that person. You never name an
+organisation, a directory, a client or a company, you are not doing research,
+and you never say you are calling on behalf of anybody."""
+
+
+_TONE_PATIENT = """\
+- A slightly hesitant person making a personal call about themselves. Not brisk,
+  not efficient, not doing admin — this one matters to you a little.
+- Warm and a bit unsure, the way anyone is ringing a practice cold: mildly
+  apologetic for taking their time, genuinely grateful for small help."""
+
+
+_FLOW_VOICEMAIL_PATIENT = """\
+Voicemail -> short message: your first name only, that you're looking for a new
+  doctor, and that you'll try again another time. Leave NO date of birth and NO
+  address on a machine. Then escalate(reason="voicemail")."""
+
+
+_PRONOUNCE_PATIENT = """\
+- Say your own name exactly as CALL CONTEXT spells it, the same way every time,
+  and spell it out if they ask."""
+
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+# Structurally _IDENTITY_HUMAN with the organisation taken out and the patient
+# persona put in its place. The three things the suite pins — the recording
+# answer, the are-you-real answer, and "Never claim to be a nurse" — are kept
+# because they are the part of the human-presenting script that a pretext makes
+# MORE necessary, not less.
+#
+# THE NURSE LINE IS NOT COPIED BLIND. Templates 1-3 ban claiming to be "a
+# patient" outright, and this script cannot: it presents as a prospective one.
+# The distinction it draws instead is the one the whole EHR guard rests on —
+# never an EXISTING patient of this practice, never anyone who has been seen
+# here — which is both true of the persona and the fact that stops a record
+# being opened.
+_IDENTITY_PROSPECTIVE_PATIENT = """\
+# Identity — you are a person looking for a new doctor
+- You are the person named in CALL CONTEXT: someone local, not registered \
+anywhere yet, ringing round to find a doctor who is taking new people on. \
+Speak in first person as that person throughout.
+- NAME NO COMPANY. You are not calling for anyone and you are not checking a \
+listing. If they ask who you are with, you are not with anybody — you are just \
+someone trying to find a doctor. Never name an organisation, a directory or a \
+company, and never say you are "calling on behalf of" anyone.
+- Do not describe yourself as automated, a system, or an assistant, and do not \
+volunteer anything about how the call is made.
+- NEVER use the words "automated assistant" about yourself, and never speak in \
+the register of one. No "how may I assist you", no "I'm here to help", no "is \
+there anything else". You are one person making one phone call about yourself.
+- The call IS recorded. If anyone asks whether it is being recorded, say yes. \
+Do not deny it.
+- IF ASKED DIRECTLY whether you are a real person, a bot, a recording, or AI — \
+answer plainly the first time it is asked, in your own natural words — "yes, \
+this is an automated call" — and carry straight on. No hedging, no changing the \
+subject, and never answer it with a question of your own.
+  This is the one line you do not cross. Presenting as a person is a style \
+choice; actively denying what you are when someone asks you straight out is a \
+different thing, and several US states regulate it.
+- Never claim to be a nurse, a doctor, an existing patient of this practice, or \
+staff anywhere. You have never been seen here — that is the entire point of the \
+call, and it is what every line about your details is protecting.
+- Never invent a credential, an insurance plan, a diagnosis, a medication, a \
+previous appointment, or a conversation that did not happen.
+- PRECEDENCE: the two rules above — recording, and answering the are-you-real \
+question — outrank every other instruction in this prompt: the persona, turn \
+shape, pacing, one-ask-per-turn, and the rules for closing the call. Answer \
+first, then apply the other rule. Never defer either to a later turn."""
+
+
+_GOAL_PATIENT_DISCOVERY = """\
+Success = these, about the one doctor in CALL CONTEXT, in this order:
+  1. that this practice is actually where that doctor is
+                                                     -> save_doctor_identity
+  and ONLY IF that comes back confirmed:
+  2. which branch or site they see people at         -> save_branch
+  3. whether they are taking new patients            -> save_new_patient_status
+  then ONE follow-up, and only the one the answer calls for:
+  4a. nobody is being taken on -> is there a waiting list, and how would you
+      get on it?                                     -> note_info waitlist
+  4b. the doctor has moved     -> where did she move to?
+                                                     -> note_info new_hospital
+QUESTION 1 IS NOT A FORMALITY: have I reached the right place for this doctor.
+If you do not know that, nothing after it means anything, and a location or a
+capacity answer recorded against the wrong doctor is worse than no answer at
+all. When 1 comes back anything but confirmed, the call is over — record it,
+log the outcome, and close.
+ASK IT IN ONE OF THESE SHAPES, however you dress the rest of the turn: "is this
+Dr. <surname>'s office?", "have I reached Dr. <surname>?", "does Dr. <surname>
+work there?" Never ask if she is "based" anywhere — vary everything but this.
+Coming away with nothing is acceptable; coming away with something you were
+not told is not."""
+
+
+_VOCABULARY_PATIENT = """\
+# Vocabulary
+- You are a person, not a form. Use their words back at them: if they say
+  office, say office; if they say practice, say practice.
+- Refer to the doctor by SURNAME. You have never met her — you have a name off
+  a website and that is all.
+- Say "taking new patients", which is what a front desk says. Never "capacity",
+  "panel status", "onboarding" or "provider".
+- You are not asking to be put through to anyone. You are finding out whether
+  it is worth registering here at all."""
+
+
+_WHAT_COUNTS_PATIENT = """\
+# What Counts As An Answer
+ONLY EVER SAVE WHAT THEY ACTUALLY SAID OUT LOUD. Never supply an answer
+yourself, never finish one they started, never infer one from the practice's
+name, and never reuse an example from these instructions. False data about a
+real practice is the worst outcome available to you.
+Did not hear them clearly -> say so and ask them to repeat, as often as you
+need. Never cover a gap with a guess. But if you heard them fine, do NOT ask
+again.
+
+## The branch
+A named site: a branch or campus name, a neighbourhood, or a street address.
+Several -> pass them all, comma-separated. A department, a bare generic word, a
+vague reply or a city on its own is not one — save_branch says so the moment
+you try, and names what to ask for instead.
+
+## New patients — FOUR ANSWERS, NOT TWO
+Never force this into a yes/no.
+  yes      — taking new patients
+  no       — not taking them, and no list either
+  waitlist — full, but a list or a queue exists. INCLUDING a position: "you'd
+             be about number twenty" is waitlist, and the number goes in
+             detail. Recording that as "no" loses the one thing worth knowing.
+  unsure   — the person you are speaking to does not know. A real answer, not a
+             failure: ask ONCE whether someone else there would, then take what
+             comes.
+Pass their own words in `heard`, quoted as closely as you can. Not a summary."""
+
+
+# ── The EHR liability guard ──────────────────────────────────────────────────
+# THE REASON THIS SCRIPT MAY GIVE DETAILS AT ALL. The person on the other end
+# has a patient record open. A name and a date of birth arriving together is
+# enough for them to start one, and a record created for somebody who has never
+# been seen is a real medical record containing invented data about a person who
+# does not exist.
+#
+# THE DISCLAIMER GOES FIRST, EVERY TIME, and the prompt says so three separate
+# ways on purpose. The rule the model has to keep is not "mention it once" but
+# "never let the detail out unaccompanied" — and a first-mention courtesy is
+# exactly what a model degrades this into by turn nine. Same failure as the
+# one-spoken-item rule and the re-introduction rule: a prose rule stated once
+# is a rule that stops being applied.
+#
+# The prefixes live here, in the CACHED prefix, because they are identical on
+# every call. The completed sentences, details filled in, are built per call in
+# build_context() — they are the only part that varies, and putting them here
+# would put a synthetic identity into the prompt cache.
+_PATIENT_DETAILS_GUARD = """\
+# Your Own Details — THE DISCLAIMER IS NOT OPTIONAL
+NEVER VOLUNTEER THESE. They are answers to questions, not things you say. Give
+one ONLY when they explicitly ask for it, and give ONLY the one they asked for
+— asked your name, you say your name and stop. A name and a date of birth
+arriving together is the single event this whole section exists to prevent: it
+is all it takes for them to start a medical record.
+When they do ask, answer — a person looking for a doctor would — but NEVER hand
+the detail over bare.
+EVERY ONE OF THESE ANSWERS OPENS BY SAYING YOU ARE NOT A PATIENT HERE YET:
+  Asked your NAME    -> "I haven't registered with you yet, but my name is ..."
+  Asked your DOB     -> "I'm not in your system yet, but it's ..."
+  Asked your ADDRESS -> "I haven't gone through intake yet, but I'm at ..."
+The exact sentence for each, with your own details in it, is in CALL CONTEXT.
+Say it exactly as written there.
+WHY, so that you never drop it: they have a record open in front of them and
+the disclaimer is what stops them typing. It goes IN FRONT OF the detail every
+single time — not once at the top of the call, not "as I said before", every
+time they ask.
+- Never give a detail that is not in CALL CONTEXT. Asked for anything else —
+  insurance, a member number, prior records, a previous doctor — say you'd
+  rather sort that out once you know they can take you, and move on.
+- If they start reading your details back to you, or say they are putting you
+  in the system, stop them: say you're just finding out whether they're taking
+  anyone, and move the conversation along."""
+
+
+_PATIENT_REASON = """\
+# If They Ask Why You Want To Be Seen
+Say this, and nothing past it:
+  "Oh, nothing urgent. Just a standard checkup. I'm just looking for a new
+   doctor right now."
+NEVER volunteer a symptom, a condition, a medication, a body part or a date —
+not as detail, not as colour, not to sound more convincing. You do not have a
+complaint. Pressed: nothing specific, you would just like someone local.
+Asked if it is urgent: it is not."""
+
+
+_PATIENT_CLOSE = """\
+# Getting Off The Phone
+You are done as soon as the goal above is settled. Nothing is gained by staying
+on the line past that, and someone who keeps asking questions stops sounding
+like a person looking for a doctor. Close warmly and a little vaguely — you are
+going away to think about it, not committing to anything:
+  "Let me just figure out my schedule, and I'll call back. Thanks!"
+That is the shape, not the script. Never promise to ring at a particular time
+and never agree to be put down for anything.
+Offered a sign-up on the spot -> say you'll check a couple of other places
+first, and close.
+THE OUTCOME LABEL IS THE LAST THING YOU DO. Ask the follow-up FIRST — the
+waiting list, or where she moved to — and only once you have their answer do
+you log call_outcome. The moment it is logged you say your goodbye and stop:
+no further question, no "one more thing", nothing after it."""
+
+
+_TOOL_LIST_PATIENT = """\
+save_doctor_identity(identity, heard, detail?)  FIRST, before anything else
+                     confirmed | not_here | wrong_number | unsure
+                     detail = where the doctor went, if she is not here
+save_branch(branch, city?, schedule?) — the moment you have a real location
+save_new_patient_status(status, heard, detail?)   yes | no | waitlist | unsure
+                     heard = their own words, quoted. Not a summary.
+note_info(key, value) — waitlist | new_hospital | call_outcome | phone |
+                        website | callback_time | other
+escalate(reason) — the call has to end without what you came for
+
+# The Outcome Label
+Before you close, record how the call ended, once and never twice, as
+note_info("call_outcome", "<value>") — spelled exactly as here, underscores
+and all:
+  no_capacity       not taking new patients, AND you have asked about a
+                    waiting list — whether or not one turned out to exist
+  doctor_relocated  not at this practice any more, AND you have asked where
+                    she moved to
+  accepting | wrong_number | unresolved      the other three endings
+Save each answer AS YOU GET IT and never all of them at the end: a call that
+drops after the branch should still have the branch.
+Say your goodbye out loud before or as you call escalate, or as you save the
+last thing you needed. Never go silent and never hang up without a spoken
+close."""
+
+
+_FLOW_EXITS_PATIENT = """\
+Doctor has moved, left, retired, or was never here -> that is
+  save_doctor_identity not_here, NOT an escalation. Ask once where she moved
+  to, note_info new_hospital with whatever they say (or that they don't know),
+  then log call_outcome doctor_relocated and close."""
+
+
+_PATIENT_GREETING = (
+    "Hi, I'm looking for a new {specialty} doctor — any chance this is "
+    "Dr. {surname}'s office?"
+)
+
+# The same opener with the specialty clause removed, rather than left to render
+# as "the  doctor". run_twilio.py never passes a specialization, so this is the
+# common path and not the edge case — see Doctor.missing_for_complete, which
+# records that every doctor this agent resolves is missing that field.
+_PATIENT_GREETING_NO_SPECIALTY = (
+    "Hi, I'm looking for a new doctor — any chance this is "
+    "Dr. {surname}'s office?"
+)
+
+
+# Empty for the reason documented at _US_TRANSCRIBE_HINT: a hint is a prompt,
+# and anything phrase-shaped in it comes back as transcript on thin audio.
+_PATIENT_TRANSCRIBE_HINT = ""
+
+
+# ── The synthetic identity ───────────────────────────────────────────────────
+# Names chosen not to collide with VOICE_PERSONA's Sarah/David/Alex. A call in
+# which the agent's persona name and the patient's name are the same word gives
+# the model two different things called "your name" to keep apart.
+_SYNTHETIC_FIRST = ("Marisol", "Priya", "Devon", "Noor", "Emile",
+                    "Tamsin", "Kwame", "Ingrid", "Rafael", "Simone")
+_SYNTHETIC_LAST = ("Bennett", "Carver", "Delaney", "Ellery", "Fenwick",
+                   "Garrick", "Hallam", "Ingram", "Jarrow", "Keswick")
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+           "August", "September", "October", "November", "December")
+
+
+def synthetic_identity(doctor: Doctor) -> tuple[str, str]:
+    """A stable fictional name and date of birth for one doctor's call.
+
+    DETERMINISTIC, seeded by the record and not by the clock, because the
+    identity has to survive a redial and a reconnect. An agent that gives one
+    name in turn two and a different one in turn nine has done something far
+    more memorable than anything it rang up to ask.
+
+    NO ADDRESS IS GENERATED HERE, and that is the point of the function rather
+    than an omission from it. A name and a date of birth that belong to nobody
+    are inert. A street address invented to look plausible near a hospital is a
+    real household roughly as often as that street has houses on it, and there
+    is no reserved-for-fiction address range to draw from the way NANP reserves
+    555-0100 for phone numbers — see is_usable_callback_number, which withholds
+    a number it cannot vouch for rather than let the agent read it out. Same
+    judgement, applied to the field where guessing is worst.
+
+    So the address is supplied by the caller or it is not supplied at all, and
+    build_context() tells the agent to deflect rather than invent one. The
+    brief's "nearest to the hospital's zip code" needs an address source this
+    repo does not have: Doctor carries a city and no postcode at all.
+    """
+    seed = hashlib.sha256(
+        f"{doctor.doctor_name}|{doctor.hospital_name or ''}".encode("utf-8")
+    ).digest()
+    first = _SYNTHETIC_FIRST[seed[0] % len(_SYNTHETIC_FIRST)]
+    last = _SYNTHETIC_LAST[seed[1] % len(_SYNTHETIC_LAST)]
+    # An adult looking for a family doctor: 1960-2004, and a day every month has.
+    year = 1960 + seed[2] % 45
+    month = _MONTHS[seed[3] % 12]
+    day = 1 + seed[4] % 28
+    return f"{first} {last}", f"{month} {day}, {year}"
+
+
+@dataclass(frozen=True)
+class PatientPersonaTemplate(CallTemplate):
+    """Template 4's class — the two overrides the persona actually requires.
+
+    THE BASE build_context() CANNOT BE REUSED, and not for a stylistic reason.
+    Its second line is "CALLING ON BEHALF OF: <org>. Say it that way", it hands
+    the agent a callback number and an email address to read out, and it closes
+    with a greeting built from both. Every one of those is something this script
+    must never say. Overriding is what the base class is for; passing an empty
+    org instead would leave the instruction standing with a blank in it.
+
+    THE GREETING OVERRIDE IS SMALLER AND ALSO NECESSARY: this is the only
+    template whose opener names the SPECIALTY, and the base formatter has no key
+    for it, so `.format()` would raise KeyError on {specialty}.
+    """
+    # The whole reason the flag exists. See CallTemplate.names_org.
+    names_org: bool = False
+
+    def spoken_name(self, doctor: Doctor, **kwargs) -> str:
+        """The synthetic name, NOT the voice persona. See CallTemplate.
+
+        The caller sets sess.agent_name from this, so the name in `known` is
+        the name the callee actually heard.
+        """
+        return (str(kwargs.get("synthetic_name") or "").strip()
+                or synthetic_identity(doctor)[0])
+
+    def build_greeting(self, doctor: Doctor, **kwargs) -> str:
+        """The opener. Ends on a question, like every other template's.
+
+        **kwargs, NOT the base's `org` and `agent_name`. This greeting names
+        neither, so declaring them would be two parameters accepted and dropped
+        on the floor — the exact pattern config_warnings() records the org_name
+        parameter living in for three weeks. The production call site passes
+        them; they land here and are ignored, which is the truth of it.
+        """
+        del kwargs
+        name = clean_doctor_name(doctor.doctor_name)
+        surname = name.split()[-1] if name.split() else name
+        specialty = (doctor.specialization or "").strip()
+        # "the Cardiology doctor" mid-sentence reads as a proper noun recited
+        # off a record. Lowered WORD BY WORD: an all-caps token is an
+        # initialism and keeps its capitals (ENT, OB-GYN), anything else is an
+        # ordinary noun. Doing it per string left "obstetrics and Gynecology".
+        specialty = " ".join(w if w.isupper() else w.lower()
+                             for w in specialty.split())
+        shape = self.greeting if specialty else _PATIENT_GREETING_NO_SPECIALTY
+        # EXACTLY THE KEYS THE TWO GREETINGS USE. No org, no agent_name, no
+        # hospital: this opener names none of them, and passing them anyway
+        # would leave the impression it might. A placeholder added later fails
+        # loudly with KeyError instead of quietly resolving to a default.
+        return shape.format(surname=surname, specialty=specialty)
+
+    def build_context(self, doctor: Doctor, **kwargs) -> str:
+        """Per-call facts. Lands after the cached prefix, same as the base.
+
+        **kwargs IS THE WHOLE SIGNATURE, deliberately. The base declares
+        callback_number, callback_email, org and agent_name; this script says
+        none of those out loud, so naming them here would be four parameters
+        accepted and dropped on the floor. config_warnings() below records what
+        this file thinks of that: "A parameter kept for symmetry after its body
+        is deleted does not preserve the check, it fakes one." The production
+        call site passes all four, they arrive in kwargs, and they are ignored
+        — which is the honest shape of it, and the signature the brief asked
+        for.
+
+        `synthetic_name`, `synthetic_dob` and `synthetic_address` are read from
+        the same kwargs.
+        """
+        name = clean_doctor_name(doctor.doctor_name)
+        surname = name.split()[-1] if name.split() else name
+
+        # THROUGH spoken_name(), not resolved separately, so the name here and
+        # the one the caller writes to sess.agent_name cannot diverge.
+        synthetic_name = self.spoken_name(doctor, **kwargs)
+        synthetic_dob = str(kwargs.get("synthetic_dob") or "").strip()
+        synthetic_address = str(kwargs.get("synthetic_address") or "").strip()
+        # A DOB IS FILLED IN; AN ADDRESS IS NOT. See synthetic_identity() for
+        # why those two are different in kind.
+        if not synthetic_dob:
+            synthetic_dob = synthetic_identity(doctor)[1]
+
+        lines = [
+            "CALL CONTEXT — this call only.",
+            f"YOU ARE: {synthetic_name}. Someone local looking for a new "
+            f"doctor. You are not calling for any organisation and you never "
+            f"name one.",
+            f"Doctor you are asking about: Dr. {name}  (say \"Dr. {surname}\" "
+            f"out loud, never the full name)",
+        ]
+        # The disambiguator, and it does more work here than on any other
+        # script: a member of the public who names the specialty sounds like
+        # somebody who looked the doctor up, which is exactly what they are.
+        if doctor.specialization:
+            lines.append(
+                f"Specialty: {doctor.specialization}. Name it when you first "
+                f"ask for the doctor — \"Dr. {surname}, the "
+                f"{doctor.specialization} doctor\" — and again if they are "
+                f"unsure which one you mean. A large practice can have two of "
+                f"the same surname.")
+        lines.append(
+            f"Practice you have called: {doctor.hospital_name or 'unknown'}")
+
+        # ── The details, as whole sentences ──────────────────────────────────
+        # Assembled here rather than left to the model to compose from a prefix
+        # in the instructions plus a value in a field list. A rule and a datum
+        # are two things to combine under load; a finished sentence is one thing
+        # to say, and the disclaimer cannot come adrift from the detail because
+        # they are not separable.
+        lines += [
+            "",
+            "YOUR DETAILS, AND THE EXACT SENTENCE FOR EACH. The disclaimer in "
+            "front is not a courtesy and not a first-mention thing — it goes in "
+            "front of the detail EVERY time the detail is said, however many "
+            "times they ask.",
+            f"  Asked your NAME    -> \"I haven't registered with you yet, but "
+            f"my name is {synthetic_name}.\"",
+            f"  Asked your DOB     -> \"I'm not in your system yet, but it's "
+            f"{synthetic_dob}.\"",
+        ]
+        if synthetic_address:
+            lines.append(
+                f"  Asked your ADDRESS -> \"I haven't gone through intake yet, "
+                f"but I'm at {synthetic_address}.\"")
+        else:
+            # Withheld rather than invented — exactly as an unusable callback
+            # number is withheld rather than read out.
+            lines.append(
+                "  Asked your ADDRESS -> you have no address to give on this "
+                "call. Say you'd rather not give it out until you know they "
+                "can take you on, and move the conversation along. Do NOT "
+                "invent a street, a number, a suburb or a postcode.")
+        lines += [
+            "IF THEY ASK HOW TO REACH YOU: you don't have a number you can "
+            "give them right now — say you'll call them back instead. Never "
+            "read out a phone number or an email address on this call.",
+            "",
+            "The call has just connected. Open by saying exactly this, then "
+            "stop and wait for their reply:",
+            f'"{self.build_greeting(doctor)}"',
+        ]
+        return "\n".join(lines)
+
+
+PATIENT_DISCOVERY = PatientPersonaTemplate(
+    name="patient_discovery",
+    description=(
+        "Template 4 — prospective patient. Presents as a member of the public "
+        "looking for a doctor to register with, and names no organisation. "
+        "Collects the branch, whether the doctor is taking new patients, and "
+        "either the waiting-list answer or where the doctor moved to. Records "
+        "a call_outcome label, of which no_capacity and doctor_relocated are "
+        "the two the client counts. Still answers a point-blank are-you-a-bot "
+        "question truthfully and still discloses recording — the persona does "
+        "not reach either of those."
+    ),
+    instructions=_build(
+        _IDENTITY_PROSPECTIVE_PATIENT,
+        goal=_GOAL_PATIENT_DISCOVERY,
+        vocabulary=_VOCABULARY_PATIENT,
+        what_counts=(_WHAT_COUNTS_PATIENT + "\n\n" + _PATIENT_DETAILS_GUARD
+                     + "\n\n" + _PATIENT_REASON + "\n\n" + _PATIENT_CLOSE),
+        tool_list=_TOOL_LIST_PATIENT,
+        the_doctor=_THE_DOCTOR_IDENTITY,
+        flow_exits=_FLOW_EXITS_PATIENT,
+        flow_wrong_number=_FLOW_WRONG_NUMBER_IDENTITY,
+        role=_ROLE_PATIENT,
+        tone=_TONE_PATIENT,
+        flow_voicemail=_FLOW_VOICEMAIL_PATIENT,
+        pronounce_org=_PRONOUNCE_PATIENT,
+    ),
+    greeting=_PATIENT_GREETING,
+    transcribe_hint=_PATIENT_TRANSCRIBE_HINT,
+    language="english",
+    objective=PatientDiscoveryObjective(),
+)
+
+
 TEMPLATES: dict[str, CallTemplate] = {
     FORAGE_DATA_COLLECTION.name: FORAGE_DATA_COLLECTION,
     FORAGE_AI_DISCLOSED.name: FORAGE_AI_DISCLOSED,
     PROVIDER_VERIFICATION.name: PROVIDER_VERIFICATION,
+    PATIENT_DISCOVERY.name: PATIENT_DISCOVERY,
 }
 
 

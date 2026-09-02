@@ -105,8 +105,12 @@ def _candidate_location(sess: "RealtimeSession") -> str:
     known |= _distinctive(sess.org_name or "")
     known |= {w for w in re.findall(r"[a-z]+", (sess.doctor.doctor_name or "").lower())
               if len(w) > 2}
-    if sess.agent_name:
-        known.add(sess.agent_name.lower())
+    # BY WORD, like the two lines above it — see the same change in
+    # evidence/window.py. `known.add(name.lower())` keyed the whole string
+    # while the loop below tests SINGLE words, so a two-token spoken name
+    # ("Emile Keswick") protected neither token. Inert for the one-word
+    # personas: _distinctive("Sarah") is {"sarah"}.
+    known |= _distinctive(sess.agent_name or "")
 
     for t in usable:
         raw = [w.strip(".,!?-—'\"") for w in t.text.split()]

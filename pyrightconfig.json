@@ -38,6 +38,7 @@
     "agents",
     "check_refusals.py",
     "core",
+    "run_mockups.py",
     "run_twilio.py",
     "test_realtime_protocol.py"
   ],

@@ -22,7 +22,15 @@ from core.models import Doctor
 import agents.voice.twilio_worker as worker
 
 
-def _place_call(to_number: str, doctor: Doctor) -> None:
+def _place_call(to_number: str, doctor: Doctor) -> str:
+    """Place one outbound call. Returns the CallSid.
+
+    The SID is returned rather than only printed because a batch runner needs
+    it: it is the key `_call_id_by_sid` fills in at /answer, which is how
+    anything outside this process learns that the callee picked up and which
+    call artifact belongs to which row. The single-call path below ignores the
+    return value, so this changes nothing for it.
+    """
     from twilio.rest import Client
     from twilio.base.exceptions import TwilioRestException
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
@@ -98,6 +106,7 @@ def _place_call(to_number: str, doctor: Doctor) -> None:
     print(f"  From     : {settings.twilio_from_number}")
     print(f"  Answer   : {answer_url}")
     print(f"  Status   : {status_url}\n")
+    return cast(str, call.sid)
 
 
 def _warmup() -> None:

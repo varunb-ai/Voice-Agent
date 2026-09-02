@@ -12,6 +12,8 @@ Split from realtime_worker 2026-08-26, verbatim.
 from __future__ import annotations
 
 import logging
+import re
+
 from agents.voice.evidence import _is_location_ask
 from agents.voice.objectives import clauses as _clauses, sentences as _sentences
 from agents.voice.turns import _is_filler_reply, _norm_clause
@@ -148,6 +150,38 @@ def conversation_metrics(turns: list) -> dict:
     # easy call look better when it may simply have had fewer opportunities.
     caller = [t for t in turns if t.role == "caller"]
     caller_questions = sum(1 for t in caller if "?" in t.text)
+
+    # ── Unsolicited PII dumps ────────────────────────────────────────────────
+    # The synthetic identity (synthetic_identity, seeded per doctor) is an
+    # ANSWER, and the artifact must show a question before it. On
+    # call-20260902-1245-5dce the agent gave name AND date of birth four
+    # seconds in, unprompted, in response to a ghost turn ("OpenAI.", 0.0217
+    # RMS — see the gray-zone note at _SILENT_AUDIO_RMS in audio.py) — and no
+    # metric recorded it, so the failure was invisible until a person read the
+    # transcript. Measure-only: it changes no behavior and cannot reject a
+    # turn; it is the number that says whether the details gate held.
+    #
+    # The detector keys on the DOB YEAR rather than the name, because the name
+    # is not in the artifact — the year range is synthetic_identity's own
+    # (1960 + seed % 45), so anything it matches on an agent turn is almost
+    # certainly the persona's date of birth being read aloud.
+    #
+    # ASKED means ANY prior caller turn, not the immediately preceding one: on
+    # the live call the real ask ("What is your name and date of birth?") sat
+    # four caller turns upstream of the compliant answer, behind two stalls and
+    # a re-prompt — a last-turn-only window false-flags the disclosure the
+    # guard wanted while missing nothing.
+    unsolicited_pii_dumps = 0
+    for i, t in enumerate(turns):
+        if t.role != "agent" or not re.search(r"\b(19\d{2}|200[0-4])\b", t.text):
+            continue
+        asked = any(
+            pt.role == "caller" and ("?" in pt.text or re.search(
+                r"\b(name|birth|dob|address)\b", pt.text.lower()))
+            for pt in turns[:i])
+        if not asked:
+            unsolicited_pii_dumps += 1
+
     return {
         # How many times it asked where the doctor practises. On the call that
         # exposed this it was six, with no location offered between any of
@@ -180,6 +214,7 @@ def conversation_metrics(turns: list) -> dict:
         "back_to_back_asks": back_to_back,
         "repeated_sentences": repeated,
         "back_to_back_repeats": back_to_back_repeats,
+        "unsolicited_pii_dumps": unsolicited_pii_dumps,
     }
 
 

@@ -33,7 +33,7 @@ tools.py rotted before `_derive_prompt_echoes` replaced them.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from enum import Enum, IntEnum
 from typing import Any, Optional, Protocol
 
@@ -650,6 +650,47 @@ SCHEDULING_ASK = re.compile(
 # asking a question it never asks.
 REFERRAL_ASK = re.compile(r"\breferrals?\b", re.I)
 
+# ── The prospective-patient script's own probes ──────────────────────────────
+# Template 4 asks two questions the branch scripts never ask, and each needs a
+# probe for the same reason every other field has one: the suite checks that a
+# template actually asks for what its objective declares, and the ask budget
+# counts a turn as an ask only when some probe matches it.
+#
+# NEITHER IS ADDED TO THE TOPIC-PROBE SET the suite binds in both directions.
+# That set exists so no template can promise a question its objective cannot
+# end on, and it covers the four topics the branch scripts share. These two
+# belong to one script; binding them globally would mean every other template
+# had to declare a waitlist field the moment its prompt used the word.
+
+# "Is there a waiting list?" — the fallback when accepting-new-patients comes
+# back no or waitlist. All three spellings occur, and the verb form is the one
+# a front desk actually uses ("we can waitlist you"), so the inflection is
+# matched rather than assumed away.
+WAITLIST_ASK = re.compile(r"\b(wait[- ]?list\w*|waiting list)\b", re.I)
+
+# The doctor is not at this practice any more, and WHERE THEY WENT is the half
+# worth having — the same judgement _FLOW_EXITS_IDENTITY already makes for the
+# branch scripts.
+#
+# BARE "left" IS DELIBERATELY NOT MATCHED. "She left for the day", "he left a
+# message" and "I left it with reception" are ordinary front-desk speech and
+# none of them is a relocation — the same over-match REFERRAL_ASK was narrowed
+# to avoid. The verb has to be carrying the doctor somewhere.
+RELOCATION_ASK = re.compile(
+    r"\b(relocat\w+|mov(?:ed|es|ing) (?:to|over|away)|transferr?ed to|"
+    r"new (?:practice|clinic|office|hospital|surgery)|"
+    r"where (?:she|he|they) (?:went|moved)|"
+    r"no longer (?:here|there|at|with))\b", re.I)
+
+# The telemetry label, and the only probe here matching an identifier rather
+# than a question. call_outcome is not something anybody is ASKED — it is what
+# the call gets filed as — but Field requires a probe, and the suite checks the
+# prompt mentions what the objective declares. Matching the literal key keeps
+# that check meaningful: it passes only because the prompt really does tell the
+# model to write this key, not because a decorative pattern was supplied to
+# satisfy it.
+CALL_OUTCOME_ASK = re.compile(r"\bcall_outcome\b", re.I)
+
 # Auxiliaries and modals. A clause that OPENS with one of these and contains no
 # wh-word is a polar question — the caller is being asked to pick from a closed
 # set, whatever nouns the sentence happens to contain.
@@ -1208,3 +1249,151 @@ def default_objective() -> CallObjective:
     from core.config import settings
     from agents.voice.templates import get_template
     return get_template(settings.call_template).objective
+# ══════════════════════════════════════════════════════════════════════════════
+#  Template 4 — prospective patient  (branch, capacity, and how the call ended)
+# ══════════════════════════════════════════════════════════════════════════════
+# THREE OF THESE FIELDS ARE WRITTEN BY note_info, NOT BY A save_* TOOL, and that
+# is a deliberate choice rather than a shortcut.
+#
+# `unwritable_fields()` exists because a field no tool can write leaves every
+# call PARTIAL and blames the receptionist for it. The honest options were: add
+# three tools to tools.py, or point the three fields at keys note_info already
+# writes. tools.py is a guardrail surface — _defer_save, the gate verdicts and
+# the grounding checks all key off the save_* signatures — and adding tools
+# there to serve one script would have put new code on the path every other
+# template runs through. note_info writes note_<key> for ANY key, which is why
+# `unwritable_fields` whitelists the whole note_ namespace, so these three are
+# writable TODAY with no change to tools.py at all.
+#
+# WHAT THAT COSTS, stated rather than discovered later: note_info does not
+# canonicalise. save_new_patient_status turns whatever the caller said into one
+# of four tokens; note_info stores the string it is handed. So `call_outcome`
+# is a CHOICE field whose states are enforced only by Field.present() — a
+# misspelling from the model reads as "not collected" rather than as a wrong
+# value, which is the safe direction, but it does mean the prompt has to name
+# the exact tokens and does.
+
+WAITLIST_KEY = "note_waitlist"
+# `new_hospital` is a key note_info's own tool description already lists, and
+# it already means exactly this. Reusing it keeps one spelling for one fact
+# instead of adding a second that means the same thing.
+NEW_LOCATION_KEY = "note_new_hospital"
+CALL_OUTCOME_KEY = "note_call_outcome"
+
+
+class CallOutcomeStatus(str, Enum):
+    """How a prospective-patient call ended, as one recorded token.
+
+    FIVE, not the two the brief named. no_capacity and doctor_relocated are the
+    two the client asked to be able to count, but a vocabulary that can only
+    express the two interesting endings cannot distinguish "this call ended
+    well" from "nothing was written", and that distinction is the whole value
+    of the field. A call that found a doctor taking patients has an outcome
+    too, and so does one that reached a florist.
+
+    NOT A SUBSTITUTE FOR `Outcome`. Outcome says how much of the objective was
+    collected; this says what the call FOUND. A no_capacity call is a complete
+    success by the objective and a dead end for the client, and reading either
+    number off the other is what this field exists to stop.
+    """
+    ACCEPTING = "accepting"
+    NO_CAPACITY = "no_capacity"
+    DOCTOR_RELOCATED = "doctor_relocated"
+    WRONG_NUMBER = "wrong_number"
+    UNRESOLVED = "unresolved"
+
+
+CALL_OUTCOME_STATES = frozenset(s.value for s in CallOutcomeStatus)
+
+# Named once; three fields point at the identity answer and hand-copying the
+# gate three times is three chances for one to drift. Same reasoning as
+# _IF_RIGHT_DOCTOR in templates.py, which gates the provider-verification
+# fields on the same field for the same reason.
+_IF_DOCTOR_IS_HERE = RequiredWhen("identity", frozenset({"confirmed"}))
+_IF_DOCTOR_MOVED = RequiredWhen("identity", frozenset({"not_here"}))
+_IF_NO_ROOM = RequiredWhen("accepting_new_patients",
+                           frozenset({"no", "waitlist"}))
+
+
+def patient_discovery_fields() -> tuple[Field, ...]:
+    """What the prospective-patient call collects.
+
+    IDENTITY IS DECLARED EVEN THOUGH THE BRIEF DID NOT LIST IT, and it is not
+    scope creep. The brief asks for `new_location_known` "optional, if
+    relocated" — which is a condition on an answer, and RequiredWhen can only
+    name a field in the SAME objective. Without an identity field there is
+    nothing for that gate to point at, no tool that can express "the doctor is
+    not here" (save_doctor_identity is the only one), and no way for the model
+    to reach the doctor_relocated outcome at all. The optionality the brief
+    asked for is what requires the field.
+    """
+    return (
+        # FIRST, AND EVERYTHING HANGS OFF IT — the same reasoning as
+        # PROVIDER_VERIFICATION_OBJECTIVE. A branch or a capacity answer
+        # recorded against a doctor who was never confirmed to be at this
+        # practice is not partial data, it is wrong data about a real practice.
+        Field(name="identity", memory_key=IDENTITY_STATUS_KEY,
+              kind=AnswerKind.CHOICE, probe=IDENTITY_ASK, required=True,
+              states=IDENTITY_STATES,
+              spoken="whether I've got the right doctor"),
+        # The brief calls this branch_confirmed. It is the same field the other
+        # three templates collect and it writes the same memory key, so
+        # save_branch and every grounding guard behind it work unchanged; only
+        # the objective-level name differs, because that is the name the client
+        # asked to read in the artifact.
+        Field(name="branch_confirmed", memory_key="branch",
+              kind=AnswerKind.PLACE, probe=LOCATION_NOUN, required=True,
+              required_when=_IF_DOCTOR_IS_HERE,
+              spoken="which office they're at"),
+        Field(name="accepting_new_patients", memory_key=NEW_PATIENT_STATUS_KEY,
+              kind=AnswerKind.CHOICE, probe=ACCEPTING_ASK, required=True,
+              states=CHOICE_STATES, required_when=_IF_DOCTOR_IS_HERE,
+              spoken="whether they're taking new patients"),
+        # FREE, not CHOICE. "There's a list, it's about three months" and "no,
+        # nothing like that" are both complete answers and the second is worth
+        # as much as the first; forcing them into a closed set would either
+        # lose the three months or store a sentence in a field whose states
+        # reject it. Field.present() takes any non-empty string for FREE.
+        Field(name="waitlist_available", memory_key=WAITLIST_KEY,
+              kind=AnswerKind.FREE, probe=WAITLIST_ASK, required=True,
+              required_when=_IF_NO_ROOM,
+              spoken="whether there's a waiting list"),
+        Field(name="new_location_known", memory_key=NEW_LOCATION_KEY,
+              kind=AnswerKind.FREE, probe=RELOCATION_ASK, required=True,
+              required_when=_IF_DOCTOR_MOVED,
+              spoken="where the doctor moved to"),
+        # required=False, AND THAT IS THE LOAD-BEARING PART.
+        #
+        # This is telemetry, not an answer a receptionist gives. Required, it
+        # would gate every call on the model remembering one extra tool call
+        # after the conversation is effectively over — and a model that forgets
+        # produces a PARTIAL call in which the caller answered everything, which
+        # is precisely the failure `unwritable_fields` and `invalid_conditions`
+        # exist to keep out of this file. Optional, a forgotten write costs one
+        # missing label on a call whose real answers are all recorded.
+        Field(name="call_outcome", memory_key=CALL_OUTCOME_KEY,
+              kind=AnswerKind.CHOICE, probe=CALL_OUTCOME_ASK, required=False,
+              states=CALL_OUTCOME_STATES,
+              spoken="how the call ended"),
+    )
+
+
+@dataclass(frozen=True)
+class PatientDiscoveryObjective(CallObjective):
+    """The prospective-patient objective, as a class the template can name.
+
+    A subclass rather than a module-level CallObjective instance, because the
+    brief asks for a class and because a default_factory keeps the field tuple
+    from being shared mutable state between instances. It adds no behaviour:
+    everything that consumes a CallObjective — gate_state, record_outcome,
+    expected_answers, the ask budget — sees exactly the base type.
+
+    success_at IS LEFT STRICT, for the reason PROVIDER_VERIFICATION_OBJECTIVE
+    records at length: whether a call that got the branch and not the capacity
+    answer counts as a success is a reporting decision belonging to whoever
+    reads the numbers, and declaring it as a threshold means answering it later
+    is one line here.
+    """
+    fields: tuple[Field, ...] = dataclass_field(
+        default_factory=patient_discovery_fields)
+    success_at: Outcome = Outcome.COMPLETE

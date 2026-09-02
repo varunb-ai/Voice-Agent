@@ -310,7 +310,32 @@ def audit_dict(call: dict) -> list[dict]:
             continue                    # field was never required on this call
         flagged.append({**r, "field": field, "verdict": verdict,
                         "call_id": call.get("call_id", "?")})
-    return flagged
+
+    # ONE FINDING PER GAP, NOT ONE PER REFUSAL RECORD. A gap is a PHRASING a
+    # probe cannot read; four refusals of the same field on one call are four
+    # sightings of that one gap, and reporting four findings said "6 findings
+    # for 2 distinct gaps" — a count nobody can act on, and one that broke the
+    # one-row-per-gap check the manifest is pinned by (call-20260902-1245
+    # refused identity four times before anything landed). The merge keeps the
+    # FIRST record as the finding — the deliverable is the phrasing, and the
+    # first `heard` is as good a specimen as the last — and carries the rest in
+    # `also_refused` so nothing the caller actually said is thrown away. The
+    # verdict cannot disagree across the group: it is a function of the field
+    # and the call's outcome, both of which are shared.
+    merged: dict[tuple, dict] = {}
+    for f in flagged:
+        key = (f["call_id"], f["field"])
+        if key not in merged:
+            m = dict(f)
+            m["refusals_merged"] = 1
+            m["also_refused"] = []
+            merged[key] = m
+        else:
+            merged[key]["refusals_merged"] += 1
+            merged[key]["also_refused"].append(
+                {"heard": f.get("heard", ""), "at": f.get("at", ""),
+                 "when": f.get("when", "")})
+    return list(merged.values())
 
 
 def main() -> int:

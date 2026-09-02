@@ -733,9 +733,24 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor,
     # independent settings until a cedar (male) call introduced itself as Sarah
     # and the caller spent three turns on it instead of the branch.
     persona = persona_for_voice(settings.realtime_voice)
-    # Same two values the greeting is built from, so the re-introduction check
-    # is judging against exactly what the callee was told.
-    sess.agent_name = persona
+    # THE NAME THE CALLEE ACTUALLY HEARS, asked of the template rather than
+    # assumed to be the persona. Same intent as before — the re-introduction
+    # check has to judge against exactly what the callee was told — but the
+    # persona stopped being that answer for every script the moment a template
+    # introduced itself as somebody else.
+    #
+    # This is not cosmetic and it is not only about the re-introduction nudge.
+    # evidence/window.py and grounding/handlers.py both fold sess.agent_name
+    # into `known`: the words WE brought to the call, which must never be read
+    # back as something the caller supplied. patient_discovery opens as a
+    # synthetic person, so with `persona` here its surname would sit OUTSIDE
+    # `known` — and a capitalised proper noun within two words of a location
+    # anchor is exactly what the evidence window promotes to a branch
+    # candidate. The agent would have filed its own invented name as a place.
+    #
+    # spoken_name() returns `agent_name` unchanged for the three truthful
+    # scripts, so this is a no-op for them.
+    sess.agent_name = template.spoken_name(doctor, agent_name=persona)
     sess.org_name   = settings.org_name
     sess.transcribe_hint = template.transcribe_hint
     greeting = template.build_greeting(doctor, org=settings.org_name,

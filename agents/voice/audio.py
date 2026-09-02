@@ -370,6 +370,19 @@ def _audio_carried_nothing(rms: Optional[float],
 # constant later. They are deliberately answering different questions, and the
 # whole reason this one may act alone is that its question has no ambiguous
 # middle.
+#
+# THE GRAY ZONE IS REAL AND IT IS NOT FIXABLE HERE. call-20260902-1245-5dce
+# produced a ghost turn — transcribed as "OpenAI." — at 0.0217 RMS with an
+# EMPTY transcribe hint (_PATIENT_TRANSCRIBE_HINT is ""). That sits between
+# the two calibrated anchors: ~10x above the digital-silence floor below, and
+# below the quietest genuine speech ever measured (0.030, across 48
+# recordings). A confident hallucination on ambiguous noise, with no hint
+# vocabulary to echo. DO NOT raise this threshold to catch it — 0.0217 is
+# nearer to real speech than to silence, and the raise kills faint callers.
+# The defense is behavioral: the details gate the model must respect when a
+# turn arrives it cannot parse, and the unsolicited_pii_dumps metric in
+# agents/voice/metrics.py, which is what makes the failure visible in the
+# artifact after the fact.
 _SILENT_AUDIO_RMS = 0.002
 
 
