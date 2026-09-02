@@ -166,6 +166,26 @@ class Settings(BaseSettings):
     realtime_backchannels: bool = True
     realtime_echo_rms: float = 0.020
 
+    # Let the caller interrupt audio that is STILL PLAYING OUT after the
+    # response that generated it has finished.
+    #
+    # response.done fires when OpenAI stops GENERATING, and generation runs far
+    # faster than realtime - a 6.25s reply reaches Twilio in about a second and
+    # the rest sits in Twilio's queue. The barge-in handler keys on
+    # _response_active, which is cleared at response.done, so for the remainder
+    # of every long turn the caller could not interrupt at all: their speech
+    # arrived, OpenAI's VAD fired, and the handler declined to act. Nothing but
+    # a Twilio `clear` can stop audio already queued there.
+    #
+    # ON, but switchable, because this is the echo trade. Caller audio during
+    # our own playback can be our own voice off a speakerphone, and clearing on
+    # echo cuts the agent mid-word. It is gated on _above_echo_floor - the
+    # acoustic test, deliberately not realtime_echo_gate - and every firing is
+    # recorded in drain_barge_ins with the level that triggered it, so the
+    # question "was that a person or our echo" is answered from measurements on
+    # real calls rather than in advance.
+    realtime_drain_barge_in: bool = True
+
     # ── The ask budget ───────────────────────────────────────────────────────
     # Two ceilings, because there are two ways a call fails to end and they are
     # not the same failure.

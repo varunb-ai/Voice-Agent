@@ -1177,6 +1177,8 @@ class RealtimeSession:
             # Sign-offs spoken while no tool had ended the call. Non-empty
             # means the agent tried to leave without writing a reason.
             "farewell_without_close": self.farewell_without_close or None,
+            "hard_refusal": self.hard_refusal or None,
+            "drain_barge_ins": self.drain_barge_ins or None,
             # What `grounding` said while the call was still running, present
             # only when the finished transcript changed the answer. A verdict
             # that improves silently after the fact cannot be audited — this

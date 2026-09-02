@@ -344,6 +344,29 @@ def _echo_gate_allows(raw: bytes) -> bool:
     return False   # "drop"
 
 
+# How stale a voiced frame may be and still authorise a drain barge-in.
+#
+# input_audio_buffer.speech_started arrives after OpenAI's VAD has made up its
+# mind, and from India that is up to a second behind the audio it describes -
+# the same lag _utterance_slice exists to undo. A window shorter than that
+# would refuse real interruptions; much longer and one stray loud frame could
+# authorise a clear seconds after the person who made it stopped talking.
+_DRAIN_VOICE_WINDOW_S = 1.5
+
+
+def _frame_rms(raw: bytes) -> float:
+    """RMS of one inbound frame, 0.0 for an empty one.
+
+    Split out because two callers now ask it: _above_echo_floor, which wants a
+    verdict, and the drain barge-in, which records the LEVEL so that "was that
+    the caller or our own echo" can be settled from real calls afterwards.
+    """
+    arr = _wire_to_pcm16(raw)
+    if arr.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(arr ** 2)))
+
+
 def _above_echo_floor(raw: bytes) -> bool:
     """Is this frame loud enough to be a person rather than our own echo?
 
@@ -354,10 +377,7 @@ def _above_echo_floor(raw: bytes) -> bool:
     — the shipped default, chosen so callers can always interrupt — silently
     switched the echo guard off too.
     """
-    arr = _wire_to_pcm16(raw)
-    if arr.size == 0:
-        return False
-    return float(np.sqrt(np.mean(arr ** 2))) >= settings.realtime_echo_rms
+    return _frame_rms(raw) >= settings.realtime_echo_rms
 
 
 def _is_own_backchannel_echo(sess: "RealtimeSession", raw: bytes) -> bool:
@@ -974,6 +994,19 @@ async def _twilio_to_oai(
                     if _is_own_backchannel_echo(sess, raw_bytes):
                         sess._backchannel_echo_frames += 1
                         continue
+                    # WHO IS TALKING WHILE OUR AUDIO IS OUT. Measured only
+                    # in that window, which is the only one the drain barge-in
+                    # consults, and placed after the backchannel guard so our
+                    # own "mm-hm" coming back cannot count as a person.
+                    #
+                    # _above_echo_floor's threshold, not realtime_echo_gate's:
+                    # this is the acoustic question, and the gate's shipped
+                    # default is "pass" precisely so it decides nothing here.
+                    if sess.agent_speaking:
+                        _lvl = _frame_rms(raw_bytes)
+                        if _lvl >= settings.realtime_echo_rms:
+                            sess._last_voiced_frame_at = time.monotonic()
+                            sess._last_voiced_frame_rms = _lvl
                     if sess.agent_speaking and not _echo_gate_allows(raw_bytes):
                         # Only reached under REALTIME_ECHO_GATE=drop|energy.
                         #
@@ -1159,6 +1192,60 @@ async def _oai_to_twilio(
                             # on call-20260818-1338 it guessed wrong.
                             sess._truncated_at = time.time()
                             sess._truncated_heard_ms = audio_end_ms
+                    except Exception:
+                        pass
+
+                # ── They talked into audio that is STILL PLAYING OUT ────
+                # response.done cleared _response_active, but Twilio is still
+                # draining what we handed it — _playback_ends_at is computed
+                # from exactly that and says so. Generation outruns playback (a
+                # 6.25s reply reaches Twilio in about a second), so for the tail
+                # of every long turn the branch above is unreachable and the
+                # caller cannot interrupt at all. call-20260902-1511: they said
+                # "And also hello" inside a released 9.45s block and no
+                # BARGE-IN line was ever printed.
+                #
+                # NOTHING TO CANCEL AND NOTHING TO TRUNCATE. The model stopped
+                # generating at response.done and OpenAI's history already
+                # matches what it produced; the only thing that can stop the
+                # sound is Twilio's own `clear`.
+                #
+                # GATED ON A RECENT VOICED FRAME rather than firing on any
+                # speech_started, because caller audio during our own playback
+                # can be our voice off a speakerphone and clearing on echo cuts
+                # the agent mid-word. _above_echo_floor's threshold is the
+                # acoustic test; realtime_drain_barge_in turns the whole thing
+                # off for a line where that proves too generous.
+                elif (settings.realtime_drain_barge_in
+                        and not sess._response_active
+                        and sess.stream_sid
+                        and time.monotonic() < sess._playback_ends_at
+                        and sess._last_voiced_frame_at
+                        and (time.monotonic() - sess._last_voiced_frame_at
+                             <= _DRAIN_VOICE_WINDOW_S)):
+                    _left = sess._playback_ends_at - time.monotonic()
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                          f"✋ BARGE-IN  : caller interrupted audio still "
+                          f"playing out ({_left:.2f}s left, "
+                          f"level={sess._last_voiced_frame_rms:.4f} vs floor "
+                          f"{settings.realtime_echo_rms})", flush=True)
+                    # Recorded so the echo question is settled from real calls.
+                    sess.drain_barge_ins.append({
+                        "playback_left_s": round(_left, 2),
+                        "level": round(sess._last_voiced_frame_rms, 4),
+                        "floor": settings.realtime_echo_rms,
+                    })
+                    _drop_held_items(sess, "the caller interrupted the playout")
+                    sess.agent_speaking = False
+                    # Nothing is playing now, so nothing may go on WAITING for
+                    # it: the hang-up drain and the echo cooldown both read
+                    # _playback_ends_at and would otherwise sit out audio that
+                    # has been thrown away.
+                    sess._playback_ends_at = time.monotonic()
+                    try:
+                        await twilio_ws.send_text(json.dumps({
+                            "event": "clear", "streamSid": sess.stream_sid,
+                        }))
                     except Exception:
                         pass
 
