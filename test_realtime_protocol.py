@@ -904,6 +904,13 @@ async def main():
                     _backchannel_done_this_utterance=False,
                     _last_backchannel_at=0.0, _last_backchannel_clip=None,
                     _backchannels_sent=0, stream_sid="MZtest",
+                    # The deferred sign-off check, which lives beside the
+                    # deferred completion-claim check and reads the same way.
+                    # _close_after_response / _close_when_answered are the two
+                    # pending-close flags it stands down for.
+                    _farewell_at=0.0, _farewell_said="",
+                    _farewell_nudged=False, farewell_without_close=[],
+                    _close_after_response=False, _close_when_answered=False,
                     listen_enabled=asyncio.Event())
         base.update(over)
         s = double(**base)
@@ -9809,7 +9816,8 @@ async def main():
     # reason — on 1516 it was the only record of why the call produced nothing
     # — so cutting the line at the farewell trades twenty seconds of politeness
     # for a call with no outcome at all.
-    _fsrc = _PKG_SRC[_PKG_SRC.find("if (_spoken_farewell(_said) and not sess.done"):][:1200]
+    _fsrc = _PKG_SRC[_PKG_SRC.find(
+        "if (sess._farewell_at and not sess._farewell_nudged"):][:1400]
     check(_fsrc and "Call escalate now" in _fsrc,
           "the directive asks for the tool",
           "hanging up here would lose the reason the call ended")
@@ -9817,6 +9825,69 @@ async def main():
           "and it neither ends the call itself nor touches the wire")
     check("_farewell_nudged" in _fsrc and "farewell_without_close" in _fsrc,
           "one-shot, and recorded so it cannot fire invisibly")
+
+    # ── WHERE IT IS ASKED, which is the whole of the 2026-09-02 defect ────
+    # This check used to live at the tool site, inside the save_branch-REJECTED
+    # branch, so it could only ever see a goodbye that shared a turn with a
+    # refused branch save. Neither close on 2026-09-02 had that shape: 1544
+    # signed off long after save_branch succeeded, 1511 signed off carrying no
+    # tool at all, and farewell_without_close was null on both — which reads as
+    # "closed properly" on two calls the CALLER had to end.
+    _rsrc = _PKG_SRC[_PKG_SRC.find(
+        "if _spoken_farewell(text) and not sess.done"):][:400]
+    check(_rsrc and "sess._farewell_at = time.time()" in _rsrc,
+          "a sign-off is recorded on ANY agent turn, tool or not",
+          "at the tool site it could only see goodbyes attached to a refusal")
+    # DEFERRED, and that is what makes the new placement safe. The close path
+    # sets sess.done from the tool handler, so a model that says its goodbye in
+    # the same response as the tool that completes the objective is behaving
+    # correctly — judged at transcript time that is indistinguishable from
+    # signing off with nothing recorded, and the nudge would fire on every
+    # well-run call. The two pending-close flags are the same question asked
+    # one event earlier.
+    check("_close_after_response" in _fsrc and "_close_when_answered" in _fsrc,
+          "and it stands down for a close that is already pending",
+          "nudging into a correct close asks for an escalate on a good call")
+
+    # ── THE TEMPLATE'S OWN GOODBYE ────────────────────────────────────────
+    # patient_discovery teaches a close naming no farewell word at all, and
+    # this predicate returned False on it verbatim — so the guard was blind to
+    # every well-behaved close the persona makes.
+    for _t in ["Let me just figure out my schedule, and I'll call back. Thanks!",
+               "Thanks for explaining that. Let me think about it and I might "
+               "call back.",
+               "Thanks for explaining the wait list. Let me sort out my "
+               "schedule, and I'll call back."]:
+        check(rw._spoken_farewell(_t),
+              f"the persona's own close is a sign-off: {_t[:46]!r}",
+              "templates.py teaches this shape; the guard could not read it")
+    # FIRST PERSON AND FUTURE. A question about calling back, and a relay of
+    # the caller's own offer to call us, are not sign-offs.
+    for _t in ["Should I call back later, or is there a better time?",
+               "They said they would call me back later.",
+               "Could you call back if anything changes?",
+               # A HOLD, NOT A SIGN-OFF, and this one shipped as a false
+               # positive for exactly one round. "let me think about it" was
+               # drawn from 1511's "Let me think about it and I might call
+               # back", where the farewell is the call-back clause. Alone it is
+               # what a person says while they consider an offer: on
+               # call-20260902-1842 the caller asked "Would you like me to add
+               # you there?", the agent said this, and the close accepted it as
+               # a goodbye and cut the line 2.2s later.
+               "Okay, thanks for explaining that list - let me think about it "
+               "for a moment.",
+               "Let me think about it for a second."]:
+        check(not rw._spoken_farewell(_t),
+              f"and a hold is not a sign-off: {_t[:46]!r}")
+
+    # ── THE CLOSE ASKS FOR A REAL FAREWELL ────────────────────────────────
+    # The test used to be `not last_agent.endswith("?")`, which made every
+    # declarative sentence in English a goodbye. Pinned on the source because
+    # the branch it guards only runs inside the live event loop.
+    _cl = _PKG_SRC[_PKG_SRC.find("_sounded_like_a_goodbye = "):][:200]
+    check("_spoken_farewell(_last_agent)" in _cl,
+          "the close accepts a real farewell, not any non-question sentence",
+          "endswith('?') let 'let me think about it for a moment' close a call")
 
     # ── THE PRECEDENCE TRAP ───────────────────────────────────────────────
     # _NEGATOR's own docstring gives this sentence as the one that must be YES,

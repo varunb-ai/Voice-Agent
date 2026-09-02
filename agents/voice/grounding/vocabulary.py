@@ -115,7 +115,32 @@ _SPOKEN_FAREWELL = re.compile(
     # the middle of a call that is going fine.
     r"\b(take care(?!\s+of\b)|good ?bye|bye now|"
     r"have a (good|great|nice) (day|one|afternoon|evening|weekend)|"
-    r"thanks? (you )?for your time)\b", re.I)
+    r"thanks? (you )?for your time"
+    # THE TEMPLATE'S OWN GOODBYE WAS NOT IN HERE. patient_discovery
+    # teaches a close that names no farewell word at all - templates.py:
+    # "Let me just figure out my schedule, and I'll call back. Thanks!" -
+    # and this pattern returned False on that sentence verbatim, on both
+    # closes the model actually spoke on 2026-09-02 (1511 "Let me think
+    # about it and I might call back", 1544 "Let me sort out my schedule,
+    # and I'll call back"), and so on every well-behaved close the persona
+    # makes. A guard that cannot recognise the goodbye its own prompt asks
+    # for is measuring nothing.
+    #
+    # FIRST PERSON AND FUTURE, deliberately. "I'll call back" is a
+    # sign-off; "should I call back later?" and a relay of the caller's
+    # "we will call you back" are not, and neither matches - the subject
+    # and the contraction are the whole test. Applied to AGENT turns only.
+    r"|(?:i'?ll|i will|i might|i may) call (?:you )?back"
+    # "let me think about it" IS NOT A SIGN-OFF ON ITS OWN, and it stood here
+    # for one round before a live call proved it. It was drawn from 1511's
+    # "Let me think about it and I might call back", where the farewell is the
+    # CALL-BACK clause -- which the alternative above already matches. Alone it
+    # is a conversational hold: on call-20260902-1842 the caller asked "Would
+    # you like me to add you there?" and the agent said "let me think about it
+    # for a moment", which this read as a goodbye. Every close the template
+    # teaches carries a call-back or a have-a-good-day, so nothing is lost.
+    r"|let me (?:just )?(?:figure|sort) out my schedule"
+    r"|(?:i'?ll|i will) get back to you)\b", re.I)
 
 
 

@@ -156,6 +156,28 @@ def _decide_close(name: str, result: dict,
     # stop asking. A template that accepts a partial as success still wants the
     # rest of what it came for.
     #
+    # ASKED OF NO TOOL NAME AT ALL, which is the second half of the same
+    # correction. The name test that stood here — `save_branch or in
+    # _CHOICE_SAVE_TOOLS` — was the outcome test's twin: it assumed the tool
+    # that completes an objective is always one that SAVES a field. On
+    # patient_discovery it never is. Three of that template's six fields
+    # (waitlist_available, new_location_known, call_outcome) are written by
+    # note_info, and its own prompt makes the outcome label "THE LAST THING
+    # YOU DO" — so the tool that finishes the call was the one tool forbidden
+    # from ending it. call-20260902-1544 went outcome=complete at 15:46:06 and
+    # ran 19 more seconds and four more turns until the CALLER said "bye";
+    # 3 of 5 calls on that template ended that way, against 1 of 45 on
+    # provider_verification and 0 of 69 on forage_data_collection.
+    #
+    # The deferred path beside this one (see _resolve_deferred_save) already
+    # asks only the objective, and got that fix after call-20260827-1010 — the
+    # identical symptom, "another 24 seconds and four agent turns". This is
+    # that same fix, arriving at the synchronous path.
+    #
+    # `result["ok"]` still gates it: a REFUSED tool must not close a call, and
+    # a tool that changed nothing cannot have completed anything the previous
+    # turn had not already.
+    #
     # ESCALATE IS NOT DEFERRABLE and the branch below does not touch it. It is
     # the model saying it has given up; holding that open for an answer is how
     # a call that has already failed stays on the line. Only the objective path
@@ -164,7 +186,6 @@ def _decide_close(name: str, result: dict,
     if name == "escalate" and result.get("ok"):
         sess.done = True
     elif (result.get("ok")
-            and (name == "save_branch" or name in _CHOICE_SAVE_TOOLS)
             and _objective_of(sess).outcome(sess.memory) is Outcome.COMPLETE):
         # THE OBJECTIVE FINISHED ON A QUESTION WE HAVE NOT HEARD BACK ON.
         #
@@ -196,6 +217,29 @@ def _decide_close(name: str, result: dict,
         # answered and nothing is owed. A "[...]" placeholder does not — that
         # is their answer still in flight, which is a reason to wait, not to
         # hang up.
+        # THEIRS COUNTS TOO, and only this direction was ever checked. The
+        # walk below asks whether OUR last question went unanswered; it says
+        # nothing about a question THEY asked that we have not answered yet.
+        # call-20260902-1842 ended on "Would you like me to add you there?" --
+        # a direct offer, on the table, with the objective completing in the
+        # same breath. Hanging up on that is the same discourtesy the walk
+        # below exists to prevent, arriving from the other side.
+        #
+        # NEWEST REAL TURN ONLY. If any agent turn has followed their question
+        # we have said something back and this does not fire; a "[...]"
+        # placeholder is a transcript still in flight, not a reply.
+        _their_question = ""
+        for _t in reversed(sess.turns):
+            _txt = (_t.text or "").strip()
+            if _txt == "[...]":
+                continue
+            if _t.role == "agent":
+                break                   # we have spoken since; nothing owed
+            if _t.role == "caller":
+                if _txt.endswith("?"):
+                    _their_question = _txt
+                break
+
         _unanswered = ""
         for _t in reversed(sess.turns):
             if _t.role == "caller":
@@ -206,6 +250,15 @@ def _decide_close(name: str, result: dict,
                 if (_t.text or "").rstrip().endswith("?"):
                     _unanswered = _t.text.rstrip()
                 break
+        if _their_question and not _unanswered:
+            sess._close_when_answered = True
+            _close_deferred = True
+            print(f"\n[{ts}] CLOSE DEFERRED  : objective complete, but "
+                  f"they have just asked us something and we have not "
+                  f"answered it\n          they asked: "
+                  f"{_their_question[-70:]!r}",
+                  flush=True)
+            return _close_deferred
         if _unanswered:
             sess._close_when_answered = True
             _close_deferred = True

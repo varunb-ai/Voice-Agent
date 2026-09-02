@@ -38,7 +38,7 @@ from agents.voice.audio import (
     _drop_held_items,
     _wire_bytes_per_ms,
 )
-from agents.voice.grounding import _create_response
+from agents.voice.grounding import _create_response, _spoken_farewell
 
 if TYPE_CHECKING:                                    # pragma: no cover
     from agents.voice.session import RealtimeSession
@@ -426,9 +426,26 @@ async def _handle_response_done(
             sess.done = True
             _last_agent = next((t.text for t in reversed(sess.turns)
                                 if t.role == "agent"), "")
-            _sounded_like_a_goodbye = (
-                bool(_last_agent)
-                and not _last_agent.rstrip().endswith("?"))
+            # ── DID IT ACTUALLY SAY GOODBYE ─────────────────────────────
+            # This was `not _last_agent.endswith("?")` -- every declarative
+            # sentence in English counted as a farewell. On call-20260902-1842
+            # the caller asked "Would you like me to add you there?", the agent
+            # said "Okay, thanks for explaining that list - let me think about
+            # it for a moment", and the close took that as its goodbye and cut
+            # the line 2.2s later. The caller was mid-exchange and was hung up
+            # on without a word of parting.
+            #
+            # The heuristic was standing in for a detector that did not exist
+            # when it was written. _spoken_farewell exists now and is the same
+            # predicate the sign-off guard uses, so both halves of "was a
+            # goodbye said" are answered by one definition rather than two --
+            # and the else-branch below, which ASKS the model for a goodbye,
+            # finally becomes reachable on the calls that need it.
+            #
+            # A QUESTION IS STILL NOT A FAREWELL. That was the whole content of
+            # the old test and it survives: _SPOKEN_FAREWELL cannot match a
+            # turn that only asks something.
+            _sounded_like_a_goodbye = _spoken_farewell(_last_agent)
             if _out_audio_tokens > 0 and _sounded_like_a_goodbye:
                 # It already said something that can stand as a
                 # farewell. Fall through: this response.done is the

@@ -905,6 +905,40 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                                  "over: ask for it.)")}]},
                 }))
 
+        # Deferred sign-off check. Same 1.5s wait as the claim check above,
+        # for the same reason: any tool call belonging to that response has
+        # landed by now, so sess.done means what it says.
+        #
+        # A PENDING CLOSE COUNTS AS AN ENDING. _close_after_response and
+        # _close_when_answered are the two ways the objective path says "this
+        # call is ending, just not in this event" — the deferred save sets the
+        # first and the unanswered-question branch sets the second. Neither sets
+        # sess.done yet, and nudging into either would ask for an escalate on a
+        # call that is closing correctly.
+        if (sess._farewell_at and not sess._farewell_nudged
+                and not sess.done
+                and not sess._close_after_response
+                and not sess._close_when_answered
+                and time.time() - sess._farewell_at >= 1.5):
+            _said = sess._farewell_said
+            sess._farewell_at = 0.0
+            sess._farewell_said = ""
+            sess._farewell_nudged = True
+            sess.farewell_without_close.append(_said[:160])
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                  f"👋 SIGNED OFF WITH NOTHING RECORDED — no tool has ended "
+                  f"this call; asking for escalate", flush=True)
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": (
+                             "(system: you just signed off, but nothing "
+                             "has ended this call — you have not called a "
+                             "tool. Call escalate now with the true reason "
+                             "this call is ending. Do not say goodbye "
+                             "again and do not start a new topic.)")}]},
+            }))
+
         # Deferred substance recovery. Owned by the watchdog for the same
         # reason the goodbye retry is: the drop is detected inside the OpenAI
         # event pump while a response is still settling, and creating one from

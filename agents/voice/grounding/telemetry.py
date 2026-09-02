@@ -34,7 +34,6 @@ from agents.voice.grounding.vocabulary import (
     _CHOICE_SAVE_TOOLS,
     _MAX_SAVE_REJECTIONS,
     _claims_saved,
-    _spoken_farewell,
 )
 from agents.voice.grounding.handlers import (
     _candidate_location,
@@ -249,33 +248,18 @@ async def _report_tool_result(name: str, args: dict, result: dict,
             # caller was left believing a branch had been recorded that
             # had not. Leaving a false statement standing to avoid
             # repeating yourself is the wrong trade.
-            # SIGNED OFF WITHOUT ENDING ANYTHING. The correction is to make
-            # the TOOL fire, never to hang up here: escalate is what writes the
-            # reason, and on 1516 it was the only record of why the call
-            # produced nothing. Cutting the line at the farewell would have
-            # traded twenty seconds of politeness for a call with no outcome —
-            # the trace-less failure this file exists to stop.
+            # SIGNED OFF WITHOUT ENDING ANYTHING moved to the agent-transcript
+            # handler in turns.py. It stood HERE, inside the save_branch-
+            # REJECTED branch, so it could only ever see a goodbye that shared
+            # a turn with a refused branch save — not a goodbye on a turn with
+            # no tool at all, and not one after a save that SUCCEEDED. Those
+            # are the two shapes the calls of 2026-09-02 actually produced,
+            # and farewell_without_close was null on both.
             #
-            # One-shot, unlike the false-save claim beside it. That one answers
-            # a separate false statement each time; this one asks for a single
-            # tool call, and a second copy of a directive the model ignored is
-            # context spent for nothing.
-            if (_spoken_farewell(_said) and not sess.done
-                    and not sess._farewell_nudged):
-                sess._farewell_nudged = True
-                sess.farewell_without_close.append(_said[:160])
-                print(f"[{ts}] 👋 SIGNED OFF WITH NOTHING RECORDED — no tool "
-                      f"has ended this call; asking for escalate", flush=True)
-                await oai_ws.send(json.dumps({
-                    "type": "conversation.item.create",
-                    "item": {"type": "message", "role": "user",
-                             "content": [{"type": "input_text", "text": (
-                                 "(system: you just signed off, but nothing "
-                                 "has ended this call — you have not called a "
-                                 "tool. Call escalate now with the true reason "
-                                 "this call is ending. Do not say goodbye "
-                                 "again and do not start a new topic.)")}]},
-                }))
+            # The correction it asks for is unchanged and still the right one:
+            # make the TOOL fire, never hang up at the farewell. escalate is
+            # what writes the reason, and on 1516 it was the only record of why
+            # the call produced nothing.
             if _claims_saved(_said) and not sess.done:
                 sess._false_save_claims += 1
                 print(f"[{ts}] ⚠️  FALSE SAVE CLAIM — they were told "
