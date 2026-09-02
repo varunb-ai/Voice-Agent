@@ -21,6 +21,13 @@ from agents.voice.turns import _is_filler_reply, _norm_clause
 log = logging.getLogger(__name__)
 
 
+# A comma before a coordinating conjunction - the one sentence-internal seam
+# `clauses()` deliberately does not cut, because an ask almost never sits on
+# it. A repeated span very much can: see the third pass in conversation_metrics.
+_COMMA_CLAUSE = re.compile(r",\s+(?:but|and|so|then|though|yet|because)\b\s*",
+                           re.I)
+
+
 def _double_ask(text: str) -> bool:
     """Two requests for the same thing inside one turn.
 
@@ -130,6 +137,43 @@ def conversation_metrics(turns: list) -> dict:
                 if len(key.split()) >= 4:
                     clause_seen[key] = clause_seen.get(key, 0) + 1
     repeated += sum(n - 1 for n in clause_seen.values() if n > 1)
+
+    # ── A repeated span INSIDE the sentences, which the two passes above miss ─
+    #
+    # call-20260902-1544, the turn a listener hears as the most robotic thing
+    # on the call: "I'm not in your system yet, but my name is Simone Hallam.
+    # I'm not in your system yet, but it's December 27, 1989." Seven words said
+    # twice, four seconds apart, and this function scored the call 0 repeats -
+    # so the artifact said the turn was clean.
+    #
+    # Neither pass could see it. The two sentences differ, so the sentence pass
+    # counts nothing; `clauses()` splits on dashes, semicolons and colons and
+    # never on a comma before a conjunction, so each sentence is also a single
+    # clause and the clause pass counts nothing either. The repeated span is
+    # not a unit at any level this function looks at.
+    #
+    # SPLIT HERE AND NOT IN clauses(). That function decides what an ASK is -
+    # `_ask_clauses`, `_is_objective_ask`, the verbatim re-ask guard - and
+    # widening it would change which turns those guards fire on. This is
+    # measure-only and must stay that way, so the extra split lives here.
+    #
+    # Largest unit still wins: a sentence or clause already counted as a repeat
+    # is skipped, so one repeated sentence is one repetition and not one for
+    # the sentence plus one for each fragment inside it.
+    _covered |= {k for k, n in clause_seen.items() if n > 1}
+    comma_seen: dict = {}
+    for t in agent:
+        for sentence in _sentences(t.text):
+            if _norm_clause(sentence) in _covered:
+                continue
+            for clause in _clauses(sentence):
+                if _norm_clause(clause) in _covered:
+                    continue
+                for part in _COMMA_CLAUSE.split(clause):
+                    key = _norm_clause(part)
+                    if len(key.split()) >= 4:
+                        comma_seen[key] = comma_seen.get(key, 0) + 1
+    repeated += sum(n - 1 for n in comma_seen.values() if n > 1)
 
     # Adjacent agent turns that are word-for-word identical.
     #

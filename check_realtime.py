@@ -25,7 +25,8 @@ import core.bootstrap  # noqa: F401  (UTF-8 stdout on Windows)
 from core.config import settings
 from core.models import Doctor
 
-OTHER_MODELS = ["gpt-realtime-2", "gpt-realtime-mini", "gpt-realtime"]
+OTHER_MODELS = ["gpt-realtime-2.1", "gpt-realtime-2.1-mini", "gpt-realtime-2",
+                "gpt-realtime-mini", "gpt-realtime"]
 
 _PASS, _FAIL, _WARN = "  [PASS]", "  [FAIL]", "  [WARN]"
 _failures = 0

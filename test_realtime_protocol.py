@@ -4646,7 +4646,11 @@ async def main():
     # and then `continue` forever, carrying its exit only as prompt prose
     # ("Silence -> ... If it continues, escalate"). It now ends the call
     # through this same directive, so it needs a marker like the other two.
-    check(len(_give_up_marks) == len(rw.GIVE_UP_REASONS) == 3,
+    # FOUR since 2026-09-02: a hard refusal ("we can't share that", "don't
+    # call again") ends the call on its first occurrence rather than on a
+    # budget, and it needs its own marker for the same reason the other three
+    # do.
+    check(len(_give_up_marks) == len(rw.GIVE_UP_REASONS) == 4,
           "every trigger is covered — one marker cannot vouch for another",
           f"{sorted(rw.GIVE_UP_REASONS)}")
     check(not any(m in d for m in _give_up_marks for d in _vt_directives),
@@ -6798,6 +6802,44 @@ async def main():
           f"give_up={_bs_ok._give_up_sent}")
     check(not _bs_ok.memory.get("branch"),
           "and the rejection still stands — grounding is not weakened")
+    # ── THE OTHER HALF: a rejection on a caller who named NOWHERE ──────────
+    # The check above pins 1931, where the caller DID answer and only the
+    # rendering was wrong. call-20260902-1716 is the opposite: six location
+    # asks answered with "But man, I know, right?", "My rabbit" and "Would the
+    # bulbous man", the model claiming values nobody gave it, and every
+    # rejection buying it a fresh budget to claim into again. no-progress
+    # finished that call at 2 of 8.
+    #
+    # Both must hold at once, so the rule cannot be "reset on rejection" and
+    # cannot be "never reset on rejection". _candidate_location is the question
+    # that separates them, already asked and answered elsewhere in this file.
+    async def _budget_after_save_no_place(value):
+        _s = rw.RealtimeSession("CA0000000000000000000budget2",
+                                Doctor(doctor_name="Dr. Jane Okafor",
+                                       hospital_name="Northside Medical Group"))
+        _s.turns = [rw.TranscriptTurn(role="caller", timestamp="00:00:00",
+                                      audio_rms=0.13, text=t)
+                    for t in ("But man, I know, right?",
+                              "My rabbit But why, that's the question.")]
+        _s._unanswered_asks = settings.realtime_max_unanswered_asks
+        _s._asks_without_progress = settings.realtime_max_asks_without_progress
+        _s._give_up_sent = True
+        _s._give_up_at_turn = 2
+        await rw._handle_tool_call(
+            {"name": "save_branch", "call_id": "b2",
+             "arguments": json.dumps({"branch": value})},
+            _s, _TcWS(), {}, True)
+        return _s
+
+    _bs_noise = await _budget_after_save_no_place("Northgate Clinic")
+    check(_bs_noise._asks_without_progress
+          == settings.realtime_max_asks_without_progress,
+          "a rejection on a caller who named NOWHERE buys no fresh budget",
+          f"no_progress={_bs_noise._asks_without_progress} — the model's claim "
+          f"that it heard a place is not evidence that one was given")
+    check(not _bs_noise.memory.get("branch"),
+          "and that rejection stands too")
+
     # The reset must not be free: an empty value is not an answer.
     _bs_empty = await _budget_after_save("")
     check(_bs_empty._unanswered_asks == settings.realtime_max_unanswered_asks
@@ -10254,6 +10296,29 @@ async def main():
             # code and this row is the historical record of it, not an
             # exemption. A re-call with the fixed probe must NOT produce it.
             ("call-20260902-1245-5dce", "identity"),
+            # A REAL GAP, recorded rather than fixed, and narrow enough to name
+            # exactly: classify_identity reads "Yes, this is the right place."
+            # as CONFIRMED and "Hello, yes, this is the right place." as
+            # nothing. The pattern is anchored at the start of the turn, so a
+            # greeting token in front of the answer hides it. The caller said
+            # the second form at 17:16:52; identity was refused twice and
+            # landed four turns later.
+            #
+            # Left open deliberately: identity is the field every other one
+            # hangs off and its guard is strict on purpose, so loosening the
+            # anchor is its own change with its own evidence, not a rider on
+            # the ask-budget work.
+            ("call-20260902-1716-25f1", "identity"),
+            # CLOSED IN CODE, and this row is the historical record of it —
+            # the same status as the 1245 row above, not an exemption. The
+            # caller said "Yes, Dr. Okafor is one of our physicians here. What
+            # do you need to be seen for?" and _turn_asserts discounted the
+            # whole turn for carrying a question, so a plain confirmation was
+            # refused as "they have only asked back, not answered" and the
+            # agent re-asked fifteen seconds later. _turn_asserts now judges
+            # the non-question clauses separately and reads it; a re-call
+            # against the fixed predicate must NOT produce this row.
+            ("call-20260902-1822-2537", "identity"),
         }
         _found = [f for _p in _real for f in _cr.audit(_p)]
         _ids = {(f["call_id"], f["field"]) for f in _found}

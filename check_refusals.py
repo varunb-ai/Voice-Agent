@@ -204,7 +204,34 @@ def _repaired_by_spelling(call: dict, r: dict) -> bool:
     break the first time anybody rewords it.
     """
     said = {m.get("said") for m in (call.get("name_mismatches") or []) if m.get("said")}
-    return bool(r.get("heard")) and r["heard"] in said
+    heard = (r.get("heard") or "").strip()
+    if not heard:
+        return False
+    if heard in said:
+        return True
+    # SAME TURN, NOT THE SAME STRING - and the docstring above promised the
+    # former while the line below it did the latter.
+    #
+    # The two records are snapshots of a transcript that is still moving.
+    # `name_mismatches.said` is the caller turn the guard was handed;
+    # `save_refusals.heard` is whatever the LAST caller turn happened to be when
+    # the refusal was written, a moment later. On call-20260902-1511 the caller
+    # said "Yes, Dr. Walcott works here. Do you need to see? Sinfa." and those
+    # arrived as separate turns: the mismatch recorded the first fragment, the
+    # refusal the last. Neither string contains the other, so the exact join
+    # failed and a repair that WORKED - spelled O-K-A-F-O-R, "Yes, that's
+    # correct", identity saved - was reported as a probe gap.
+    #
+    # The finished transcript has merged them, so the turn both fragments ended
+    # up in is the join the docstring meant. Rewording the guard message still
+    # cannot break it, which was the original reason for not reading the text.
+    for t in call.get("transcript") or []:
+        if t.get("role") != "caller":
+            continue
+        txt = t.get("text") or ""
+        if heard in txt and any(sd and sd in txt for sd in said):
+            return True
+    return False
 
 
 def _before_any_question(call: dict, r: dict) -> bool:
