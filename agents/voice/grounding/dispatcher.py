@@ -102,7 +102,24 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     try:
         args = json.loads(args_str)
     except json.JSONDecodeError:
+        # A TRUNCATED TOOL CALL IS AN EVENT, NOT AN EMPTY ONE. This used to set
+        # args = {} and say nothing, which turns "the model's tool call was cut
+        # off mid-arguments" into "the model called this tool with no
+        # arguments" -- two different facts, and only the first has a cause you
+        # can act on. The cause is a barge-in: OpenAI cancels the response
+        # while function_call_arguments is still streaming, and .done fires on
+        # the partial string anyway.
+        #
+        # Recorded here and refused downstream. run_tool now reads the impl's
+        # signature and returns a rejection for a call missing its required
+        # arguments, so this no longer has to guess at a repair -- it only has
+        # to stop pretending the call was well-formed.
         args = {}
+        sess.malformed_tool_calls.append(
+            {"tool": name, "raw": (args_str or "")[:160],
+             "why": "arguments did not parse - the call was cut off"})
+        print(f"[Realtime] TOOL CALL TRUNCATED - {name}: arguments did not "
+              f"parse ({(args_str or '')[:60]!r}); refusing it", flush=True)
 
     # t2 — the tool call is here.
     if sess._stage is not None and "t2" not in sess._stage:

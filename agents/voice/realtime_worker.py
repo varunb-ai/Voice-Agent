@@ -1474,8 +1474,39 @@ async def _oai_to_twilio(
 
             # ── Tool call complete ─────────────────────────────────────────
             elif event_type == "response.function_call_arguments.done":
-                _out = await _handle_tool_call(
-                    msg, sess, oai_ws, _pending_tools, _response_had_audio)
+                # ── A BAD TOOL CALL MUST NOT END THE CALL ───────────────────
+                # One TypeError out of this handler killed the whole event
+                # loop on call-20260902-1822 — a barge-in cut the arguments
+                # mid-stream, the truncated JSON became {}, and
+                # save_doctor_identity was invoked without its required
+                # argument. The caller was mid-sentence ("She works at.") and
+                # the line went dead at 53s.
+                #
+                # The specific hole is closed in two places now (the dispatcher
+                # records a truncated call, run_tool refuses an incomplete
+                # one), and this exists for the NEXT one. Whatever a model
+                # sends, the worst it may cost is the tool call: the guards
+                # below still run, the audio keeps flowing, and the artifact
+                # says what happened. Nothing on this project has ever wanted
+                # a live call ended by an exception.
+                try:
+                    _out = await _handle_tool_call(
+                        msg, sess, oai_ws, _pending_tools, _response_had_audio)
+                except asyncio.CancelledError:
+                    raise                       # shutdown, not a tool fault
+                except Exception as _tool_err:
+                    log.exception("[Realtime] tool call failed")
+                    sess.malformed_tool_calls.append({
+                        "tool": msg.get("name", ""),
+                        "raw": str(msg.get("arguments") or "")[:160],
+                        "why": f"handler raised "
+                               f"{type(_tool_err).__name__}: {_tool_err}"[:200],
+                    })
+                    print(f"[Realtime] TOOL CALL FAILED - "
+                          f"{msg.get('name','')}: "
+                          f"{type(_tool_err).__name__}: {_tool_err} "
+                          f"- the call continues", flush=True)
+                    continue
                 # Only the flags the handler actually set travel back — see
                 # _ToolOutcome on why None is not False.
                 if _out.agent_text_buf is not None:

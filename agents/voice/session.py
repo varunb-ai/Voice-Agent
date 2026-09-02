@@ -437,6 +437,7 @@ class RealtimeSession:
         # transcriber's rather than the caller's. See _grounding_verdict, which
         # reads this so the stamp cannot say "verified" without saying that.
         self.branch_rejections: list[dict] = []
+        self.malformed_tool_calls: list[dict] = []
         # "The objective finished on a DEFERRED save; close after the response
         # that is already in flight." Set by _resolve_deferred_save, acted on
         # at response.done — see the comment there for why it cannot be both.
@@ -1168,6 +1169,7 @@ class RealtimeSession:
             # A rejection that only ever reached the console is a guard that
             # left no trace — the failure family this project keeps paying for.
             "branch_rejections": self.branch_rejections or None,
+            "malformed_tool_calls": self.malformed_tool_calls or None,
             # Everything note_info recorded. On call-20260827-1516 this was the
             # ONLY actionable thing the call learned — a callback window — and
             # it reached no structured field at all.

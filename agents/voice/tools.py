@@ -514,6 +514,28 @@ def _is_bare_city(cleaned: str, city: str | None) -> str | None:
     # treats them the same regardless of whether we recognise the place.
     return None
 
+def _malformed_args(impl, arguments: dict) -> tuple:
+    """(missing required, unexpected) for a tool call about to be splatted.
+
+    Read off the implementation's own signature rather than a second table of
+    argument names, which would go out of step the first time a tool changes.
+    `memory` is the bound first parameter and is never supplied by the model.
+    """
+    import inspect
+    try:
+        params = list(inspect.signature(impl).parameters.values())[1:]
+    except (TypeError, ValueError):
+        return set(), set()
+    names = {p.name for p in params}
+    required = {p.name for p in params
+                if p.default is inspect.Parameter.empty
+                and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                               inspect.Parameter.KEYWORD_ONLY)}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return required - set(arguments), set()
+    return required - set(arguments), set(arguments) - names
+
+
 def _reject(reason: str, need: str = "") -> dict:
     """A rejection the model can act on but cannot read out.
 
@@ -955,9 +977,37 @@ def run_tool(name: str, memory: CallMemory, arguments: dict[str, Any],
             f"nothing on {field.name}. Do not ask for it.",
         )
     else:
-        result = impl(memory, **arguments)
-        if result.get("ok"):
-            # This save may be the one that opened a gate.
-            _flush_deferred(memory, objective)
+        # ── THE CALL ITSELF CAN BE MALFORMED ────────────────────────────────
+        # `impl(memory, **arguments)` splats whatever the model sent straight
+        # into a typed function, so a missing required argument is a TypeError
+        # out of the event loop rather than a refusal the model can act on.
+        # call-20260902-1822 died exactly there: a barge-in cut a
+        # save_doctor_identity mid-arguments, the truncated JSON became {}, the
+        # grounding guard had no value to object to and passed, and the call
+        # was cut short at 53s with the caller mid-sentence.
+        #
+        # A REFUSAL, not a repair. Filling in a default would invent an answer,
+        # which is the one thing this file exists to stop; the model is told
+        # what was missing and may call again.
+        _missing, _unexpected = _malformed_args(impl, arguments)
+        if _missing or _unexpected:
+            _why = []
+            if _missing:
+                _why.append("arrived without " + ", ".join(sorted(_missing)))
+            if _unexpected:
+                _why.append("carried unknown "
+                            + ", ".join(sorted(_unexpected)))
+            _append(memory, "malformed_tool_calls",
+                    {"tool": name, "arguments": arguments,
+                     "missing": sorted(_missing),
+                     "unexpected": sorted(_unexpected)})
+            result = _reject(
+                f"REJECTED: the call {' and '.join(_why)}",
+                f"{name} again, complete, in one call")
+        else:
+            result = impl(memory, **arguments)
+            if result.get("ok"):
+                # This save may be the one that opened a gate.
+                _flush_deferred(memory, objective)
     record_outcome(memory, objective)
     return result
