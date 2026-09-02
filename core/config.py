@@ -274,7 +274,41 @@ class Settings(BaseSettings):
     # slide, please", a stock phrase from its training data. gpt-4o-transcribe
     # is markedly more reliable on telephony-grade input. Fall back to
     # "whisper-1" if the account lacks access.
-    realtime_transcribe_model: str = "gpt-4o-transcribe"
+    #
+    # ── WHY ACCURACY AND NOT LATENCY DECIDES THIS SETTING ────────────────────
+    # 2026-09-02, gpt-4o-transcribe -> gpt-transcribe.
+    #
+    # This is the one model choice on the project where latency is close to
+    # irrelevant, and the reason is structural rather than a preference:
+    #
+    #   - the agent never reads this text. gpt-realtime-2 ingests the caller's
+    #     audio natively, so no reply waits on a transcript;
+    #   - the ONLY consumer is the grounding layer, where the transcript is
+    #     strict liability: it decides whether a branch is written to the
+    #     directory or discarded;
+    #   - the save path already WAITS for it on purpose. _transcript_pending
+    #     and the HELD FOR EVIDENCE deferral hold a tool call until the words
+    #     land, and that wait is event-driven with no timeout — the old 1.5s
+    #     blocking version was deleted for never once succeeding. A slower,
+    #     better transcriber therefore costs nothing it can drop.
+    #
+    # So a latency-optimised transcriber (gpt-live-transcribe) buys speed the
+    # architecture cannot spend, and pays for it in the single currency the
+    # guards are denominated in. And the bill is not hypothetical: mangled
+    # proper nouns are this project's dominant failure. call-20260902-1511
+    # rendered "Northgate Clinic" as "Notke Klinik" and "That's not Gate
+    # Clinic" and the branch was never recorded; call-20260821-1931 turned
+    # "1825 4th Street" into "Ford Street", and the guard duly rejected the
+    # model's correct reading; 20260825-1433 rendered "Reyes" as "Riaz", "Yes"
+    # and "Ayers", which is why the agent now spells surnames out loud.
+    # Every one of those is a real answer lost to transcription, not to logic.
+    #
+    # gpt-transcribe verified present on this account's model list before the
+    # switch. What it cannot tell us is field accuracy on telephony input, and
+    # nothing here measures that yet — the artifact's `deferred_saves.waited_s`
+    # and `branch_rejections` are where the next calls will show it, in both
+    # directions.
+    realtime_transcribe_model: str = "gpt-transcribe"
 
     # ── Audio path ───────────────────────────────────────────────────────────
     # "pcmu"  — g711 μ-law, the format Twilio already speaks. Passes through
