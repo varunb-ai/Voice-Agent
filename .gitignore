@@ -56,6 +56,13 @@ data/*
 #   backchannels/  pre-rendered "mm-hm"/"okay" audio, read at runtime by
 #                  agents/voice/backchannel.py. Built by
 #                  scripts/make_backchannels.py; fixtures, not output.
+#   ambience/      the looping room tone the outbound mixer lays under the
+#                  call, read at runtime by agents/voice/ambience.py. Built
+#                  by scripts/make_room_tone.py, and SEEDED, so it is a
+#                  fixture rather than output. Without it here the feature
+#                  does not fail on a fresh checkout, it silently stays
+#                  OFF - build() finds no tone and returns None - which is
+#                  worse than failing.
 #   db/            the JSON backend core/db.py reads when no database is
 #                  configured — seed data the program starts FROM.
 #   voice_samples/ redistributable Piper samples.
@@ -64,6 +71,12 @@ data/*
 # their contents. voice_samples needs its own line because `*.wav` above would
 # otherwise catch the files inside it, and the last matching rule wins.
 !data/backchannels/
+# ambience needs the second line for the same reason voice_samples does:
+# `*.wav` above would otherwise catch the file inside it, and the last
+# matching rule wins. demo_audio/ is deliberately NOT re-admitted - those
+# are renders, and renders are output.
+!data/ambience/
+!data/ambience/*.wav
 !data/db/
 !data/voice_samples/
 !data/voice_samples/*.wav

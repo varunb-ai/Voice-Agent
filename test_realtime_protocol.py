@@ -834,6 +834,366 @@ def check(ok, label, detail=""):
     print(f"  [{'PASS' if ok else 'FAIL'}] {label}" + (f"  — {detail}" if detail else ""))
 
 
+async def _check_ambience(_WS) -> None:
+    """Room tone on the outbound leg, and the duck that keeps it out of the way.
+
+    ITS OWN FUNCTION for the reason recorded in pyrightconfig.json and repeated
+    at _check_backchannel_lull_gate: main() is long enough that pyright stops
+    analysing it, and once it gives up it can no longer prove any local inside
+    is read. Adding ~180 lines to main() is how that comes back.
+
+    `_WS` is main()'s fake socket, passed rather than rebuilt — a second copy is
+    a second thing to keep in step with the real one. It is unused here today;
+    every check below drives the mixer or the delta handler directly.
+    """
+    import pathlib as _plb
+
+    import agents.voice.ambience as amb
+    import agents.voice.audio as aud
+    from agents.voice.outbound_audio import OutboundConditioner
+    from core.audio_utils import _mulaw_decode as _mud
+    from core.config import settings
+
+    _SR8 = 8_000
+
+    def _voice(n, level_db=-16.0):
+        """A deterministic stand-in for conditioned 8kHz speech."""
+        t = np.arange(n) / _SR8
+        x = 0.6 * np.sin(2 * np.pi * 300 * t) + 0.4 * np.sin(2 * np.pi * 1_200 * t)
+        return (x * 10 ** (level_db / 20) / np.sqrt(np.mean(x ** 2))).astype(np.float32)
+
+    def _db(sig):
+        return 20 * np.log10(max(float(np.sqrt(np.mean(np.square(sig)))), 1e-12))
+
+    def _traj(duck, blocks):
+        """Per-sample bed gain in dB across a sequence of voice blocks."""
+        return np.concatenate([20 * np.log10(np.maximum(duck.gains(b), 1e-12))
+                               for b in blocks])
+
+    class _WSx:
+        def __init__(self): self.sent = []
+        async def send_text(self, s): self.sent.append(json.loads(s))
+
+    _keep_amb = (settings.realtime_ambience, settings.realtime_audio_format,
+                 settings.realtime_output_format)
+    try:
+        settings.realtime_audio_format, settings.realtime_output_format = "pcmu", "pcm"
+
+        # A 0.5s conditioner input, the same shape the outbound checks use.
+        _at = np.arange(int(24_000 * 0.5)) / 24_000.0
+        _asig = (0.5 * np.sin(2 * np.pi * 220 * _at)
+                 + 0.3 * np.sin(2 * np.pi * 1_400 * _at)
+                 + 0.2 * np.sin(2 * np.pi * 2_800 * _at))
+        _asig = _asig * (10 ** (-16.0 / 20) / np.sqrt(np.mean(_asig ** 2)))
+        _apcm = (np.clip(_asig, -1, 1) * 32767).astype(np.int16).tobytes()
+        _adelta = base64.b64encode(_apcm).decode()
+
+        def _sess(name):
+            s = rw.RealtimeSession(f"CA0000000000000000000amb{name}",
+                                   Doctor(doctor_name="Dr. Jane Okafor"))
+            s.stream_sid = "MZamb"
+            s._stream_start_time = _dt.now()
+            return s
+
+        # ── 1. DISABLED IS BYTE-FOR-BYTE THE OLD PATH ───────────────────────
+        # Not "equivalent", not "inaudibly close": the same bytes the shipped
+        # conditioner produces, compared against OutboundConditioner.process,
+        # which this change did not touch. If the split of process into
+        # process_pcm8 + encode had altered a single sample, this is where it
+        # shows.
+        settings.realtime_ambience = False
+        _off = _sess("off")
+        check(_off.ambience is None,
+              "ambience off builds NO mixer — the pump can never start")
+        _wsoff, _boff = _WSx(), []
+        _stoff = await rw._handle_audio_delta(
+            {"delta": _adelta, "item_id": "i1"}, _off, _wsoff, _boff,
+            rw._AudioDelta(0, None, None, None, False, None))
+        _moff = [m for m in _wsoff.sent if m.get("event") == "media"]
+        _payoff = base64.b64decode(_moff[0]["media"]["payload"]) if _moff else b""
+        _expect = OutboundConditioner().process(_apcm)
+        check(len(_moff) == 1 and _payoff == _expect,
+              "ambience off: the wire gets exactly the bytes it got before",
+              f"{len(_moff)} frame(s), {len(_payoff)}B vs {len(_expect)}B, "
+              f"equal={_payoff == _expect}")
+        await rw._send_breath(_wsoff, _off, 0.10)
+        _sil = [m for m in _wsoff.sent[1:] if m.get("event") == "media"]
+        check(len(_sil) == 5 and all(m["media"]["payload"] == rw._TWILIO_SILENCE_FRAME
+                                     for m in _sil),
+              "ambience off: the breath is still five frames of 0xFF silence",
+              f"{len(_sil)} frames")
+
+        # ── the mixer, for everything below ─────────────────────────────────
+        settings.realtime_ambience = True
+        _on = _sess("on")
+        _mix = _on.ambience
+        check(_mix is not None and _mix.tone.size > 0,
+              "ambience on builds a mixer with a loaded room tone",
+              f"{(_mix.tone.size / _SR8) if _mix else 0:.0f}s of tone")
+        if _mix is None:
+            return
+        _amb_db = _mix.ducker.ambient_db
+        _duck_db = _mix.ducker.duck_db
+        _range = _amb_db - _duck_db
+
+        # ── 2. ENABLED, NO VOICE -> THE BED IS THERE ────────────────────────
+        _bed = np.concatenate([_mud(_mix.next_frame()) for _ in range(50)])
+        check(abs(_db(_bed) - _amb_db) < 3.0,
+              "no voice: room tone is present at the configured resting level",
+              f"{_db(_bed):.1f} dBFS vs {_amb_db:.0f} configured")
+        # It must be a BED, not silence with a label on it. mu-law's smallest
+        # non-zero magnitude is 8/32768 = -72.2 dBFS and 0xFF decodes to 0, so
+        # anything a listener would call a dead line measures at or below that.
+        check(_db(_bed) > -68.0,
+              "and it is not the mu-law floor wearing a level",
+              f"{_db(_bed):.1f} dBFS vs -72.2 smallest step / -inf for 0xFF")
+
+        # ── 3/4. VOICE BEGINS: SMOOTH, NOT A SWITCH ─────────────────────────
+        _d3 = amb.Ducker(ambient_db=_amb_db, duck_db=_duck_db,
+                         attack_ms=settings.realtime_ambience_attack_ms,
+                         release_ms=settings.realtime_ambience_release_ms,
+                         hold_ms=settings.realtime_ambience_hold_ms)
+        _pre, _spk = 1_600, 8_000                      # 0.2s quiet, 1.0s speech
+        _t3 = _traj(_d3, [np.zeros(_pre, dtype=np.float32), _voice(_spk)])
+        _atk_n = int(settings.realtime_ambience_attack_ms / 1000.0 * _SR8)
+        _step = float(np.max(np.abs(np.diff(_t3))))
+        check(_step < 0.25,
+              "voice onset: the bed gain never jumps — no sample-to-sample step",
+              f"largest step {_step:.4f} dB (a hard switch would be {_range:.0f})")
+        check(_t3[_pre + 1] > _duck_db + 0.8 * _range,
+              "and it has barely moved one sample in, so this is a ramp",
+              f"{_t3[_pre + 1]:.1f} dB, still near the {_amb_db:.0f} resting level")
+        _reached = np.argmax(_t3[_pre:] <= _duck_db + 0.1 * _range)
+        check(0.6 * _atk_n <= _reached <= 1.8 * _atk_n,
+              "and 90% of the duck lands within the configured attack",
+              f"{1000 * _reached / _SR8:.0f}ms vs "
+              f"{settings.realtime_ambience_attack_ms}ms configured")
+        check(abs(_t3[-1] - _duck_db) < 0.5,
+              "voice continues: the bed stays down for the whole turn",
+              f"{_t3[-1]:.1f} dB vs {_duck_db:.0f} target")
+
+        # ── 5. VOICE ENDS: HOLD, THEN A SMOOTH RETURN ───────────────────────
+        _rel_n = int(settings.realtime_ambience_release_ms / 1000.0 * _SR8)
+        _hold_n = int(settings.realtime_ambience_hold_ms / 1000.0 * _SR8)
+        _t5 = _traj(_d3, [np.zeros(_hold_n + 3 * _rel_n, dtype=np.float32)])
+        check(float(np.max(np.abs(np.diff(_t5)))) < 0.25,
+              "voice ends: the return is a ramp too, not a switch back on",
+              f"largest step {float(np.max(np.abs(np.diff(_t5)))):.4f} dB")
+        check(_t5[int(0.6 * _hold_n)] < _duck_db + 0.1 * _range,
+              "and the hold keeps it down before the release starts at all",
+              f"{_t5[int(0.6 * _hold_n)]:.1f} dB at "
+              f"{600 * _hold_n / _SR8 / 1000:.0f}ms after the voice stopped")
+        check(_t5[-1] > _amb_db - 0.5,
+              "and it comes all the way back to the resting level",
+              f"{_t5[-1]:.1f} dB vs {_amb_db:.0f}")
+        # AND IT TAKES THE CONFIGURED TIME TO DO IT. Endpoints alone are not
+        # enough: a release that snapped back in 19ms passed every check above
+        # while being a switch with a slope on it, which is what the attack's
+        # own timing check caught on the other side. Measured from where the
+        # bed actually starts moving, so the hold and the envelope's own decay
+        # are not counted against a setting that does not name them.
+        _left = int(np.argmax(_t5 > _duck_db + 0.5))
+        _back = int(np.argmax(_t5 >= _amb_db - 0.1 * _range))
+        check(0.6 * _rel_n <= (_back - _left) <= 1.8 * _rel_n,
+              "and 90% of the return takes the configured release",
+              f"{1000 * (_back - _left) / _SR8:.0f}ms vs "
+              f"{settings.realtime_ambience_release_ms}ms configured")
+
+        # ── 6. A PAUSE INSIDE A SENTENCE MUST NOT PUMP ──────────────────────
+        # THE ONE THE HOLD EXISTS FOR. A release long enough to bridge two
+        # words would also take a second to come back after a turn genuinely
+        # ended; the hold is a separate mechanism precisely so it does not have
+        # to be. 120ms is a comma, not a turn.
+        _d6 = amb.Ducker(ambient_db=_amb_db, duck_db=_duck_db,
+                         attack_ms=settings.realtime_ambience_attack_ms,
+                         release_ms=settings.realtime_ambience_release_ms,
+                         hold_ms=settings.realtime_ambience_hold_ms)
+        _gap = int(0.120 * _SR8)
+        _t6 = _traj(_d6, [_voice(4_000), np.zeros(_gap, dtype=np.float32),
+                          _voice(4_000)])
+        _in_gap = _t6[4_000:4_000 + _gap]
+        check(float(np.max(_in_gap)) < _duck_db + 1.0,
+              "a 120ms pause inside a sentence does not let the bed back up",
+              f"peak {float(np.max(_in_gap)):.1f} dB during the gap vs "
+              f"{_duck_db:.0f} ducked / {_amb_db:.0f} resting")
+
+        # ── 7. LONG SILENCE -> STILL THERE ──────────────────────────────────
+        # The failure this catches is a bed that decays, or a loop that runs
+        # off the end of its buffer and returns zeros.
+        _long = [_db(np.concatenate([_mud(_mix.next_frame()) for _ in range(50)]))
+                 for _ in range(10)]
+        check(all(abs(d - _amb_db) < 3.0 for d in _long),
+              "ten seconds of silence: the bed is still present the whole way",
+              f"per-second {min(_long):.1f}..{max(_long):.1f} dBFS")
+
+        # ── 8. THE LOOP IS SEAMLESS ─────────────────────────────────────────
+        # Not crossfaded — generated in the frequency domain, so one period of
+        # a periodic signal. The claim is that the wrap is not special, and the
+        # file's own distribution of adjacent steps is the only honest yardstick
+        # for that.
+        _tone = amb.RoomTone.load(str(_plb.Path("data/ambience/room_tone.wav")))
+        _two = _tone.next(_tone.size + 400)
+        _steps = np.abs(np.diff(_two))
+        _wrap = float(_steps[_tone.size - 1])
+        check(_wrap <= float(np.percentile(_steps, 99.9)),
+              "the loop wrap is inside the file's own step distribution",
+              f"wrap {_wrap:.5f} vs median {float(np.median(_steps)):.5f}, "
+              f"p99.9 {float(np.percentile(_steps, 99.9)):.5f}")
+        check(_tone.pos == 400,
+              "and the read position carries on past the wrap rather than resetting",
+              f"pos={_tone.pos}")
+
+        # ── 9. CHUNKED == ONE-SHOT ──────────────────────────────────────────
+        # The same bar the outbound conditioner holds itself to, for the same
+        # reason: deltas arrive in whatever sizes OpenAI sends, and a mixer
+        # whose envelope or loop position depended on that would tick.
+        _m1, _m2 = amb.build(settings), amb.build(settings)
+        assert _m1 is not None and _m2 is not None
+        _blk = _voice(4_800)
+        _m1.push_voice(_blk)
+        _cut = 0
+        for _sz in (37, 500, 1_000, 163, 2_000, 1_100):
+            _m2.push_voice(_blk[_cut:_cut + _sz])
+            _cut += _sz
+        _m2.push_voice(_blk[_cut:])
+        _o1 = b"".join(_m1.next_frame() for _ in range(40))
+        _o2 = b"".join(_m2.next_frame() for _ in range(40))
+        check(_o1 == _o2,
+              "ragged chunks produce byte-identical frames to one block",
+              f"{len(_o1)} vs {len(_o2)} bytes, equal={_o1 == _o2}")
+
+        # ── IS THE GAIN ACTUALLY APPLIED? ──────────────────────────────────
+        # Every duck check above drives Ducker.gains() directly, so all of them
+        # keep passing on a mixer that computes a beautiful envelope and then
+        # throws it away. A mutation run proved it: replacing
+        #
+        #     bed = self.tone.next(FRAME_SAMPLES) * gain
+        #
+        # with a hard mute whenever the frame carries voice — the exact
+        # artefact this module exists to prevent — left the ENTIRE ambience
+        # block green. Same shape as the unwired conditioner above, caught the
+        # same way, and the reason a gain trajectory is not evidence about a
+        # mixer.
+        #
+        # The comparison is against the same mix with a SILENT bed, so the only
+        # variable is whether the tone reached the sum. Byte inequality is the
+        # bar rather than a level, because at these gains a level measurement
+        # is dominated by the voice.
+        _mr = amb.build(settings)
+        _mq = amb.AmbienceMixer(
+            amb.RoomTone(np.zeros(8_000, dtype=np.float32)),
+            amb.Ducker(ambient_db=_amb_db, duck_db=_duck_db,
+                       attack_ms=settings.realtime_ambience_attack_ms,
+                       release_ms=settings.realtime_ambience_release_ms,
+                       hold_ms=settings.realtime_ambience_hold_ms))
+        assert _mr is not None
+        _vv = _voice(8_000)
+        _mr.push_voice(_vv)
+        _mq.push_voice(_vv)
+        _fr = b"".join(_mr.next_frame() for _ in range(50))
+        _fq = b"".join(_mq.next_frame() for _ in range(50))
+        # Past the attack ramp, so this is the STEADY ducked state and not the
+        # fade the checks above already cover.
+        _atk_b = int(settings.realtime_ambience_attack_ms / 1000.0 * _SR8)
+        _ndiff = sum(1 for _x, _y in zip(_fr[_atk_b:], _fq[_atk_b:]) if _x != _y)
+        check(_ndiff > 0.05 * len(_fr[_atk_b:]),
+              "the ducked bed is MIXED under the voice, not muted under it",
+              f"{_ndiff} of {len(_fr[_atk_b:])} bytes differ from the same mix "
+              f"with a silent bed")
+        # And it is a bed, not a second voice: a duck that did nothing would
+        # put the tone in at full resting level under the speech.
+        _full = amb.AmbienceMixer(
+            amb.RoomTone.load(str(_plb.Path("data/ambience/room_tone.wav"))),
+            amb.Ducker(ambient_db=_amb_db, duck_db=_amb_db,
+                       attack_ms=1, release_ms=1, hold_ms=0))
+        _full.push_voice(_vv)
+        _ff = b"".join(_full.next_frame() for _ in range(50))
+        _nfull = sum(1 for _x, _y in zip(_ff[_atk_b:], _fq[_atk_b:]) if _x != _y)
+        check(_ndiff < _nfull,
+              "and the duck really reduces it — fewer samples move than at the "
+              "resting level",
+              f"{_ndiff} ducked vs {_nfull} un-ducked, of "
+              f"{len(_fr[_atk_b:])}")
+
+        # ── THE ACCOUNTING THE REST OF THE CALL RESTS ON ────────────────────
+        # _playback_ends_at, the barge-in truncation bound and the recording
+        # are all measured in DRY WIRE SAMPLES. The pump must not have moved
+        # any of them, or a hang-up cuts the callee off mid-sentence.
+        _on2 = _sess("acct")
+        _wson, _bon = _WSx(), []
+        _ston = await rw._handle_audio_delta(
+            {"delta": _adelta, "item_id": "i1"}, _on2, _wson, _bon,
+            rw._AudioDelta(0, None, None, None, False, None))
+        check(_ston.samples_this_response == _stoff.samples_this_response,
+              "ambience on: the sample count that bounds a truncation is unchanged",
+              f"{_ston.samples_this_response} vs {_stoff.samples_this_response}")
+        check(b"".join(_bon) == b"".join(_boff),
+              "and the per-response recording buffer holds the same dry bytes")
+        check(not [m for m in _wson.sent if m.get("event") == "media"],
+              "and NOTHING went to the socket around the pump — it owns the wire",
+              f"{len([m for m in _wson.sent if m.get('event') == 'media'])} stray sends")
+        check(_on2.ambience is not None
+              and _on2.ambience.queued_samples == _ston.samples_this_response,
+              "the audio went to the mixer instead, all of it",
+              f"{_on2.ambience.queued_samples if _on2.ambience else 0} queued")
+
+        # ── BARGE-IN STILL STOPS THE AGENT ──────────────────────────────────
+        # A `clear` empties TWILIO's queue, and under the pump most of a
+        # response is not in Twilio's queue — it is in the mixer. Without the
+        # flush the cancelled turn keeps draining out on top of the caller.
+        rw._drop_queued_voice(_on2, "test barge-in")
+        check(_on2.ambience is not None and _on2.ambience.queued_samples == 0,
+              "barge-in drops the agent audio that had not been played yet")
+        _after = _mud(_on2.ambience.next_frame()) if _on2.ambience else np.zeros(1)
+        check(_db(_after) > -68.0,
+              "and the bed survives it — a barge-in silences the agent, "
+              "not the room",
+              f"{_db(_after):.1f} dBFS")
+
+        # ── NOTHING REACHED THE INBOUND SIDE ────────────────────────────────
+        # FIND FIRST, THEN JUDGE. Asserting "the mixer is not in the caller
+        # buffer" passes just as happily when the buffer does not exist, so the
+        # buffers are proved non-empty by feeding them, and only then compared.
+        _in = _sess("inb")
+        _frame = bytes(range(256)) * 2
+        _in._caller_pcm.append(_frame)
+        _in._caller_oai_pcm.append(_frame)
+        _before_c = b"".join(_in._caller_pcm)
+        _before_o = b"".join(_in._caller_oai_pcm)
+        check(len(_before_c) == 512 and len(_before_o) == 512,
+              "the inbound buffers are non-empty, so the comparison below means "
+              "something",
+              f"{len(_before_c)}B / {len(_before_o)}B")
+        assert _in.ambience is not None
+        _in.ambience.push_voice(_voice(8_000))
+        for _ in range(60):
+            _in.ambience.next_frame()
+        check(b"".join(_in._caller_pcm) == _before_c
+              and b"".join(_in._caller_oai_pcm) == _before_o,
+              "60 frames of ambience later, the caller buffers are byte-identical "
+              "— nothing was mixed into what OpenAI or the guards see")
+
+        # ── THE NEGOTIATION IS NOT AFFECTED ─────────────────────────────────
+        check(rw._effective_output_format() == "pcm",
+              "ambience changes nothing about what we ask OpenAI to send",
+              rw._effective_output_format())
+
+        # ── THE PUMP IS NOT A LEG ───────────────────────────────────────────
+        # handle_realtime ends the call on whichever leg finishes FIRST. The
+        # pump writes to a socket that dies at teardown like any other, so in
+        # that list a fallen bed would hang up on a live conversation.
+        _rwsrc = _plb.Path("agents/voice/realtime_worker.py").read_text(encoding="utf-8")
+        _legs = _rwsrc.split("legs = [", 1)[1].split("]", 1)[0] if "legs = [" in _rwsrc else ""
+        check("_twilio_to_oai" in _legs and "_oai_to_twilio" in _legs,
+              "found the legs list, so the next check is judging the right text",
+              f"{len(_legs)} chars")
+        check("_ambience_pump" in _rwsrc and "_ambience_pump" not in _legs,
+              "the pump is created but is NOT one of the legs that end the call")
+    finally:
+        (settings.realtime_ambience, settings.realtime_audio_format,
+         settings.realtime_output_format) = _keep_amb
+
+
 async def _check_backchannel_lull_gate(_WS) -> None:
     """A backchannel must land in a GAP, not merely after enough elapsed speech.
 
@@ -7328,6 +7688,11 @@ async def main():
               f"{_dstate.samples_this_response}")
     finally:
         settings.realtime_audio_format, settings.realtime_output_format = _keep
+
+    # ── AMBIENT ROOM TONE ───────────────────────────────────────────────────
+    # Its own function for the pyright reason in pyrightconfig.json, same as
+    # the backchannel lull gate.
+    await _check_ambience(_WS)
 
     _td = _cfg["input"]["turn_detection"] if "input" in _cfg else _cfg["turn_detection"]
     check(_td.get("type") == settings.realtime_turn_detection,

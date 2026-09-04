@@ -28,6 +28,7 @@ from agents.voice.grounding import _objective_of, hospital_mismatch
 from agents.voice.metrics import conversation_metrics
 from agents.voice.objectives import CallObjective, Outcome, default_objective, describe as _describe_objective
 from agents.voice.outbound_audio import DISABLED_REASON as OUTBOUND_UNAVAILABLE, OutboundConditioner
+from agents.voice import ambience as _ambience
 from agents.voice.turns import _norm_clause
 from core.config import settings
 from core.models import Doctor, DoctorStatus, Source, TranscriptTurn
@@ -660,6 +661,16 @@ class RealtimeSession:
         # state between deltas. Built unconditionally — it is cheap, and a
         # session that flips to passthrough mid-call simply never calls it.
         self.outbound = OutboundConditioner()
+        # THE AMBIENCE MIXER, or None — and None is not a disabled mixer, it is
+        # the absence of one. Off means agents/voice/audio never starts the
+        # pump and every send site takes the branch it took before the feature
+        # existed, so "disabled is byte-for-byte unchanged" holds by
+        # construction rather than by a gain that happens to be zero.
+        #
+        # Built here rather than in the pump because the three barge-in `clear`
+        # sites need to reach it to drop queued voice, and they have the
+        # session and not the task.
+        self.ambience = _ambience.build(settings)
         # Answered-identity nudge, also one-shot for the same reason.
         self._identity_nudged: bool = False
         # Said the same sentence twice in a row, one-shot for the same reason.
@@ -1120,15 +1131,40 @@ class RealtimeSession:
             agent = np.zeros(n, dtype=np.float32)
             print(f"[Realtime] Recording: caller={len(caller)} samples, "
                   f"agent_responses={len(self._agent_pcm)}, n={n}", flush=True)
-            for (t_offset, pcm_bytes) in self._agent_pcm:
-                start = int(t_offset * _SR)
-                arr   = _agent_to_caller_rate(_agent_wire_to_pcm16(pcm_bytes), _SR)
+            # THE TAPE, WHEN THERE IS ONE, IS THE RECORDING. With ambience on
+            # the pump is the only thing that wrote to the wire, and it kept
+            # every frame it sent. Rebuilding the agent channel from the
+            # per-response blocks instead would produce a file that is missing
+            # the bed everywhere and missing the gaps entirely — a document of
+            # audio nobody was played, which is the exact failure the delta
+            # path's "same bytes to the wire and to the recording" comment
+            # exists to prevent.
+            #
+            # It is ONE contiguous block because the pump never stops: the
+            # timestamp is where it started and the length carries it to the
+            # end of the call.
+            _tape = self.ambience.sent if self.ambience is not None else None
+            if _tape:
+                _t0  = self.ambience.started_at or 0.0
+                start = int(_t0 * _SR)
+                arr   = _agent_to_caller_rate(
+                    _agent_wire_to_pcm16(b"".join(_tape)), _SR)
                 end   = min(start + len(arr), n)
                 if end > start:
                     agent[start:end] += arr[:end - start]
-                print(f"  agent block: t={t_offset:.2f}s, "
-                      f"dur={_agent_wire_samples(pcm_bytes)/_agent_wire_sample_rate():.2f}s, "
-                      f"samples={len(arr)}", flush=True)
+                print(f"  agent tape: t={_t0:.2f}s, "
+                      f"dur={len(arr)/_SR:.2f}s, frames={len(_tape)} "
+                      f"(as sent, bed included)", flush=True)
+            else:
+                for (t_offset, pcm_bytes) in self._agent_pcm:
+                    start = int(t_offset * _SR)
+                    arr   = _agent_to_caller_rate(_agent_wire_to_pcm16(pcm_bytes), _SR)
+                    end   = min(start + len(arr), n)
+                    if end > start:
+                        agent[start:end] += arr[:end - start]
+                    print(f"  agent block: t={t_offset:.2f}s, "
+                          f"dur={_agent_wire_samples(pcm_bytes)/_agent_wire_sample_rate():.2f}s, "
+                          f"samples={len(arr)}", flush=True)
 
             # Pad to same length
             n = max(len(caller), len(agent))
@@ -1140,6 +1176,12 @@ class RealtimeSession:
             # is barely audible. Outside those windows, keep caller at full volume.
             # This is better than hard-gating (zeroing) which silenced the caller entirely
             # when they responded immediately after the agent stopped speaking.
+            # STILL KEYED ON _agent_pcm, AND THAT IS THE POINT. These are the
+            # windows in which the agent was SPEAKING, which is what the caller
+            # channel needs ducking against. The ambience tape spans the whole
+            # call, so gating on it would pull the caller down to 10% from the
+            # first frame to the last and throw away the channel this gate
+            # exists to preserve.
             soft_gate = np.ones(n, dtype=np.float32)
             for (t_off, pcm_b) in self._agent_pcm:
                 s = int(t_off * _SR)

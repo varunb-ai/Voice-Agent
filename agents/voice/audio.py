@@ -13,6 +13,7 @@ Split from realtime_worker 2026-08-26, verbatim.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -23,7 +24,8 @@ from typing import TYPE_CHECKING, NamedTuple, Optional
 import numpy as np
 
 from core.config import settings
-from core.audio_utils import resample, _mulaw_decode
+from core.audio_utils import resample, _mulaw_decode, _mulaw_encode
+from agents.voice import ambience as _amb
 from agents.voice.outbound_audio import DISABLED_REASON as OUTBOUND_UNAVAILABLE
 from agents.voice.latency import _stage_row, _fmt_stages
 from agents.voice.evidence import _LOW_AUDIO_RMS, _QUIET_FRACTION
@@ -277,6 +279,122 @@ _STACK_BREATH_S = 0.7
 _TWILIO_SILENCE_FRAME = base64.b64encode(b"\xff" * 160).decode()
 
 
+# ── The ambience pump ────────────────────────────────────────────────────────
+# HOW FAR AHEAD OF THE DEADLINE THE PUMP RUNS. Not zero, and the reason is the
+# platform rather than taste: asyncio's timer resolution on Windows is about
+# 15.6 ms, so a task asking to wake in exactly 20 ms wakes late often enough
+# that a zero-lead pump would underrun Twilio's queue several times a second.
+# Two frames of lead absorbs that.
+#
+# IT IS ALSO A LATENCY COST AND SHOULD BE READ AS ONE. Frames already handed to
+# Twilio cannot be recalled, so the bed queued ahead of a response is 40 ms the
+# first syllable waits behind. Once per turn, against a reply latency this
+# project measures in seconds — but it is real, and lowering it trades against
+# the underruns above.
+_PUMP_LEAD_S = 0.040
+
+# Past this much backlog the pump gives up on catching up and resyncs. Below
+# it, bursting the missed frames is CORRECT rather than merely tolerable:
+# Twilio plays its queue at realtime, so refilling after a stall is heard as
+# continuous audio. The cap exists only so a pathological stall — a suspended
+# laptop, a starved loop — cannot become a burst of thousands of frames.
+_PUMP_RESYNC_S = 1.0
+
+
+async def _emit_agent_audio(sess: "RealtimeSession", twilio_ws, *,
+                            wire: bytes,
+                            pcm8: Optional[np.ndarray] = None,
+                            passthrough_payload: Optional[str] = None) -> None:
+    """Hand one block of agent audio to whoever owns the wire.
+
+    With ambience off this is the send that has always been here, byte for
+    byte: `passthrough_payload` carries the ORIGINAL base64 delta so the
+    unconditioned path still forwards OpenAI's own bytes rather than
+    re-encoding its own decode of them.
+
+    With ambience on the block is queued for the pump instead. It is queued as
+    LINEAR SAMPLES, not mu-law, because the bed has to be summed with it before
+    anything is encoded — see the module docstring in ambience.py. `pcm8` is
+    the conditioner's output when there is one; the passthrough leg has only
+    ever had mu-law, so it is decoded here.
+    """
+    mixer = getattr(sess, "ambience", None)
+    if mixer is not None:
+        mixer.push_voice(pcm8 if pcm8 is not None else _mulaw_decode(wire))
+        return
+    payload = (passthrough_payload if passthrough_payload is not None
+               else base64.b64encode(wire).decode())
+    await twilio_ws.send_text(json.dumps({
+        "event":    "media",
+        "streamSid": sess.stream_sid,
+        "media":    {"payload": payload},
+    }))
+
+
+async def _ambience_pump(twilio_ws, sess: "RealtimeSession", done_event) -> None:
+    """Emit one 20 ms mixed frame every 20 ms for the life of the call.
+
+    THIS TASK OWNS THE OUTBOUND WIRE when ambience is on, and nothing else may
+    write to it — Twilio queues media rather than mixing it, so a frame sent
+    around this task plays after everything queued ahead of it and silences the
+    bed for its own duration. Every other site therefore feeds the mixer.
+
+    It exists at all because there is no other way to be heard during silence.
+    The delta path only runs while OpenAI is speaking; between turns nothing is
+    sent and the line is not quiet, it is dead.
+
+    Never started when ambience is off, which is what makes "disabled is
+    unchanged" a structural fact rather than a claim.
+    """
+    mixer = sess.ambience
+    if mixer is None:
+        return
+    # The stream_sid arrives on the Twilio leg, not this one. Nothing can be
+    # sent before it and the greeting is still seconds away, so waiting costs
+    # nothing.
+    while not done_event.is_set() and not sess.stream_sid:
+        await asyncio.sleep(0.02)
+    if done_event.is_set() or not sess.stream_sid:
+        return
+    mixer.started_at = ((datetime.now() - sess._stream_start_time).total_seconds()
+                        if sess._stream_start_time else 0.0)
+    print(f"[Realtime] ambience pump up - bed at "
+          f"{mixer.ducker.ambient_db:.0f} dBFS, ducking to "
+          f"{mixer.ducker.duck_db:.0f} dBFS", flush=True)
+    next_at = time.monotonic()
+    _resyncs = 0
+    try:
+        while not done_event.is_set():
+            now = time.monotonic()
+            if now - next_at > _PUMP_RESYNC_S:
+                _resyncs += 1
+                log.warning("[Ambience] pump %.2fs behind - resyncing (%d)",
+                            now - next_at, _resyncs)
+                next_at = now
+            while next_at <= now + _PUMP_LEAD_S:
+                frame = mixer.next_frame()
+                next_at += _amb.FRAME_S
+                await twilio_ws.send_text(json.dumps({
+                    "event":    "media",
+                    "streamSid": sess.stream_sid,
+                    "media":    {"payload": base64.b64encode(frame).decode()},
+                }))
+            await asyncio.sleep(max(0.002,
+                                    next_at - _PUMP_LEAD_S - time.monotonic()))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # A dead socket at teardown is the ordinary way out of here. Logged
+        # rather than raised: this task finishing must not be what ends a call.
+        # handle_realtime ends the call on whichever leg finishes FIRST, and
+        # the bed is not a reason to hang up on anybody.
+        log.info("[Ambience] pump stopped: %s", e)
+    finally:
+        print(f"[Realtime] ambience pump down - {mixer.frames_sent} frames "
+              f"({mixer.frames_sent * _amb.FRAME_S:.1f}s), "
+              f"{mixer.voice_frames} carrying voice", flush=True)
+
+
 async def _send_breath(twilio_ws, sess: "RealtimeSession", seconds: float) -> None:
     """Queue `seconds` of silence to Twilio so the callee gets a gap to speak.
 
@@ -291,6 +409,13 @@ async def _send_breath(twilio_ws, sess: "RealtimeSession", seconds: float) -> No
     the caller's ear without blocking anything on ours.
     """
     if not sess.stream_sid or seconds <= 0:
+        return
+    # THROUGH THE MIXER WHEN IT OWNS THE WIRE, and as a real gap in the voice
+    # queue rather than as nothing: the bed then plays over the breath. A pause
+    # with room tone in it is the version a person actually leaves, and a pause
+    # sent around the pump would land after everything queued ahead of it.
+    if sess.ambience is not None:
+        sess.ambience.push_silence(seconds)
         return
     for _ in range(int(seconds * 1000 / 20)):
         await twilio_ws.send_text(json.dumps({
@@ -445,6 +570,30 @@ class _AudioDelta(NamedTuple):
 _MAX_HELD_ITEM_CHUNKS = 400
 
 
+def _drop_queued_voice(sess: "RealtimeSession", why: str) -> None:
+    """Throw away agent audio that has not reached the wire yet.
+
+    THE COMPANION TO THE `clear` EVENT, and without it a barge-in stops
+    clearing anything. A `clear` empties TWILIO's queue — and once the ambience
+    pump owns the wire, most of a response is no longer in Twilio's queue. It
+    is here, waiting to be paced out, and it would keep draining out after the
+    caller had interrupted: the whole cancelled turn, delivered on top of them.
+
+    A no-op when ambience is off, because then Twilio's queue really does hold
+    everything and `clear` really is the whole job.
+
+    The BED IS NOT TOUCHED. A barge-in silences the agent; it does not hang up
+    the room.
+    """
+    mixer = getattr(sess, "ambience", None)
+    if mixer is None:
+        return
+    dropped = mixer.flush_voice()
+    if dropped:
+        print(f"[Realtime] 🔇 {dropped / _TWILIO_SR:.2f}s of agent audio "
+              f"dropped before it was played — {why}", flush=True)
+
+
 def _drop_held_items(sess: "RealtimeSession", why: str) -> None:
     """Throw away every held second item. Called when nothing may be played.
 
@@ -481,16 +630,18 @@ async def _flush_held_item(sess: "RealtimeSession", twilio_ws, item_id: str,
     for _delta in chunks:
         try:
             raw_pcm = base64.b64decode(_delta)
+            _pcm8 = None
             if _outbound_conditioned():
-                raw_pcm = sess.outbound.process(raw_pcm)
+                # Split so the mu-law encode happens once. `raw_pcm` is still
+                # the dry wire bytes every count and buffer below is measured
+                # in; `_pcm8` is the linear signal the bed gets mixed into.
+                _pcm8 = sess.outbound.process_pcm8(raw_pcm)
+                raw_pcm = _mulaw_encode(_pcm8)
             _samples += _agent_wire_samples(raw_pcm)
             current_response_pcm.append(raw_pcm)
-            await twilio_ws.send_text(json.dumps({
-                "event":     "media",
-                "streamSid": sess.stream_sid,
-                "media":     {"payload": (base64.b64encode(raw_pcm).decode()
-                                          if _outbound_conditioned() else _delta)},
-            }))
+            await _emit_agent_audio(
+                sess, twilio_ws, wire=raw_pcm, pcm8=_pcm8,
+                passthrough_payload=None if _outbound_conditioned() else _delta)
         except Exception as e:
             log.error("[Realtime] held-item send error: %s", e)
             break
@@ -602,8 +753,16 @@ async def _handle_audio_delta(
             # carry across deltas, which is what stops the seam
             # artefact the old per-chunk resample produced.
             raw_pcm = base64.b64decode(delta)
+            _pcm8 = None
             if _outbound_conditioned():
-                raw_pcm = sess.outbound.process(raw_pcm)
+                # process_pcm8 + encode rather than process, so that when the
+                # ambience mixer is on it can sum the bed into the LINEAR
+                # signal and encode once. `raw_pcm` is unchanged either way -
+                # the dry wire bytes - which is what keeps
+                # samples_this_response, the truncation bound and the response
+                # recording buffer measuring exactly what they measured before.
+                _pcm8 = sess.outbound.process_pcm8(raw_pcm)
+                raw_pcm = _mulaw_encode(_pcm8)
             samples_this_response += _agent_wire_samples(raw_pcm)
             if _first_delta_sent_at is None:
                 # STACKED REPLY. _create_response already refuses to
@@ -707,13 +866,9 @@ async def _handle_audio_delta(
                     # still in front of someone.
                     print(f"[Realtime]   ^ stages: {_fmt_stages(_row)}",
                           flush=True)
-            twilio_payload = (base64.b64encode(raw_pcm).decode()
-                              if _outbound_conditioned() else delta)
-            await twilio_ws.send_text(json.dumps({
-                "event":    "media",
-                "streamSid": sess.stream_sid,
-                "media":    {"payload": twilio_payload},
-            }))
+            await _emit_agent_audio(
+                sess, twilio_ws, wire=raw_pcm, pcm8=_pcm8,
+                passthrough_payload=None if _outbound_conditioned() else delta)
         except Exception as e:
             log.error("[Realtime] audio send error: %s", e)
     elif delta and not sess.stream_sid:
@@ -741,7 +896,10 @@ __all__ = [
     "_agent_wire_sample_rate",
     "_MAX_HELD_ITEM_CHUNKS",
     "_agent_wire_samples",
+    "_ambience_pump",
     "_drop_held_items",
+    "_drop_queued_voice",
+    "_emit_agent_audio",
     "_flush_held_item",
     "_agent_wire_to_pcm16",
     "_audio_carried_nothing",

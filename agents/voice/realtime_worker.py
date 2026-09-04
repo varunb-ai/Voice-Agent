@@ -102,7 +102,9 @@ from agents.voice.audio import (
     _SILENT_AUDIO_RMS as _SILENT_AUDIO_RMS,
     _audio_was_silent as _audio_was_silent,
     _AudioDelta,
+    _ambience_pump as _ambience_pump,
     _drop_held_items as _drop_held_items,
+    _drop_queued_voice as _drop_queued_voice,
     _flush_held_item as _flush_held_item,
     _MAX_HELD_ITEM_CHUNKS as _MAX_HELD_ITEM_CHUNKS,
     _handle_audio_delta,
@@ -442,6 +444,7 @@ async def _drain_clear(sess, twilio_ws, *, left: float, level: float,
     # _playback_ends_at and would otherwise sit out audio that
     # has been thrown away.
     sess._playback_ends_at = time.monotonic()
+    _drop_queued_voice(sess, "the caller interrupted the playout")
     try:
         await twilio_ws.send_text(json.dumps({
             "event": "clear", "streamSid": sess.stream_sid,
@@ -967,6 +970,15 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor,
             asyncio.create_task(_silence_watchdog(oai_ws, sess, done_event, twilio_ws),
                                 name="silence-watchdog"),
         ]
+        # NOT ONE OF THE LEGS, and that is load-bearing. The call ends on
+        # whichever leg finishes FIRST, and the pump finishes on a closed
+        # socket at teardown like anything else that writes to it — in that
+        # list, a bed that fell over would hang up on a live conversation.
+        # Cancelled alongside them instead.
+        _amb_pump = (asyncio.create_task(
+                         _ambience_pump(twilio_ws, sess, done_event),
+                         name="ambience-pump")
+                     if sess.ambience is not None else None)
         try:
             # The finished leg is not inspected — whichever finishes first ends
             # the call and the other is cancelled below regardless of which it
@@ -983,6 +995,8 @@ async def handle_realtime(twilio_ws: WebSocket, call_sid: str, doctor: Doctor,
             for task in legs:
                 if not task.done():
                     task.cancel()
+            if _amb_pump is not None and not _amb_pump.done():
+                _amb_pump.cancel()
         for task in legs:
             if task.done() and not task.cancelled() and task.exception():
                 log.error("[Realtime] %s leg failed: %s", task.get_name(), task.exception())
@@ -1281,6 +1295,7 @@ async def _oai_to_twilio(
                         sess._agent_pcm.append((_current_response_start, b"".join(_current_response_pcm)))
                     _current_response_pcm.clear()
                     _current_response_start = None
+                    _drop_queued_voice(sess, "the caller interrupted")
                     try:
                         await oai_ws.send(json.dumps({"type": "response.cancel"}))
                         await twilio_ws.send_text(json.dumps({
@@ -1764,7 +1779,9 @@ __all__ = [    "ACCEPTING_ASK",
     "_AGENT_WIRE_SR",
     "_AudioDelta",
     "_MAX_HELD_ITEM_CHUNKS",
+    "_ambience_pump",
     "_drop_held_items",
+    "_drop_queued_voice",
     "_flush_held_item",
     "_BACKCHANNEL_AFTER_S",
     "_BACKCHANNEL_COOLDOWN_S",

@@ -388,6 +388,63 @@ class Settings(BaseSettings):
     # setting it to "" omits the language hint entirely.
     realtime_transcribe_language: str = "en"
 
+    # ── Ambient room tone on the outbound leg ────────────────────────────────
+    # Between our turns the receptionist is sent NO frames at all, and 0xFF
+    # mu-law is a dead channel rather than a quiet one. This lays a continuous
+    # low-level room tone under the call and ducks it under the agent's voice.
+    #
+    # OFF BY DEFAULT, and that default is the safety property rather than
+    # timidity: off means agents/voice/ambience.build returns None, the pump
+    # task is never started, and every send site takes the branch it took
+    # before the feature existed — byte-for-byte, not "equivalent". A zero gain
+    # would still route the audio through a decode, a mix and a re-encode.
+    #
+    # TURNING IT ON CHANGES WHO OWNS THE WIRE. Twilio queues media rather than
+    # mixing it, so a bed that plays during silence has to be emitted by a
+    # paced task that everything else feeds — see the module docstring in
+    # ambience.py. That task keeps ~40ms of frames ahead of the deadline so
+    # Windows' ~15.6ms timer granularity cannot underrun it, which is 40ms
+    # added to voice onset, once per turn.
+    realtime_ambience: bool = False
+
+    # Empty means data/ambience/room_tone.wav. Mono PCM16 at 8kHz only —
+    # anything else is refused at load and the bed stays silent rather than
+    # being resampled into the hot path. Regenerate with
+    # scripts/make_room_tone.py.
+    realtime_ambience_path: str = ""
+
+    # RESTING AND DUCKED LEVEL, in dBFS RMS on the wire. The bed is normalised
+    # to unit RMS at load, so these mean what they say whatever level the asset
+    # was rendered at.
+    #
+    # -45 IS NEAR THE PRACTICAL FLOOR AND THE DUCK TARGET IS BELOW IT. mu-law's
+    # step size near zero is 8/32768 = -72.2 dBFS, which is also the smallest
+    # non-zero magnitude it can carry — the same 0.000244 this codebase knows
+    # as the audio_rms of a turn with nothing under it. (0xFF itself decodes to
+    # exactly 0.) -45 dBFS sits ~27 dB above that step, which is ample for
+    # noise; -58 dBFS is about two and a half steps — and under -16 dBFS speech it is below the voice's own step
+    # size. So the duck target does not set how loud the bed is under speech —
+    # under speech it is not representable at all. Below about -60 it is
+    # indistinguishable from muting, and there is no point going lower.
+    realtime_ambience_db: float = -45.0
+    realtime_ambience_duck_db: float = -58.0
+
+    # THE TRANSITION IS THE PART WORTH TUNING, per the note above: the levels
+    # are pinned by the codec, the shape is not. Time to cover 90% of the gap,
+    # ramped one-pole in dB. A hard switch is what makes a bed sound bolted on.
+    realtime_ambience_attack_ms: int = 75
+    realtime_ambience_release_ms: int = 300
+
+    # HOW LONG THE DUCK HOLDS after the voice drops below the gate, before the
+    # release ramp starts at all. This is what stops the bed pumping on the
+    # pauses inside a sentence, and it is deliberately a SEPARATE mechanism
+    # from a longer release: a release slow enough to bridge two words would
+    # also take a second to come back after a turn genuinely ended, which is
+    # the opposite of what is wanted. Starting points, all of them — none of
+    # these five numbers has been through a live call yet.
+    realtime_ambience_hold_ms: int = 300
+
+
     # "near_field" | "far_field" | "off".
     # Untested. The earlier justification ("a handset is a near-field mic") was
     # a guess: the model never receives handset audio, it receives 8kHz μ-law.

@@ -36,6 +36,7 @@ from core.config import settings
 from agents.voice.audio import (
     _agent_wire_sample_rate,
     _drop_held_items,
+    _drop_queued_voice,
     _wire_bytes_per_ms,
 )
 from agents.voice.grounding import (
@@ -210,6 +211,7 @@ async def _handle_response_done(
         print(f"[{datetime.now().strftime('%H:%M:%S')}] "
               f"✋ BARGE-IN  : cancelled by OpenAI's VAD "
               f"(audio_out={_out_audio_tokens} tok)", flush=True)
+        _drop_queued_voice(sess, "OpenAI's VAD cancelled the response")
         if sess.stream_sid:
             try:
                 await twilio_ws.send_text(json.dumps({

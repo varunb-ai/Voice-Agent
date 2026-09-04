@@ -227,6 +227,21 @@ class OutboundConditioner:
 
     def process(self, pcm16: bytes) -> bytes:
         """PCM16 24 kHz in, mu-law 8 kHz out."""
+        return _mulaw_encode(self.process_pcm8(pcm16))
+
+    def process_pcm8(self, pcm16: bytes) -> np.ndarray:
+        """The same chain, stopping one step short: conditioned float32 at 8 kHz.
+
+        SPLIT OUT SO THE ENCODE HAPPENS ONCE. When ambience is on, the bed is
+        mixed into this signal before it is encoded (agents/voice/ambience.py),
+        and mu-law is the wrong domain to add anything in — the mixer would
+        have to decode what this just encoded, sum, and encode again, putting a
+        second quantisation on every sample of speech for no reason.
+
+        `process` is unchanged and still returns bytes, so every existing
+        caller and the whole seam suite are untouched: the encode simply moved
+        from the end of this function to the start of that one.
+        """
         # ODD LENGTH IS A TRUNCATED FRAME, NOT A CRASH. np.frombuffer raises
         # ValueError on a buffer that is not a whole number of int16s, and this
         # runs inside the OpenAI event pump — an exception here takes down the
@@ -247,7 +262,7 @@ class OutboundConditioner:
             # (the tests among them) and it DOES alias — decimating unfiltered
             # audio folds 4-8 kHz back into speech. That is the whole reason the
             # availability check lives upstream rather than here.
-            return _mulaw_encode(x[::_DECIM]) if x.size else b""
+            return x[::_DECIM] if x.size else np.zeros(0, dtype=np.float32)
 
         # 1. PRESENCE, at 24 kHz where the band is still intact. Added to the
         #    dry signal rather than replacing it, so this is a shelf-like lift
@@ -268,7 +283,7 @@ class OutboundConditioner:
         if self._compress and y.size:
             y = self._apply_compression(y)
 
-        return _mulaw_encode(np.clip(y, -_CEILING, _CEILING))
+        return np.clip(y, -_CEILING, _CEILING)
 
     def _apply_compression(self, y: np.ndarray) -> np.ndarray:
         """Envelope follower with asymmetric attack/release, state carried.

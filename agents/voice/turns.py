@@ -29,6 +29,7 @@ from agents.voice.audio import _audio_carried_nothing, _SILENT_AUDIO_RMS, _audio
 from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, is_hard_refusal, _is_location_ask, _note_name_heard, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
 from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _gave_name_and_dob, _gave_own_detail, _said_not_a_patient, _detail_left_bare, _spoken_farewell, _announced_an_ask, is_hold_request, _create_response, closing_directive, _RETIRED_VOCAB_TEXT, _resolve_deferred_save
 from agents.voice.objectives import AnswerKind, clauses as _clauses, expected_answers, norm_quotes as _norm_quotes, sentences as _sentences
+from core.audio_utils import _mulaw_decode
 from core.config import settings
 from core.models import TranscriptTurn
 from datetime import datetime
@@ -1047,10 +1048,21 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                     time.time() + len(base64.b64decode(_payload)) / 8000.0
                     + _BACKCHANNEL_ECHO_MARGIN_S)
                 try:
-                    await twilio_ws.send_text(json.dumps({
-                        "event": "media", "streamSid": sess.stream_sid,
-                        "media": {"payload": _payload},
-                    }))
+                    # THROUGH THE MIXER WHEN IT OWNS THE WIRE. The clip itself
+                    # is unchanged — same bytes, same length, same echo window
+                    # above — but Twilio queues rather than mixes, so a clip
+                    # pushed around the pump would play with the bed cut out
+                    # from under it for its whole duration. That is the
+                    # ambience-ON/OFF/ON artefact, arriving on the one sound
+                    # that is supposed to say "a person is still here".
+                    if sess.ambience is not None:
+                        sess.ambience.push_voice(
+                            _mulaw_decode(base64.b64decode(_payload)))
+                    else:
+                        await twilio_ws.send_text(json.dumps({
+                            "event": "media", "streamSid": sess.stream_sid,
+                            "media": {"payload": _payload},
+                        }))
                     print(f"[Realtime] 👂 backchannel in the gap after "
                           f"{time.time() - _spk:.1f}s of speech "
                           f"({(_lull or 0.0) * 1000:.0f}ms since their last word"
