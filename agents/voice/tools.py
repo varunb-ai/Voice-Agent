@@ -86,8 +86,33 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "The actual information (URL, email, date, etc.)",
                     },
+                    "notes": {
+                        "type": "object",
+                        # CARRIES THE INSTRUCTION BECAUSE THE PROMPT CANNOT.
+                        # The tool-list hint in patient_discovery was ignored on
+                        # its first live outing (call-20260903-1126 made two
+                        # separate note_info calls a second apart), and that
+                        # template is pinned at exactly 5,900/5,900 tokens, so
+                        # there is no room to argue harder there. Schemas are
+                        # outside the prompt ceiling and are what actually
+                        # drives call shape.
+                        # THE EXAMPLE NAMES NO ENDING LABEL, deliberately. The
+                        # suite asserts tools.py never spells that key, because
+                        # a template may rename it and a hand-copied literal
+                        # here would go stale silently. Two ordinary keys show
+                        # the shape just as well.
+                        "description": (
+                            "Key-value pairs of metadata to record together in "
+                            "ONE call, e.g. {\"waitlist\": \"number 15 in the "
+                            "queue\", \"phone\": \"555-0100\"}. ALWAYS use this "
+                            "instead of key/value when you have more than one "
+                            "thing to record — each separate note_info call is "
+                            "another silence the caller sits through. Same keys "
+                            "as `key` above."
+                        ),
+                        "additionalProperties": {"type": "string"},
+                    },
                 },
-                "required": ["key", "value"],
             },
         },
     },
@@ -929,6 +954,99 @@ def _flush_deferred(memory: CallMemory, objective: Any) -> None:
     memory.update(deferred_saves=keep)
 
 
+def _ending_label_owed(objective: Any, memory: CallMemory, name: str,
+                       arguments: dict) -> tuple:
+    """What the call still owes, if this call is the model stamping the ending.
+
+    Empty means write it. Non-empty is the ordering the prompt asks for and
+    does not get: the outcome label last, after everything it is a label ON.
+
+    NOT KEYED ON A TOOL NAME. `note_info` writes note_<key> for anything, so
+    what makes a call an ending label is the FIELD the key lands on — declared
+    by the template as `records_the_ending`, read here. A second template
+    calling its label something else is covered by construction, and one that
+    marks a field the guard cannot see is reported by unenforceable_endings()
+    before a call is ever placed.
+
+    THE MODEL'S SPELLING IS NORMALISED HERE AND NOWHERE ELSE, deliberately.
+    `note_info` stores the key it is handed, so `Call_Outcome` writes
+    note_Call_Outcome and reads back as "not collected" — the safe direction,
+    documented where the field is declared. This guard lowercases before
+    looking up because it is judging INTENT, not the value: a model stamping
+    the ending in the wrong case is still a model that has stopped working the
+    call, and letting the typo through the ordering check would be a bypass
+    nobody could see in an artifact.
+
+    ESCALATING OPENS IT, and that is the one exit. escalate() is the model
+    saying, on the record and with a reason, that the rest of this call cannot
+    be had — which is exactly the fact the label is a label on. Refusing after
+    that would keep the label off precisely the calls that failed, which is
+    where a reader most needs it. The refusal text below does not mention this:
+    the model's job on a refusal is to go and get the missing answer, and
+    offering the exit in the same breath is offering it instead.
+    """
+    if name != "note_info":
+        return ()
+    if memory.get("escalated"):
+        return ()
+    key = str(arguments.get("key") or "").strip().lower()
+    if not key:
+        return ()
+    from agents.voice.objectives import premature_ending_label
+    _field, owed = premature_ending_label(objective, memory, f"note_{key}")
+    return owed
+
+
+def _run_note_batch(memory: CallMemory, arguments: dict[str, Any],
+                    objective: Any) -> dict:
+    """Apply ``notes={key: value, ...}`` as N ordinary note_info calls.
+
+    WHY IT EXISTS: latency, measured. Three sequential tool calls in one turn
+    cost three inference round trips before the agent makes a sound —
+    call-20260902-2207 spent 4.69s that way and call-20260902-1541 spent 7.39s.
+    Batching the metadata writes collapses those into one. It is a TAIL fix and
+    is worth stating as one: only 3.1% of instrumented turns carry more than a
+    single tool, so this moves p90 and leaves the median where it was.
+
+    NOTHING IS ADJUDICATED HERE. Each key re-enters run_tool alone, so it meets
+    the same guards in the same order; this function only splits and collects.
+
+    OK IS NOT PARTIAL. A batch with any refusal returns ok=False while still
+    reporting what landed in `written` — the model has to see that the label
+    was refused (or it stops working the call), and the notes that succeeded
+    must not be re-asked (or a real answer gets thrown away twice).
+    """
+    notes = arguments.get("notes")
+    extra = sorted(k for k in arguments if k != "notes")
+    if extra:
+        return _reject(
+            f"REJECTED: the call carried both notes and {', '.join(extra)}",
+            "note_info again: EITHER key and value, OR notes alone")
+    if not isinstance(notes, dict) or not notes:
+        return _reject(
+            "REJECTED: notes must be a non-empty object of key -> value",
+            'note_info again with notes={"key": "value", ...}')
+
+    written: dict[str, Any] = {}
+    refused: list[str] = []
+    for key, value in notes.items():
+        _r = run_tool("note_info", memory,
+                      {"key": str(key),
+                       "value": "" if value is None else str(value)},
+                      objective)
+        if _r.get("ok"):
+            written[str(key)] = _r.get("value")
+        else:
+            refused.append(f"{key}: {_r.get('error') or 'refused'}")
+
+    if not refused:
+        return {"ok": True, "written": written}
+    _err = " | ".join(refused)
+    if written:
+        _err += f" | RECORDED, do not repeat: {', '.join(sorted(written))}"
+    return {"ok": False, "written": written, "error": _err}
+
+
 def run_tool(name: str, memory: CallMemory, arguments: dict[str, Any],
              objective: Any = None) -> dict:
     """Dispatch a tool call, then re-derive what the call has achieved.
@@ -959,6 +1077,26 @@ def run_tool(name: str, memory: CallMemory, arguments: dict[str, Any],
     )
     objective = objective or default_objective()
 
+    # ── A BATCH OF NOTES IS N SINGLE NOTES, NOT A SECOND CODE PATH ──────────
+    # Every note in a batch re-enters this function one key at a time, so the
+    # ending-label refusal, the malformed check, _flush_deferred and
+    # record_outcome all apply per key exactly as they always did. Writing the
+    # loop any other way would fork the adjudication, and the fork is where a
+    # guard quietly stops running on the newer shape.
+    #
+    # PER-KEY VERDICTS, because note_info is NOT the failure-free logging tool
+    # it looks like: _ending_label_owed refuses precisely the ending-label key
+    # that a multi-note turn tends to finish on. A batch carrying that key
+    # alongside a real answer can therefore be half-written, and collapsing
+    # that to one ok/failed would either discard the answer or claim the label
+    # landed. The key is never spelled here — see the guard, which reads it off
+    # the template's `records_the_ending` declaration.
+    if name == "note_info" and "notes" in arguments:
+        return _run_note_batch(memory, arguments, objective)
+
+    # Read BEFORE the dispatch below, because `missing` is what it tests and
+    # the tool about to run can change it.
+    _owed_label = _ending_label_owed(objective, memory, name, arguments)
     field = _tool_field(objective, name)
     verdict, gate, gate_value = gate_state(objective, memory, field)
     if verdict is GateVerdict.PENDING and field is not None and gate is not None:
@@ -976,6 +1114,31 @@ def run_tool(name: str, memory: CallMemory, arguments: dict[str, Any],
             f"does not apply",
             f"nothing on {field.name}. Do not ask for it.",
         )
+    elif _owed_label:
+        # ── THE LABEL IS NOT A WAY PAST A QUESTION ──────────────────────────
+        # A REFUSAL, NOT A HOLD, and this is the one write on the call where
+        # that is the right shape. _defer_save holds a value because the caller
+        # said it and discarding a real answer is what this project pays for.
+        # Nobody said this one: it is the model's own summary, and holding it
+        # would apply a verdict formed before the call finished to a call that
+        # then went differently. call-20260902-2005 logged `unresolved` at
+        # 20:06:15 out of three failed tool calls in a row, and at 20:07:30 the
+        # identity landed, the held branch and waitlist flushed behind it, and
+        # the call resolved COMPLETE. Replaying that label would have stamped
+        # `unresolved` on a call that worked.
+        #
+        # RECORDED, because a guard that fires invisibly is this codebase's
+        # recurring defect and because this one is the ordering evidence: an
+        # artifact with entries here is a call where the model tried to stop
+        # working before it was done, whether or not it recovered.
+        _label = str(arguments.get("value") or "")
+        _append(memory, "ending_label_refusals",
+                {"value": _label, "owed": list(_owed_label)})
+        result = _reject(
+            f"REJECTED {_label!r}: the call is not finished — "
+            f"{', '.join(_owed_label)} still unrecorded",
+            f"{_owed_label[0]} first: ask for it, get its tool to succeed. "
+            f"The label goes last.")
     else:
         # ── THE CALL ITSELF CAN BE MALFORMED ────────────────────────────────
         # `impl(memory, **arguments)` splats whatever the model sent straight

@@ -186,6 +186,27 @@ class Settings(BaseSettings):
     # real calls rather than in advance.
     realtime_drain_barge_in: bool = True
 
+    # ── The drain barge-in's acoustic bar ────────────────────────────────────
+    #
+    # A CLINIC IS NOT QUIET. call-20260903-2017 cut the greeting 3.16s early on
+    # ONE 20ms frame at 0.0479 against the flat 0.020 echo floor — distant
+    # clinic voices (patients arriving, another call), not a person talking
+    # over us. Two conditions, BOTH required, before audio the caller is still
+    # hearing may be cleared:
+    #
+    # realtime_drain_floor          the LEVEL a frame must reach. Near-mic
+    #                               speech measures 0.079-0.240 on the calls
+    #                               the echo floor was calibrated on;
+    #                               far-field clinic chatter lands 0.02-0.055.
+    #                               0.06 sits between with margin both ways.
+    # realtime_drain_min_voiced_ms  how long that level must SUSTAIN. A clap, a
+    #                               door, one loud word from across the room are
+    #                               bursts; a person interrupting is a sentence.
+    #                               300ms of consecutive frames is the floor of
+    #                               a real interruption.
+    realtime_drain_floor: float = 0.060
+    realtime_drain_min_voiced_ms: int = 300
+
     # ── The ask budget ───────────────────────────────────────────────────────
     # Two ceilings, because there are two ways a call fails to end and they are
     # not the same failure.
@@ -409,6 +430,20 @@ class Settings(BaseSettings):
     # eagerness=high is the untried variant and the honest next experiment,
     # but one variable at a time.
     realtime_turn_detection: str = "server_vad"
+
+    # WHETHER OPENAI'S SERVER MAY CANCEL AN IN-FLIGHT RESPONSE ON ITS OWN.
+    # NOW FALSE, AND THE REASON IS A TRAILING "AAHHH". With interrupt_response
+    # True (the old default), the server cancels the agent whenever its VAD
+    # fires during generation — and a VAD cannot tell a caller interrupting
+    # from a caller trailing off ("...yeah, aahhh"), a breath, or a background
+    # voice. That clipped the agent's final words on real calls. From here the
+    # ONLY interrupt during generation is ours: the speech_started handler in
+    # realtime_worker, which applies the same acoustic bar as the drain path
+    # (a frame at realtime_drain_floor or better) before spending a cancel.
+    # Barge-in stays ON — the caller can still cut in — it is just our gated
+    # hand on the switch instead of the server's unconditional one.
+    realtime_interrupt_response: bool = False
+
     # server_vad only: silence after the caller stops before a response starts.
     # Additive dead time on every turn, but NOT the whole gap and not the
     # dominant term. 360ms cut people off mid-sentence; 550ms was the

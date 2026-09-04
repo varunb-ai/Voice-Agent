@@ -26,8 +26,8 @@ if TYPE_CHECKING:                    # pragma: no cover - typing only
 
 from agents.voice import backchannel
 from agents.voice.audio import _audio_carried_nothing, _SILENT_AUDIO_RMS, _audio_was_silent
-from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, is_hard_refusal, _is_location_ask, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
-from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _spoken_farewell, is_hold_request, _create_response, _RETIRED_VOCAB_TEXT, _resolve_deferred_save
+from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, is_hard_refusal, _is_location_ask, _note_name_heard, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
+from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _gave_name_and_dob, _gave_own_detail, _said_not_a_patient, _detail_left_bare, _spoken_farewell, _announced_an_ask, is_hold_request, _create_response, closing_directive, _RETIRED_VOCAB_TEXT, _resolve_deferred_save
 from agents.voice.objectives import AnswerKind, clauses as _clauses, expected_answers, norm_quotes as _norm_quotes, sentences as _sentences
 from core.config import settings
 from core.models import TranscriptTurn
@@ -65,12 +65,20 @@ _ACK_WORDS = (r"hello|hullo|hi|hey|ok|okay|sure|right|alright|"
 # ACKNOWLEDGEMENT ONLY, and these stay filler even when a yes/no answer is
 # what we asked for. "Mm-hm" to "are you accepting new patients?" is an
 # affirmative in real speech, and it is ALSO the exact text of our own
-# backchannel clips — mm-hm, okay, right, sure — coming back up the line off a
-# speakerphone. _BACKCHANNEL_ECHO_MARGIN_S says why that cannot be told apart
-# after the fact: "There would be no way to tell our own echo from a real
-# backchannel". Letting one of those four strings satisfy a field would let the
-# agent answer its own question. So the affirmative set below is the EXPLICIT
-# one only.
+# backchannel clips coming back up the line off a speakerphone.
+# _BACKCHANNEL_ECHO_MARGIN_S says why that cannot be told apart after the fact:
+# "There would be no way to tell our own echo from a real backchannel". Letting
+# one of those strings satisfy a field would let the agent answer its own
+# question. So the affirmative set below is the EXPLICIT one only.
+#
+# THE CLIP POOL IS NARROWER THAN THIS LIST AND THE LIST STAYS WIDE ANYWAY.
+# This used to read "mm-hm, okay, right, sure", naming the pool as it stood;
+# make_backchannels.TOKENS is now the two nasal tokens only (mm-hm, mm) because
+# a lexical token can be heard as agreeing to something. The words stay in
+# `_ACK_WORDS` regardless — they are what a REAL callee says, and this list is
+# about judging their turns, not about what we play. Keep the two questions
+# apart: narrowing the pool is a speaking decision, and narrowing this would be
+# a listening one.
 _ACK_REPLY = re.compile(rf"^(?:\W*(?:{_ACK_WORDS})\W*)+$", re.I)
 
 # A bare affirmative, possibly padded with acknowledgements ("Yes, okay."). The
@@ -196,13 +204,117 @@ _CUT_SHORT_MS = 1500
 # How long the caller must be mid-utterance before a listener would make a
 # noise. Under ~2s a person is still just listening; past it, silence starts to
 # read as absence. Deliberately conservative: a badly-timed "mm-hm" is worse
-# than none, and this fires on elapsed speech rather than on a detected pause
-# because the pause is not observable from the events we get.
-_BACKCHANNEL_AFTER_S = 2.8
+# than none.
+#
+# NECESSARY, NOT SUFFICIENT. This used to be the whole test, and the comment
+# here said the pause "is not observable from the events we get" — true of the
+# events and false of the audio, which this process already has. See
+# _BACKCHANNEL_PAUSE_MIN_S.
+#
+# RAISED 2.8 -> 4.5 on 2026-09-03 after call-20260903-1807. Five clips fired on
+# that call, all inside the pause window and all technically correct, and the
+# callee still heard them as hiccups. THE LOG CANNOT ADJUDICATE IT — the
+# transcript line is written when transcription completes, which lags the
+# audio, so "the clip printed before their turn" is not evidence it landed at
+# the end of it. What the log DOES show is the shape: every one fired after
+# 2.9-4.0s of speech, i.e. on short answers, where the caller is delivering one
+# fact and a listening noise has nothing to listen to.
+#
+# 4.5s keeps the feature for what it was built for — the caller explaining at
+# length, where silence from us reads as an empty line — and gives up the
+# marginal case rather than defending it. Set REALTIME_BACKCHANNELS=false to
+# switch it off entirely; that is the zero-risk lever if they still intrude.
+#
+# 6.5, RAISED FROM 4.5 ON THE CLIENT'S READ. The log showed backchannels after
+# 6-8s of speech on short answers ("yes, we do have a waitlist"), which is
+# listening-theatre on a turn that did not need it. A backchannel earns its
+# place when the receptionist is genuinely explaining — a long hold, a
+# waitlist rundown — not on every competent sentence. 6.5s of speech AND an
+# interior gap is a real explanation; 4.5s was an ordinary answer.
+_BACKCHANNEL_AFTER_S = 6.5
 
 # At most one per caller utterance, and never twice inside this window — two in
 # quick succession is a tic, not listening.
 _BACKCHANNEL_COOLDOWN_S = 9.0
+
+
+# ── The gap the clip has to land in ──────────────────────────────────────────
+# THE SECOND HALF OF THE TEST, and the elapsed timer above is worthless without
+# it. On call-20260903-1422 all three clips fired at 3.0-3.2s into the caller's
+# turn — the timer expiring — with no question asked about whether she was
+# between words or mid-syllable. Two of the three landed inside one. A "mm-hm"
+# through the middle of a word is not listening, it is an interruption, and it
+# is the thing a person never does.
+#
+# So: they must have been speaking long enough (above) AND be in a gap right
+# now. A caller who runs on without drawing breath gets no clip at all until
+# their first natural lull, which is the correct behaviour and not a
+# degradation — the alternative is talking over them.
+#
+# LOWER BOUND — long enough to be a breath or a comma rather than the closure
+# before a plosive. Stops and affricates ("t", "k", "p") carry 40-80ms of near
+# silence inside a word; 150ms is clear of all of them.
+#
+# RAISED 0.15 -> 0.25 on 2026-09-03. 150ms clears a plosive closure, which is
+# what it was chosen for, but it does NOT clear an ordinary gap between words —
+# so a caller in full flow still presented gaps this wide and got a clip
+# through the middle of their sentence. The callee's report was exactly that:
+# "it should come when the speaker gives a pause, not when they are
+# continuously speaking." 250ms is a pause someone is taking, not a gap between
+# two words, and it narrows the window to [0.25, 0.32] against the VAD's 400ms
+# — deliberately tight, because a clip that never fires is the safe failure and
+# one that lands mid-word is not.
+_BACKCHANNEL_PAUSE_MIN_S = 0.25
+
+# UPPER BOUND — AND THIS ONE IS DERIVED, not chosen. OpenAI's server VAD ends
+# the turn after `realtime_silence_ms` of silence (400ms, and the measured
+# `vad->resp` stage on every call is 0.43-0.49s, which is that plus transport).
+# A gap longer than that is not a pause inside a turn, it is the END of the
+# turn: the caller has finished, a real response is already being created, and
+# our "mm-hm" would play into the reply rather than under their speech.
+#
+# Held one notch below the VAD's own figure rather than at it. Our clock reads
+# frames as they arrive over Twilio and OpenAI reads its own copy, so the two
+# measurements of the same gap differ by the transport jitter between them;
+# spending that margin here buys nothing and risks landing on the boundary.
+_BACKCHANNEL_PAUSE_MAX_S = max(
+    _BACKCHANNEL_PAUSE_MIN_S + 0.05,
+    settings.realtime_silence_ms / 1000.0 - 0.08)
+
+
+# How often the silence watchdog looks while a clip is pending.
+#
+# THE POLL PERIOD IS PART OF THE GATE. With the pause window at [0.25, 0.32]
+# (0.07s wide, after the 0.15->0.25 raise), a half-second tick would miss every
+# gap, and the old 100ms tick still only lands inside roughly two-thirds of
+# them. 50ms puts a look inside every qualifying gap.
+#
+# NARROWED TO THE WINDOW WHERE IT CAN MATTER, deliberately, rather than
+# speeding the loop up for the whole call. It applies only while the caller is
+# mid-utterance and a clip is still owed for it — bounded by
+# _backchannel_done_this_utterance and the cooldown — so nothing else in the
+# watchdog runs materially more often than it does today. Every other check in
+# that loop is a threshold on elapsed time or a one-shot flag, so a faster tick
+# cannot change what any of them decides, only when it notices.
+_BACKCHANNEL_TICK_S = 0.05
+
+_WATCHDOG_TICK_S = 0.5
+
+
+def _watchdog_tick_s(sess: "RealtimeSession") -> float:
+    """How long the watchdog may sleep before it has to look again.
+
+    A function rather than a constant because the answer depends on whether a
+    backchannel is currently pending: see _BACKCHANNEL_TICK_S for why the poll
+    period is part of the gate rather than an implementation detail of the
+    loop.
+    """
+    if (settings.realtime_backchannels
+            and sess._caller_speaking_since is not None
+            and not sess._backchannel_done_this_utterance
+            and not sess.done):
+        return _BACKCHANNEL_TICK_S
+    return _WATCHDOG_TICK_S
 
 
 # How long after a backchannel finishes playing its echo may still arrive back
@@ -820,6 +932,45 @@ _HOLD_GRACE_S = 45.0
 
 _MAX_SILENCE_PROMPTS = 2
 
+
+# How long a close deferred as "spoken" waits for a turn that may never come.
+#
+# THE OTHER END OF THE HOLD. _decide_close stops the goodbye stacking on the
+# agent's own turn by waiting for the caller; if the caller simply says nothing
+# back, that wait has to end somewhere or the change trades one closing defect
+# for a longer one.
+#
+# NOT _SILENCE_PROMPT_AFTER, and shorter than it deliberately, because the two
+# silences are not the same silence. Seven seconds is thinking room for someone
+# who has been ASKED something. Nobody has been asked anything here — the
+# objective is complete, we have answered them, and the only thing left is to
+# say goodbye. So this fires first, and what it fires is the close rather than
+# "are you still with me?", which is the wrong sentence about a call that is
+# already over. Same correction the padding chase made against this watchdog's
+# other silence, one guard over.
+#
+# ONLY for the "spoken" deferral. "ours" and "theirs" both have a question on
+# the table and somebody who owes a turn, which is exactly the silence the
+# prompt budget below is right about.
+_DEFERRED_CLOSE_WAIT_S = 4.5
+
+# How long a promised question may go unasked before the line is chased.
+#
+# WELL UNDER _SILENCE_PROMPT_AFTER, and that gap is the point. The silence
+# watchdog waits seven seconds because someone who has just been asked
+# something is usually thinking. Nobody is thinking here: they were told a
+# question was coming and given nothing to answer, so every one of those seven
+# seconds is dead air with no one on either end of it. Measured from the moment
+# the agent's audio finished PLAYING (see _agent_quiet_since), not from
+# response.done, so this is 2.5s of real silence on the wire.
+_PADDING_PROMPT_AFTER = 2.5
+
+# Bounded for the reason every recovery here is bounded: the response this
+# creates can be padded exactly the way the one that caused the debt was, and
+# an unbounded chase for a question the model will not ask is a livelock. Two,
+# then the artifact records that the caller never got it.
+_MAX_PADDING_NUDGES = 2
+
 async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                             done_event: asyncio.Event,
                             twilio_ws=None) -> None:
@@ -836,7 +987,7 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
     the absence of events.
     """
     while not done_event.is_set():
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(_watchdog_tick_s(sess))
 
         # ── Backchannel ────────────────────────────────────────────────────
         # Owned here because it is the only thing that runs BETWEEN events: no
@@ -856,8 +1007,33 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                 and sess.stream_sid and twilio_ws is not None
                 and time.time() - _spk >= _BACKCHANNEL_AFTER_S
                 and time.time() - sess._last_backchannel_at >= _BACKCHANNEL_COOLDOWN_S):
-            _payload = backchannel.pick(settings.realtime_voice,
-                                        exclude=sess._last_backchannel_clip)
+            # ── ARE THEY BETWEEN WORDS RIGHT NOW ────────────────────────────
+            # Everything above says a clip is DUE. This says whether it may go
+            # out yet, and it is checked here — immediately before the send —
+            # rather than folded into the condition above so the two questions
+            # stay separable in the log: held is not the same as not due, and
+            # only one of them is a number worth counting.
+            #
+            # None means no clean inbound frame has been measured, which is not
+            # a gap. See caller_lull_s: an unmeasured line must not read as a
+            # quiet one.
+            #
+            # HELD, NOT SPENT, and NOT `continue`. Nothing is marked done and
+            # nothing is charged to the cooldown, so the next tick tries again
+            # — the clip stays owed for this utterance until they draw breath
+            # or the utterance ends. Skipping the rest of the loop body would
+            # be a different change entirely: this tick runs at 100ms while
+            # they speak, and the claimed-done, sign-off, owed-substance and
+            # goodbye-retry checks below all have to keep running through it.
+            _lull = sess.caller_lull_s()
+            _in_gap = (_lull is not None
+                       and _BACKCHANNEL_PAUSE_MIN_S <= _lull
+                       <= _BACKCHANNEL_PAUSE_MAX_S)
+            if not _in_gap:
+                sess._backchannels_held += 1
+            _payload = (backchannel.pick(settings.realtime_voice,
+                                         exclude=sess._last_backchannel_clip)
+                        if _in_gap else None)
             # None means no clips are installed for this voice; the feature is
             # simply off, which is the behaviour that already existed.
             if _payload:
@@ -875,8 +1051,12 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                         "event": "media", "streamSid": sess.stream_sid,
                         "media": {"payload": _payload},
                     }))
-                    print(f"[Realtime] 👂 backchannel while they talk "
-                          f"({time.time() - _spk:.1f}s in)", flush=True)
+                    print(f"[Realtime] 👂 backchannel in the gap after "
+                          f"{time.time() - _spk:.1f}s of speech "
+                          f"({(_lull or 0.0) * 1000:.0f}ms since their last word"
+                          + (f", held {sess._backchannels_held}x"
+                             if sess._backchannels_held else "") + ")",
+                          flush=True)
                 except Exception as e:
                     log.warning("[Realtime] backchannel send failed: %s", e)
 
@@ -1039,6 +1219,128 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
         # doing it. See _HOLD_GRACE_S.
         if time.time() < sess._hold_until:
             continue
+
+        # ── PROMISED A QUESTION, ASKED NOTHING ──────────────────────────────
+        # Tool-call padding: "let me just ask one more thing", then a tool
+        # call, then nothing. The caller is not thinking about an answer
+        # because they were not given a question, so the seven-second silence
+        # budget below is measuring the wrong kind of quiet — see
+        # _PADDING_PROMPT_AFTER and _announced_an_ask.
+        #
+        # BEFORE the silence prompt, deliberately. Both fire on the same
+        # `quiet_since`, and "are you still with me?" is the wrong sentence
+        # here for the same reason it was wrong on call-20260820-1421: the line
+        # is not the problem, the missing question is.
+        # A PENDING CLOSE STANDS THIS DOWN, exactly as it stands down the
+        # sign-off nudge beside it. _close_after_response and
+        # _close_when_answered are the two ways the objective path says "this
+        # call is ending, just not in this event"; neither has set sess.done
+        # yet, so the check above cannot see them. On call-20260902-2207 the
+        # close was deferred on "Would you like me to add you?" and the agent's
+        # reply armed a padding debt - chasing it would have asked a question
+        # into a call that was closing correctly, which is the same error the
+        # sign-off nudge was given these two flags for.
+        _padding = sess._padding_owed
+        if (_padding and not sess._response_active
+                and not sess._close_after_response
+                and not sess._close_when_answered
+                and time.time() - quiet_since >= _PADDING_PROMPT_AFTER):
+            _silent_for = round(time.time() - quiet_since, 2)
+            # THE EXIT, checked here as well as after each chase, because a
+            # debt still standing when the cap is reached would otherwise be
+            # retried on every tick for the rest of the call.
+            if sess._padding_nudges >= _MAX_PADDING_NUDGES:
+                sess._padding_owed = ""
+                sess._padding_directive_sent = False
+                sess.tool_call_padding.append(
+                    {"said": _padding[:160], "silent_s": _silent_for,
+                     "outcome": "abandoned"})
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                      f"⚠️  ANNOUNCED QUESTION ABANDONED "
+                      f"({sess._padding_nudges} chases spent) — the caller was "
+                      f"promised a question and never got one", flush=True)
+                continue
+            if not sess._padding_directive_sent:
+                sess._padding_directive_sent = True
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": (
+                                 "(system: you told them you were about to "
+                                 "ask something and then said nothing. They "
+                                 "are waiting on a question that never came. "
+                                 "Ask it now, in one short sentence, and "
+                                 "nothing else. Do not apologise, do not "
+                                 "thank them again, do not re-introduce "
+                                 "yourself.)")}]},
+                }))
+            # STATE CHANGES AFTER THE OPERATION THAT DECIDES SUCCESS. The
+            # owed-substance recovery beside this one shipped the other way
+            # round and printed "saying it now" for a response that was
+            # refused and never created; the debt is cleared only once
+            # something is actually on its way.
+            if await _create_response(oai_ws, sess, why="announced ask, none made",
+                                      allow_when_vad_pending=True):
+                sess._padding_owed = ""
+                sess._padding_directive_sent = False
+                sess._padding_nudges += 1
+                sess.tool_call_padding.append(
+                    {"said": _padding[:160], "silent_s": _silent_for,
+                     "outcome": "chased"})
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                      f"❓ PROMISED A QUESTION, ASKED NONE ({_silent_for:.1f}s "
+                      f"of silence) — asking for it now: {_padding[:60]!r}",
+                      flush=True)
+            continue
+
+        # ── A CLOSE HELD FOR A TURN THAT NEVER CAME ─────────────────────────
+        # _decide_close's "spoken" branch stops the goodbye landing on top of
+        # the agent's own finished turn by waiting for the caller. Almost
+        # always they say "okay, no problem" and the re-arm fires. When they do
+        # not, this is the other end of that wait — without it the hold is
+        # unbounded and the next thing the caller hears is the watchdog asking
+        # whether they are still there, about a call that is already complete.
+        #
+        # BEFORE the silence prompt and on a shorter clock, so it is this that
+        # fires rather than that. See _DEFERRED_CLOSE_WAIT_S for why the two
+        # silences are not the same silence.
+        #
+        # ONLY the "spoken" deferral: the other two have a question on the
+        # table and somebody who owes a turn.
+        if (sess._close_when_answered
+                and sess._close_deferred_reason == "spoken"
+                and not sess._response_active
+                and time.time() - quiet_since >= _DEFERRED_CLOSE_WAIT_S):
+            _last_agent = next((t.text for t in reversed(sess.turns)
+                                if t.role == "agent" and t.text), "")
+            # STATE FIRST HERE, unlike the recoveries above, and for the
+            # opposite reason: those must not claim success before the create
+            # that decides it, while this must not re-enter on the next tick
+            # if the create is refused. A close that fires twice says goodbye
+            # twice, which is the defect this whole branch exists to prevent.
+            sess._close_when_answered = False
+            sess._close_deferred_reason = ""
+            sess._agent_quiet_since = None
+            sess.done = True
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏁 CLOSE HELD "
+                  f"{time.time() - quiet_since:.1f}s FOR A REPLY THAT DID NOT "
+                  f"COME — closing now rather than asking whether they are "
+                  f"still there", flush=True)
+            try:
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text",
+                                          "text": closing_directive(
+                                              _last_agent)}]},
+                }))
+                await _create_response(oai_ws, sess, why="deferred close",
+                                       allow_when_done=True,
+                                       allow_when_vad_pending=True)
+            except Exception:
+                return
+            continue
+
         # Nothing has been said yet, so the greeting is the only thing they have
         # heard and there is nothing for them to be thinking about.
         heard_from_them = any(t.role == "caller" and t.text
@@ -1190,6 +1492,7 @@ def _rearm_close_if_answered(sess: "RealtimeSession", ts: str = "") -> bool:
     if not sess._close_when_answered or sess.done:
         return False
     sess._close_when_answered = False
+    sess._close_deferred_reason = ""
     sess._close_after_response = True
     print(f"[{ts}] ▶️  CLOSE RE-ARMED — they answered; closing after the "
           f"agent replies", flush=True)
@@ -1557,6 +1860,28 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         # themselves — this is the event the 1.5s wait was standing in for.
         await _resolve_deferred_save(sess, oai_ws)
 
+        # ── THEY NAMED A DOCTOR AND IT IS NOT OURS ──────────────────────────
+        # RECORD ONLY. The active check lives inside save_doctor_identity's
+        # grounding and therefore stops looking the moment identity is
+        # CONFIRMED — so call-20260903-1126 filed name_mismatches: null on a
+        # call where the receptionist said "Dr. Abel" twice against our "Dr.
+        # Pediatric". Nothing is asked of the call here (see _note_name_heard);
+        # this exists so the ARTIFACT shows the input was wrong.
+        # "not challenged" WAS READ AS "the agent let it go", AND ON
+        # call-20260904-1013 IT HAD NOT. This line fired at 10:14:34 and the
+        # agent spelled the surname out at 10:14:42 — the very next turn, no
+        # other agent turn between them — but the wording sent a reader looking
+        # for a workflow defect that was not there. It describes what THIS call
+        # site does, so say that: the recorder sends no directive, which is not
+        # a claim about what the agent goes on to do.
+        _heard_name = _note_name_heard(sess, text)
+        if _heard_name:
+            print(f"[{ts}] 📛 THEY SAID Dr. {_heard_name!r} — our record says "
+                  f"{_our_surname(sess)!r}. Recorded for the artifact; no "
+                  f"directive sent from here — the agent may still raise it "
+                  f"on its own turn. Check the doctor field on this row.",
+                  flush=True)
+
         # THEY ANSWERED THE QUESTION THE CLOSE WAS DEFERRED FOR.
         _rearm_close_if_answered(sess, ts)
 
@@ -1676,6 +2001,12 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
     # transcript must not claim it was said. Kept out of the way in
     # dropped_second_items so the artifact still shows what was suppressed.
     _item = msg.get("item_id") or ""
+    # HOISTED so the turn walk further down can see it. A RELEASED second item
+    # becomes a turn of its own — correctly, the caller heard it — and that
+    # makes the agent turn directly behind it the model's OWN first item rather
+    # than the last thing it said to them. Every guard down there that reasons
+    # about "the previous agent turn" needs to know the difference.
+    _released = False
     if _item and _item in sess._muted_items:
         _dropped = (msg.get("transcript") or _agent_text_buf).strip()
         if _dropped:
@@ -1838,8 +2169,58 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                              "need FROM THEM instead, concretely, in "
                              "one short sentence.)")}]},
             }))
-        _prev_agent = next((t.text for t in reversed(sess.turns)
-                            if t.role == "agent" and t.text), "")
+        # THE PREVIOUS AGENT TURN, AND HOW FAR BACK IT IS. One walk for both,
+        # because the second question only makes sense about the first: "did
+        # the model just repeat itself" and "is the disclaimer it said last
+        # time still standing" are the same walk with different verdicts.
+        #
+        # BEFORE add_turn, deliberately — `text` is not in sess.turns yet, so
+        # `_prev_agent` is the turn before this one rather than this one.
+        # Placeholders and blanks are skipped: "[...]" is a caller transcript
+        # still in flight, and counting it as a turn of theirs would age the
+        # disclaimer on evidence that has not arrived.
+        _prev_agent = ""
+        _callers_since = 0
+        # ── A RELEASED SECOND ITEM IS NOT ITS OWN PREVIOUS TURN ─────────────
+        # The model emitted two spoken items in one response; the second was
+        # held, judged to carry real substance, and played. It is a turn — the
+        # caller heard it — but the thing standing behind it in sess.turns is
+        # the FIRST HALF OF THE SAME BREATH, not the last thing we said to
+        # them. Walking one agent turn further back is what makes every guard
+        # below reason about the conversation instead of about the split.
+        #
+        # call-20260904-0026 is the cost of not doing it. The agent said "Oh,
+        # I'm not a patient here yet — I'm just looking. It's Ingrid Bennett.",
+        # they asked for the date of birth, and the model answered in two items:
+        # "Okay, let me think about how to answer that." then "Sure, it's
+        # November 3, 2000 — ...". CALL CONTEXT's one-turn exception says a
+        # disclaimer spoken in the turn you JUST spoke is still standing, and it
+        # WAS — one caller turn back. But `_prev_agent` resolved to the model's
+        # own filler and `_callers_since` to 0, so `_detail_left_bare` saw a
+        # date of birth handed over with nothing in front of it, recorded
+        # bare_pii_details, and injected "tell them now that you are not
+        # registered with them yet". The model obeyed on the next turn — which
+        # was a hold — and said "Okay, I'm not registered with you yet, and
+        # I'll wait while you check." The model had followed the rule exactly
+        # and the guard punished it for it.
+        _skip_agent = 1 if _released else 0
+        for _t in reversed(sess.turns):
+            _txt = (_t.text or "").strip()
+            if not _txt or _txt == "[...]":
+                continue
+            if _t.role == "agent":
+                if _skip_agent:
+                    _skip_agent -= 1
+                    continue
+                _prev_agent = _t.text
+                break
+            _callers_since += 1
+        # Exactly one turn of theirs in between is them asking the follow-up:
+        # "name?" -> we answer -> "and date of birth?". Zero means we spoke
+        # twice running, which is also the same breath. Two or more, or none
+        # at all with no previous agent turn, and whatever we said last time
+        # has been overtaken.
+        _same_exchange = bool(_prev_agent) and _callers_since <= 1
         _norm = lambda s: re.sub(r"[^a-z0-9 ]", "",
                                  s.lower()).strip()
         if (_prev_agent and _norm(text) == _norm(_prev_agent)
@@ -1859,6 +2240,130 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                              "say nothing and wait.)")}]},
             }))
         sess.add_turn("agent", text)
+
+        # ── Name AND date of birth, in one breath ────────────────────────────
+        # THE EHR GUARD, ENFORCED. The prompt states this three separate ways
+        # ("asked your name, you say your name and stop"; "a name and a date of
+        # birth arriving together is the single event this whole section exists
+        # to prevent") and it held on NONE of the nine calls where a
+        # receptionist asked for intake details — every one of them a compound
+        # ask, "can I get your first and last name and your date of birth?",
+        # which the prompt never gave a rule for.
+        #
+        # THIS CANNOT UNSAY THE TURN, and the honesty about that is the same
+        # one _back_to_back_asks carries: the audio is on the line by the time
+        # the transcript arrives. What it can do is stop the run continuing and
+        # make the failure visible — before this, nine calls carried it and no
+        # artifact field recorded any of them.
+        #
+        # EVERY occurrence is recorded; the directive goes ONCE, like the
+        # self-repeat nudge. A guard that re-injects on every turn spends the
+        # call arguing with itself.
+        if _gave_name_and_dob(text):
+            sess.compound_pii_dumps.append(
+                {"said": text.strip()[:160], "at": ts})
+            print(f"\n[{ts}] 🩺 NAME + DOB IN ONE TURN — the pair is enough "
+                  f"to start a record for a person who does not exist",
+                  flush=True)
+            if not sess._pii_pair_nudged and not sess.done:
+                sess._pii_pair_nudged = True
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": (
+                                 "(system: you just gave your name and your "
+                                 "date of birth in the same turn. They have a "
+                                 "patient record open and the pair is all it "
+                                 "takes to start one. For the rest of this "
+                                 "call: when they ask for several details at "
+                                 "once, answer ONLY the first one, with its "
+                                 "disclaimer, and stop. Do not repeat what you "
+                                 "have already given.)")}]},
+                }))
+
+        # ── The disclaimer, said twice running ───────────────────────────────
+        # THE OTHER HALF OF THE DOUBLING, and the compound-dump guard above is
+        # silent on it by design. call-20260903-1422:
+        #
+        #   14:23:32  "I haven't registered with you yet, but my name is
+        #              Ingrid Bennett."
+        #   14:23:41  caller: "Okay, and your date of birth is?"
+        #   14:23:42  "I'm not in your system yet, but it's November 3, 2000."
+        #
+        # Two details, two TURNS, the caller between them — everything the
+        # compound guard asks for, correctly answered, and the audio still
+        # sounds like a recording. The same scripted construction twice inside
+        # ten seconds is the tell, not the pair.
+        #
+        # RECORDED AND NUDGED, NOT REJECTED, and this cannot unsay the turn —
+        # the same honesty _gave_name_and_dob carries. templates.py now teaches
+        # the one-turn exception, so this measures whether that rule holds; a
+        # prompt rule with no number against it is a rule nobody can tell has
+        # stopped working, which is how the intake disclaimer reached nine
+        # calls unnoticed in the first place.
+        if (_said_not_a_patient(text) and _gave_own_detail(text)
+                and _same_exchange and _said_not_a_patient(_prev_agent)):
+            sess.repeated_disclaimers.append(
+                {"said": text.strip()[:160], "after": _prev_agent.strip()[:160],
+                 "at": ts})
+            print(f"[{ts}] 🗣️  DISCLAIMER SAID TWICE RUNNING — the "
+                  f"not-a-patient line was already standing from the turn "
+                  f"before", flush=True)
+            if not sess._disclaimer_repeat_nudged and not sess.done:
+                sess._disclaimer_repeat_nudged = True
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": (
+                                 "(system: you told them you were not "
+                                 "registered with them, and then said it "
+                                 "again in your very next turn. It was still "
+                                 "standing — they heard it seconds ago — and "
+                                 "the same construction twice in a row sounds "
+                                 "like a recording. For the rest of this "
+                                 "call: say that line the FIRST time a detail "
+                                 "is asked for, and if they come straight "
+                                 "back for another one, give it bare and "
+                                 "short. If an exchange about something else "
+                                 "comes in between, say it again.)")}]},
+                }))
+
+        # ── A detail with no disclaimer standing at all ──────────────────────
+        # THE FAILURE THE RELAXATION ABOVE COULD OTHERWISE OPEN, and the one
+        # nothing in this repo has ever looked for. The rule "never hand the
+        # detail over bare" has always been prose, stated three separate ways,
+        # and prose is what failed on all nine calls where a receptionist ran
+        # intake. Narrowing it by one turn without adding this check would be
+        # trading a rule nobody enforced for a smaller rule nobody enforced.
+        #
+        # This is the one of the two that is a SAFETY event rather than an
+        # audio one: the person on the other end has a record open, and a name
+        # or a date of birth arriving with nothing in front of it is what they
+        # type into it.
+        if _detail_left_bare(text, _prev_agent, _same_exchange):
+            sess.bare_pii_details.append(
+                {"said": text.strip()[:160], "at": ts,
+                 "prev_agent": _prev_agent.strip()[:160],
+                 "callers_since": _callers_since})
+            print(f"\n[{ts}] 🩺 DETAIL GIVEN BARE — no not-a-patient line was "
+                  f"standing; they have a record open in front of them",
+                  flush=True)
+            if not sess._bare_detail_nudged and not sess.done:
+                sess._bare_detail_nudged = True
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             "content": [{"type": "input_text", "text": (
+                                 "(system: you just gave one of your own "
+                                 "details with nothing in front of it. They "
+                                 "have a patient record open and that is what "
+                                 "they type into it. Tell them now, in one "
+                                 "short sentence, that you are not registered "
+                                 "with them yet — and for the rest of this "
+                                 "call that line goes in front of any detail "
+                                 "unless you said it in the turn immediately "
+                                 "before.)")}]},
+                }))
 
         # ── The name, spelled out ────────────────────────────────────────────
         # Recorded when it HAPPENS, not when it is asked for. `_name_spelled_at`
@@ -1905,6 +2410,29 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         if _spoken_farewell(text) and not sess.done:
             sess._farewell_at = time.time()
             sess._farewell_said = text
+
+        # ── Promised a question and asked none ──────────────────────────────
+        # DISARM FIRST, ARM SECOND, and the order is the whole guard. Reaching
+        # this line means the agent has just spoken, so whatever it announced
+        # last time has been followed by speech and is no longer owed — even
+        # when this turn is itself another announcement, which is the case that
+        # would otherwise make the debt look older than it is and fire the
+        # recovery a beat too early.
+        #
+        # Nothing else here decides anything. Whether the announcement was kept
+        # is a question about the silence after it, and the watchdog is the
+        # only thing that can see silence.
+        sess._padding_owed = ""
+        if (not sess.done and _announced_an_ask(text)
+                and not _is_objective_ask(text, sess)):
+            # NOT AN ASK BY CONTENT, checked with the same predicate the ask
+            # budget uses. "I need to check which office she's at" announces
+            # and asks in one breath — a statement-form request is a request,
+            # and treating it as padding would chase the agent for a question
+            # it had already put to them.
+            sess._padding_owed = text
+            print(f"[{ts}] ⏳ ANNOUNCED A QUESTION — nothing asked yet; "
+                  f"watching the line", flush=True)
 
         # Enforce the exit condition the prompt never had.
         #
@@ -2168,18 +2696,26 @@ __all__ = [
     "_BACKCHANNEL_AFTER_S",
     "_BACKCHANNEL_COOLDOWN_S",
     "_BACKCHANNEL_ECHO_MARGIN_S",
+    "_BACKCHANNEL_PAUSE_MAX_S",
+    "_BACKCHANNEL_PAUSE_MIN_S",
+    "_BACKCHANNEL_TICK_S",
+    "_WATCHDOG_TICK_S",
+    "_watchdog_tick_s",
     "_CUT_SHORT_MS",
+    "_DEFERRED_CLOSE_WAIT_S",
     "_FABRICATION_VOCAB",
     "_HAS_AFFIRM",
     "_HINT_HEADINGS",
     "_HINT_RUN_WORDS",
     "_HOLD_GRACE_S",
+    "_MAX_PADDING_NUDGES",
     "_MAX_SILENCE_PROMPTS",
     "_MAX_VETTING_REASKS",
     "_MIN_REASK_GAP_S",
     "_PATIENT_ASK",
     "_REPAIR_WINDOW_S",
     "_RETIRED_HINT_TEXT",
+    "_PADDING_PROMPT_AFTER",
     "_SILENCE_PROMPT_AFTER",
     "_SILENCE_PROMPT_FIRST",
     "_asks_about_patient",

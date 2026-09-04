@@ -555,9 +555,51 @@ _IDENTITY_PATTERNS: tuple[tuple[IdentityAnswer, "re.Pattern[str]"], ...] = (
         # through ("We have a Dr. Smith. But he's a dermatologist."), which is
         # how people actually say it.
         r"(we|they) (do )?have\b[^?!]{0,40}\bbut\b)\b", re.I)),
+    # ── THE ONE THAT COST 56 REFUSALS ────────────────────────────────────────
+    # `^\W*(yes|...)` anchored the affirmative at the START OF THE STRING, and
+    # a US front desk does not answer a phone that way. It says "Good
+    # afternoon, yes, Dr. Abel is one of our pediatricians here." — greeting
+    # first, answer second — and every one of those reached this function as
+    # None. Measured over 26 realistic confirmations: 17 missed, a 65% miss
+    # rate on the FIRST question every patient_discovery call asks and the gate
+    # every other field hangs off. 56 of the 79 save refusals in the September
+    # corpus are this, in six different calls, and the model's only recovery is
+    # to ask a question the receptionist has already answered.
+    #
+    # THE CORPUS COULD NOT HAVE CAUGHT IT. Every positive fixture in the suite
+    # begins with the affirmative token or is the bare phone idiom "Speaking",
+    # because the fixtures were harvested from this project's own calls and
+    # every callee so far has been a colleague who answers in one word. A
+    # regression corpus cannot contain a phrasing the system has never been
+    # shown; see the held-out corpus added beside those fixtures.
+    #
+    # ONE LEADING SEGMENT, NOT FREE POSITION, and the bound is what makes this
+    # safe. The affirmative may open the FIRST or the SECOND comma-delimited
+    # segment — a greeting is one segment, the answer is the next — so
+    # "Good afternoon, yes" and "Thanks for calling Mercy General, yes" both
+    # reach it while "I asked her and she said yes" (no boundary) does not.
+    # 40 characters is a greeting; a sentence of argument is longer.
+    #
+    # AND A NAMED SUBJECT, which the pronoun forms below could never match:
+    # "Dr. Abel works here", "Dr. Abel sees patients here", "one of our
+    # pediatricians". Note `not (one of )?our` was already in NOT_HERE above —
+    # only the positive was never written. Presence VERBS only, never a bare
+    # "is": "Dr. Smith is a dermatologist" must stay reachable by the
+    # qualified-denial branch rather than being confirmed here.
+    #
+    # Ordering is what keeps all of this safe: WRONG_NUMBER, UNSURE and
+    # NOT_HERE are all tested before this, so a denial that happens to carry a
+    # greeting or a name is claimed by them first, and `_negated_before` is the
+    # backstop underneath.
     (IdentityAnswer.CONFIRMED, re.compile(
-        r"^\W*(yes|yeah|yep|yup)\b|\b(that'?s (us|right|correct|him|her|them)|"
-        r"speaking|this is (he|she|him|her)|you'?ve reached|correct|"
+        rf"^(?:[^,.;:!?]{{0,40}}[,;:]\s*)?{_LEAD_IN}(yes|yeah|yep|yup)\b"
+        r"|\b(that'?s (us|right|correct|him|her|them)|"
+        r"that would be (us|him|her|them)|"
+        r"speaking|this is (he|she|him|her)|correct|"
+        r"you'?(?:ve|re) reached|you have reached|"
+        r"one of (our|ours)|"
+        r"(?:dr\.?|doctor)\s+[\w'-]+(?:'s)?\s+"
+        r"(?:works?|practi[cs]es?|sees?|is here|is in)|"
         r"(he|she|they) (works?|practi[cs]es?) here|"
         r"(he|she|they) (is|are) here)\b", re.I)),
 )
@@ -894,6 +936,25 @@ class Field:
     # that named a queue position and offered a place in it.
     shares_answers_with: tuple = ()
 
+    # THIS FIELD IS THE LABEL ON A FINISHED CALL, not an answer anybody gives.
+    #
+    # Every other field records something the receptionist said. This one
+    # records what the AGENT concluded about the whole call, which makes its
+    # ordering a fact about the script rather than about the conversation: it
+    # can only be true once there is nothing left to collect. The prompt says
+    # so — "the outcome label is the absolute last thing you do" — and the
+    # model ignored it on both calls of 2026-09-02 that had a rejected save
+    # standing.
+    #
+    # Declared here rather than matched by name in tools.py, for the reason
+    # IDENTITY_STATUS_KEY is imported rather than spelled: a guard keyed on the
+    # string "call_outcome" is a guard that stops working the day a template
+    # names its label something else, silently and in the passing direction.
+    #
+    # See premature_ending_label, which is what reads it, and
+    # unenforceable_endings, which checks that something CAN.
+    records_the_ending: bool = False
+
     @property
     def label(self) -> str:
         return self.spoken or self.name.replace("_", " ")
@@ -1216,6 +1277,67 @@ def unwritable_fields(objective: CallObjective) -> tuple:
                  and not f.memory_key.startswith("note_"))
 
 
+def unenforceable_endings(objective: CallObjective) -> tuple:
+    """Ending labels no tool call can be recognised as writing. Empty is healthy.
+
+    THE CHECK THAT KEEPS `premature_ending_label` FROM PASSING BY FINDING
+    NOTHING. That guard is looked up from a `note_info` call, by the key the
+    model sends: it can only fire on a field whose memory_key is `note_<key>`.
+    Mark `records_the_ending` on a field pointed at a save_* key and the guard
+    never matches, never refuses, and never says so — the exact shape of the
+    assertion that passes because it looked for the wrong spelling.
+
+    A field that needs its own save tool one day is welcome to have one; this
+    is what makes adding it a deliberate act rather than a silent omission.
+    """
+    return tuple(f.name for f in objective.fields
+                 if f.records_the_ending
+                 and not f.memory_key.startswith("note_"))
+
+
+def premature_ending_label(objective: CallObjective, memory: _MemoryLike,
+                           memory_key: str) -> tuple:
+    """(the ending-label field this key writes, what the call still owes).
+
+    ``(None, ())`` means the write is not an ending label at all and nothing
+    here has an opinion on it. A field and a NON-EMPTY tuple means the model is
+    stamping how the call ended while the call is not over.
+
+    WHY THIS IS SAFE TO REFUSE WHEN NOTHING ELSE IS. Every other refusal in
+    this system risks discarding something a caller actually said, which is the
+    expensive direction — a wrong row can be found later, a thrown-away answer
+    is indistinguishable from a receptionist who would not say. The ending
+    label is the one value on the call that no caller provides. It is the
+    model's own summary, it can be re-stated at any time, and refusing it costs
+    at most one optional field on a call whose real answers are all recorded.
+    Refusing the BRANCH to enforce an ordering would be the opposite trade.
+
+    WHAT IT BUYS, which is not the label. On call-20260902-2002 the branch save
+    was refused (the caller had said "Notgate", the model wrote "Northgate
+    Clinic"), the model never re-asked, logged the outcome anyway, and said
+    goodbye — and every downstream guard then behaved correctly and hideously:
+    the objective was PARTIAL so the teardown would not hang up, the sign-off
+    guard asked for an escalate, the escalation guard refused it because the
+    branch was still gettable, and the agent came back from the dead nine
+    seconds after its farewell with "I need to clear up one detail". Refusing
+    the label is what stops that cascade at the top, because the label is the
+    model's own signal that it has stopped working the call.
+
+    ENDING FIELDS DO NOT OWE THEMSELVES, and that is not a nicety: a required
+    label would otherwise be in its own `missing` set, refuse its own write on
+    every attempt, and deadlock the objective at PARTIAL forever. Excluding
+    them here means `records_the_ending` and `required` are independent
+    choices, which is what a template author would assume.
+    """
+    field = next((f for f in objective.fields
+                  if f.records_the_ending and f.memory_key == memory_key), None)
+    if field is None:
+        return (None, ())
+    endings = {f.name for f in objective.fields if f.records_the_ending}
+    return (field, tuple(n for n in objective.missing(memory)
+                         if n not in endings))
+
+
 def expected_answers(ask_text: str, objective: CallObjective) -> frozenset:
     """Which answer kinds the caller's reply to this turn may take.
 
@@ -1436,9 +1558,15 @@ def patient_discovery_fields() -> tuple[Field, ...]:
         # is precisely the failure `unwritable_fields` and `invalid_conditions`
         # exist to keep out of this file. Optional, a forgotten write costs one
         # missing label on a call whose real answers are all recorded.
+        #
+        # AND IT IS THE ONE FIELD THAT MAY NOT BE WRITTEN EARLY. `required`
+        # says whether the call needs it; `records_the_ending` says it cannot
+        # be true until the rest of the call is. The two are unrelated and both
+        # apply here — see premature_ending_label for what stopping the early
+        # write actually buys, which is not the label.
         Field(name="call_outcome", memory_key=CALL_OUTCOME_KEY,
               kind=AnswerKind.CHOICE, probe=CALL_OUTCOME_ASK, required=False,
-              states=CALL_OUTCOME_STATES,
+              states=CALL_OUTCOME_STATES, records_the_ending=True,
               spoken="how the call ended"),
     )
 

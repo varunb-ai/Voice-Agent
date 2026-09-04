@@ -19,6 +19,7 @@ import core.bootstrap  # noqa: F401
 
 from core.config import settings
 from core.models import Doctor
+from agents.voice.templates import resolve_specialty, split_doctor_specialty
 import agents.voice.twilio_worker as worker
 
 
@@ -118,12 +119,23 @@ def _warmup() -> None:
         # Realtime API handles STT+LLM+TTS in one WebSocket — nothing to pre-load locally.
         print("  Mode     : OpenAI Realtime API (gpt-realtime-2)")
         # Measured, not aspirational. Agent response latency across live
-        # calls: 3.43s, 2.83s, 1.93s, 2.15s. Cost per completed call:
-        # $0.06-$0.12. The banner used to claim "~300-500ms | ~$0.06/min",
-        # which our own measurements contradict — and it is the first thing
-        # printed on every run, so it is what ends up in a screenshot.
+        # calls: 3.43s, 2.83s, 1.93s, 2.15s. The banner used to claim
+        # "~300-500ms | ~$0.06/min", which our own measurements contradict —
+        # and it is the first thing printed on every run, so it is what ends
+        # up in a screenshot.
+        #
+        # THE COST RANGE MOVED WITH THE SCRIPT, not with the API's pricing.
+        # $0.06-0.12 was measured on the one-field branch templates. Every
+        # response re-reads the whole prompt, so a longer script costs more per
+        # turn AND takes more turns: patient_discovery is ~5,300 tokens and
+        # call-20260902-2207 came to $0.2066 over 130s (18 responses, 130,816
+        # cached text tokens, 98.2% hit rate); the 88s provider_verification
+        # call on 2026-08-26 was $0.169. A banner nobody can trust is worse
+        # than none, and this one is read by whoever is deciding whether to
+        # place a batch.
         print("  Latency  : ~2s agent response (measured 1.9-3.4s)")
-        print("  Cost     : ~$0.06-0.12 per completed call (measured)")
+        print("  Cost     : ~$0.10-0.25 per completed call (measured; "
+              "scales with template length)")
         try:
             import websockets  # noqa: F401
         except ImportError:
@@ -222,8 +234,30 @@ def main() -> None:
     ap.add_argument("--port",     default=8000,   type=int)
     args = ap.parse_args()
 
+    # A SPECIALTY TYPED INTO THE NAME IS RECOVERED, NOT SILENTLY OBEYED.
+    # call-20260903-1126 ran as --doctor "Mark F. Abel Pediatric" with no
+    # --specialty; the surname is the last token, so the agent spent the call
+    # asking for "Dr. Pediatric" while the receptionist kept saying "Dr. Abel".
+    # The name is cleaned for the greeting either way (clean_doctor_name), and
+    # the specialty it was carrying lands in the field that exists for it —
+    # where it becomes the disambiguator rather than nothing.
+    #
+    # SAID OUT LOUD, because a silent repair of the operator's input is how the
+    # same typo gets made on every call in the batch.
+    # Called on the raw string: a leading "Dr." cannot affect a test that only
+    # ever looks at TRAILING tokens, so this needs no second copy of the
+    # title-stripping regex that clean_doctor_name owns.
+    _name, _found = split_doctor_specialty(args.doctor or "")
+    _specialty = resolve_specialty(args.doctor, args.specialty)
+    if _found:
+        print(f"\n  ⚠️  '{_found}' read as a SPECIALTY, not part of the name."
+              f"\n      name → {_name!r}"
+              + (f", specialty → {_found!r}" if not args.specialty else
+                 f"; --specialty {args.specialty!r} kept")
+              + "\n      Pass --specialty next time and leave it out of --doctor.")
+
     doctor = Doctor(doctor_name=args.doctor, hospital_name=args.hospital,
-                    specialization=args.specialty)
+                    specialization=_specialty or None)
 
     print(f"\n  Doctor   : {doctor.doctor_name}")
     if doctor.specialization:

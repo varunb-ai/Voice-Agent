@@ -114,6 +114,7 @@ from agents.voice.grounding import (
     _CLAIMS_SAVED as _CLAIMS_SAVED,
     _claims_saved as _claims_saved,
     _spoken_farewell as _spoken_farewell,
+    _announced_an_ask as _announced_an_ask,
     _HOLD_REQUEST as _HOLD_REQUEST,
     _CALLER_WILL_ACT as _CALLER_WILL_ACT,
     is_hold_request as is_hold_request,
@@ -155,9 +156,15 @@ from agents.voice.turns import (
     _caller_vetted_since as _caller_vetted_since,
     _REPAIR_WINDOW_S as _REPAIR_WINDOW_S,
     _CUT_SHORT_MS as _CUT_SHORT_MS,
+    _DEFERRED_CLOSE_WAIT_S as _DEFERRED_CLOSE_WAIT_S,
     _BACKCHANNEL_AFTER_S as _BACKCHANNEL_AFTER_S,
     _BACKCHANNEL_COOLDOWN_S as _BACKCHANNEL_COOLDOWN_S,
     _BACKCHANNEL_ECHO_MARGIN_S as _BACKCHANNEL_ECHO_MARGIN_S,
+    _BACKCHANNEL_PAUSE_MIN_S as _BACKCHANNEL_PAUSE_MIN_S,
+    _BACKCHANNEL_PAUSE_MAX_S as _BACKCHANNEL_PAUSE_MAX_S,
+    _BACKCHANNEL_TICK_S as _BACKCHANNEL_TICK_S,
+    _WATCHDOG_TICK_S as _WATCHDOG_TICK_S,
+    _watchdog_tick_s as _watchdog_tick_s,
     _MIN_REASK_GAP_S as _MIN_REASK_GAP_S,
     _is_reintroduction as _is_reintroduction,
     _claims_employment as _claims_employment,
@@ -182,6 +189,8 @@ from agents.voice.turns import (
     _SILENCE_PROMPT_AFTER as _SILENCE_PROMPT_AFTER,
     _HOLD_GRACE_S as _HOLD_GRACE_S,
     _MAX_SILENCE_PROMPTS as _MAX_SILENCE_PROMPTS,
+    _PADDING_PROMPT_AFTER as _PADDING_PROMPT_AFTER,
+    _MAX_PADDING_NUDGES as _MAX_PADDING_NUDGES,
     _silence_watchdog,
     _suppress_reply_to as _suppress_reply_to,
     _handle_caller_transcript,
@@ -392,9 +401,53 @@ def _is_own_backchannel_echo(sess: "RealtimeSession", raw: bytes) -> bool:
     the caller is mid-utterance by construction, since a clip only fires
     _BACKCHANNEL_AFTER_S into their turn. The floor alone would run for the
     whole call.
+
+    THE FLOOR IS THE CALLER'S, NOT A CONSTANT. It was `_above_echo_floor`, a
+    flat 0.020 picked against callers measuring 0.079-0.240 — and on
+    call-20260903-1259 the caller's median was 0.0436, a quarter of their
+    speech fell under it, and 402 frames (~8s) were discarded as our own echo.
+    `_above_echo_floor` is deliberately left alone: it answers the DRAIN
+    barge-in's question, which is about the agent's own audio and has nothing
+    to do with how loud this caller is. See `caller_echo_floor`.
     """
     return (time.time() < sess._backchannel_mute_until
-            and not _above_echo_floor(raw))
+            and _frame_rms(raw) < sess.caller_echo_floor())
+
+
+async def _drain_clear(sess, twilio_ws, *, left: float, level: float,
+                       run_ms: float) -> None:
+    """The caller is talking over audio that is STILL PLAYING OUT: clear it.
+
+    Both triggers — the frame loop, which fires the moment the sustained-voice
+    bar is crossed, and the speech_started branch, which catches the case the
+    frame loop misses — land here, so the recording, the logging and the two
+    state resets can never drift apart.
+    """
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+          f"✋ BARGE-IN  : caller interrupted audio still "
+          f"playing out ({left:.2f}s left, "
+          f"level={level:.4f} vs drain floor "
+          f"{settings.realtime_drain_floor}, run={run_ms:.0f}ms)", flush=True)
+    # Recorded so the echo question is settled from real calls.
+    sess.drain_barge_ins.append({
+        "playback_left_s": round(left, 2),
+        "level": round(level, 4),
+        "floor": settings.realtime_drain_floor,
+        "voiced_run_ms": round(run_ms),
+    })
+    _drop_held_items(sess, "the caller interrupted the playout")
+    sess.agent_speaking = False
+    # Nothing is playing now, so nothing may go on WAITING for
+    # it: the hang-up drain and the echo cooldown both read
+    # _playback_ends_at and would otherwise sit out audio that
+    # has been thrown away.
+    sess._playback_ends_at = time.monotonic()
+    try:
+        await twilio_ws.send_text(json.dumps({
+            "event": "clear", "streamSid": sess.stream_sid,
+        }))
+    except Exception:
+        pass
 
 
 # ── Tool schema conversion ────────────────────────────────────────────────────
@@ -650,6 +703,7 @@ async def _open_realtime_session(template) -> tuple:
                     noise_reduction=settings.realtime_noise_reduction,
                     turn_detection=settings.realtime_turn_detection,
                     eagerness=settings.realtime_vad_eagerness,
+                    interrupt_response=settings.realtime_interrupt_response,
                     voice=settings.realtime_voice,
                     silence_ms=settings.realtime_silence_ms,
                     output_format=_effective_output_format(),
@@ -984,6 +1038,25 @@ async def _twilio_to_oai(
                     sess._caller_pcm.append(_oai_bytes)
                     if not sess.listen_enabled.is_set():
                         continue
+                    # HOW LOUD IS THIS CALLER, measured only when nothing of
+                    # ours is audible. Sampled BEFORE the echo guard below and
+                    # gated on both of our own sound sources, so the estimate
+                    # the guard reads can never contain our own echo — which
+                    # would raise the floor exactly when it should be falling.
+                    #
+                    # AND WHEN THEY WERE LAST AUDIBLE, off the same frame and
+                    # the same measurement. The backchannel needs a gap between
+                    # words to land in, and this is the only place in the
+                    # process where a gap is visible at all — OpenAI's events
+                    # mark the start and end of a whole utterance and say
+                    # nothing about its interior. One `_frame_rms` for both, so
+                    # the level estimate and the gap detector can never be
+                    # looking at different numbers.
+                    if (time.time() >= sess._backchannel_mute_until
+                            and not sess.agent_speaking):
+                        _clean_rms = _frame_rms(raw_bytes)
+                        sess.note_caller_frame_rms(_clean_rms)
+                        sess.note_caller_voice_gap(_clean_rms)
                     # Our own backchannel, coming back off a speakerphone.
                     # Energy, not a hard mute: the caller is BY DEFINITION
                     # mid-utterance here (a clip only fires 2.8s into their
@@ -1007,6 +1080,36 @@ async def _twilio_to_oai(
                         if _lvl >= settings.realtime_echo_rms:
                             sess._last_voiced_frame_at = time.monotonic()
                             sess._last_voiced_frame_rms = _lvl
+                        # THE RUN, NOT THE FRAME. The drain barge-in used to
+                        # spend ONE 20ms frame over the echo floor —
+                        # call-20260903-2017 spent it on distant clinic voices
+                        # at 0.0479 and the greeting died 3.16s early. Two bars
+                        # now, both from settings: the LEVEL a frame must reach
+                        # (near-mic speech, not far-field chatter) and how long
+                        # that level must SUSTAIN (a person interrupting is a
+                        # sentence; a waiting room stutters). raw_bytes is
+                        # 8kHz mu-law, one byte per sample, so /8 is ms.
+                        if _lvl >= settings.realtime_drain_floor:
+                            sess._voiced_run_ms += len(raw_bytes) / 8.0
+                        else:
+                            sess._voiced_run_ms = 0.0
+                        # The frame-loop trigger. speech_started alone is too
+                        # coarse: OpenAI's VAD fires it on far-field speech
+                        # noise_reduction cannot remove, and waiting for the
+                        # NEXT one while a real person is mid-interruption
+                        # would talk over them for seconds. Firing here costs
+                        # one frame of latency past the bar; the speech_started
+                        # branch below stays as the backup path and cannot
+                        # double-fire, because this resets _playback_ends_at.
+                        if (settings.realtime_drain_barge_in
+                                and not sess._response_active
+                                and sess.stream_sid
+                                and time.monotonic() < sess._playback_ends_at
+                                and sess._voiced_run_ms >= settings.realtime_drain_min_voiced_ms):
+                            await _drain_clear(
+                                sess, twilio_ws,
+                                left=sess._playback_ends_at - time.monotonic(),
+                                level=_lvl, run_ms=sess._voiced_run_ms)
                     if sess.agent_speaking and not _echo_gate_allows(raw_bytes):
                         # Only reached under REALTIME_ECHO_GATE=drop|energy.
                         #
@@ -1139,9 +1242,33 @@ async def _oai_to_twilio(
                 sess._speech_start_ms = msg.get("audio_start_ms")
                 if sess.done:
                     continue  # don't interrupt the closing farewell
-                if sess._response_active and not _barge_in_pending:
+                if (sess._response_active and not _barge_in_pending
+                        and (sess._last_voiced_frame_rms == 0.0
+                             or sess._last_voiced_frame_rms
+                             >= settings.realtime_drain_floor)):
                     # Only cancel once per active response — prevents inflation
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✋ BARGE-IN  : caller interrupted agent", flush=True)
+                    #
+                    # GATED, BUT 0.0 PASSES. Two layers killed the random
+                    # mid-sentence clipping: interrupt_response is now False
+                    # (the server never cancels on its own — see config), and
+                    # this handler only spends a cancel on a frame measured at
+                    # >= realtime_drain_floor, so a caller trailing off
+                    # ("...yeah, aahhh"), a breath, or a far-field clinic voice
+                    # that OpenAI's VAD flags does NOT cut the agent.
+                    # _last_voiced_frame_rms == 0.0 means we have measured
+                    # nothing yet this call — that is NOT evidence of quiet, it
+                    # is an unmeasured line, and the real interruption that
+                    # gave this handler its reason to exist arrives exactly
+                    # then (a caller cutting in before the first clean frame).
+                    # So unmeasured passes (a real interruption), a measured
+                    # frame below the floor fails (trailing sound), and the
+                    # sustained-run bar is deliberately NOT applied here: at
+                    # speech_started onset the run is one frame old by
+                    # definition, and demanding 300ms before reacting would
+                    # talk over a genuine interrupter.
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✋ BARGE-IN  : caller interrupted agent "
+                          f"(level={sess._last_voiced_frame_rms:.4f} vs "
+                          f"{settings.realtime_drain_floor})", flush=True)
                     _barge_in_pending = True
                     # Anything still held is a turn they have just talked over.
                     # Playing it after the fact is worse than muting it ever
@@ -1210,44 +1337,32 @@ async def _oai_to_twilio(
                 # matches what it produced; the only thing that can stop the
                 # sound is Twilio's own `clear`.
                 #
-                # GATED ON A RECENT VOICED FRAME rather than firing on any
-                # speech_started, because caller audio during our own playback
-                # can be our voice off a speakerphone and clearing on echo cuts
-                # the agent mid-word. _above_echo_floor's threshold is the
-                # acoustic test; realtime_drain_barge_in turns the whole thing
-                # off for a line where that proves too generous.
+                # GATED ON SUSTAINED NEAR-MIC VOICE, not on any speech_started.
+                # OpenAI's VAD fires that event on far-field clinic speech that
+                # noise_reduction cannot remove, and ONE 20ms frame over the
+                # echo floor used to authorise the clear here —
+                # call-20260903-2017 spent it on a waiting room at 0.0479 and
+                # cut the greeting 3.16s early. The frame loop above now fires
+                # _drain_clear the moment the sustained bar is crossed, which
+                # resets _playback_ends_at; this branch survives only as the
+                # backup path (it cannot double-fire for the same reason), and
+                # applies the same two bars before spending anything.
+                # realtime_drain_barge_in turns the whole thing off for a line
+                # where even this proves too generous.
                 elif (settings.realtime_drain_barge_in
                         and not sess._response_active
                         and sess.stream_sid
                         and time.monotonic() < sess._playback_ends_at
                         and sess._last_voiced_frame_at
                         and (time.monotonic() - sess._last_voiced_frame_at
-                             <= _DRAIN_VOICE_WINDOW_S)):
-                    _left = sess._playback_ends_at - time.monotonic()
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] "
-                          f"✋ BARGE-IN  : caller interrupted audio still "
-                          f"playing out ({_left:.2f}s left, "
-                          f"level={sess._last_voiced_frame_rms:.4f} vs floor "
-                          f"{settings.realtime_echo_rms})", flush=True)
-                    # Recorded so the echo question is settled from real calls.
-                    sess.drain_barge_ins.append({
-                        "playback_left_s": round(_left, 2),
-                        "level": round(sess._last_voiced_frame_rms, 4),
-                        "floor": settings.realtime_echo_rms,
-                    })
-                    _drop_held_items(sess, "the caller interrupted the playout")
-                    sess.agent_speaking = False
-                    # Nothing is playing now, so nothing may go on WAITING for
-                    # it: the hang-up drain and the echo cooldown both read
-                    # _playback_ends_at and would otherwise sit out audio that
-                    # has been thrown away.
-                    sess._playback_ends_at = time.monotonic()
-                    try:
-                        await twilio_ws.send_text(json.dumps({
-                            "event": "clear", "streamSid": sess.stream_sid,
-                        }))
-                    except Exception:
-                        pass
+                             <= _DRAIN_VOICE_WINDOW_S)
+                        and sess._voiced_run_ms >= settings.realtime_drain_min_voiced_ms
+                        and sess._last_voiced_frame_rms >= settings.realtime_drain_floor):
+                    await _drain_clear(
+                        sess, twilio_ws,
+                        left=sess._playback_ends_at - time.monotonic(),
+                        level=sess._last_voiced_frame_rms,
+                        run_ms=sess._voiced_run_ms)
 
             # ── Caller finished speaking ───────────────────────────────────
             elif event_type == "input_audio_buffer.speech_stopped":
@@ -1654,12 +1769,18 @@ __all__ = [    "ACCEPTING_ASK",
     "_BACKCHANNEL_AFTER_S",
     "_BACKCHANNEL_COOLDOWN_S",
     "_BACKCHANNEL_ECHO_MARGIN_S",
+    "_BACKCHANNEL_PAUSE_MAX_S",
+    "_BACKCHANNEL_PAUSE_MIN_S",
+    "_BACKCHANNEL_TICK_S",
+    "_WATCHDOG_TICK_S",
+    "_watchdog_tick_s",
     "_CALLER_WILL_ACT",
     "_CALL_SHAPE_EXITS",
     "_CHOICE_SAVE_TOOLS",
     "_CLAIMS_SAVED",
     "_CONFIRMS_VALUE",
     "_CUT_SHORT_MS",
+    "_DEFERRED_CLOSE_WAIT_S",
     "_DETAIL_FUNCTION_WORDS",
     "_DOCTORS_LOCK",
     "_FABRICATION_VOCAB",
@@ -1678,6 +1799,8 @@ __all__ = [    "ACCEPTING_ASK",
     "_MAX_OWED_PER_TEXT",
     "_MAX_SAVE_REJECTIONS",
     "_MAX_SILENCE_PROMPTS",
+    "_MAX_PADDING_NUDGES",
+    "_PADDING_PROMPT_AFTER",
     "_MAX_VETTING_REASKS",
     "_MEANING_CLASSES",
     "_MIN_REASK_GAP_S",
@@ -1732,6 +1855,7 @@ __all__ = [    "ACCEPTING_ASK",
     "_claims_employment",
     "_claims_saved",
     "_spoken_farewell",
+    "_announced_an_ask",
     "_class_present",
     "_close_quietly",
     "_collapse",

@@ -38,7 +38,11 @@ from agents.voice.audio import (
     _drop_held_items,
     _wire_bytes_per_ms,
 )
-from agents.voice.grounding import _create_response, _spoken_farewell
+from agents.voice.grounding import (
+    _create_response,
+    _spoken_farewell,
+    closing_directive,
+)
 
 if TYPE_CHECKING:                                    # pragma: no cover
     from agents.voice.session import RealtimeSession
@@ -464,8 +468,13 @@ async def _handle_response_done(
                         "role": "user",
                         "content": [{
                             "type": "input_text",
-                            "text": ("(say a brief warm goodbye "
-                                     "now, then stop)"),
+                            # ONE DEFINITION, shared with teardown.py's
+                            # tool-call close. The twin next to this branch
+                            # (`sounded_like_a_goodbye`) was fixed here and
+                            # left wrong there for a day and two live calls;
+                            # the sentence these two ask for does not get to
+                            # repeat that.
+                            "text": closing_directive(_last_agent),
                         }],
                     },
                 }))

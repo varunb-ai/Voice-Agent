@@ -1,0 +1,80 @@
+
+model   gpt-realtime-2
+voices  marin, cedar
+out     C:\Users\varun\Desktop\conversational_ai\data\demo_audio
+
+  marin_A-flat_greeting.wav  6.50s  (4.02s voiced)
+    (2nd item muted, as on a call: 'Got it, let me explain and then ask about where she sees pat')
+  marin_A-flat_reason.wav  3.75s  (2.52s voiced)
+    (2nd item muted, as on a call: 'Thanks for confirming — any chance you could tell me which b')
+  marin_A-flat_close.wav  5.05s  (3.62s voiced)
+  marin_B-humble_greeting.wav  6.60s  (4.22s voiced)
+    (2nd item muted, as on a call: 'Got it, thanks for asking, oh, nothing urgent. Just a standa')
+  marin_B-humble_reason.wav  4.40s  (3.14s voiced)
+    (2nd item muted, as on a call: 'Thanks for the update — do you know which branch she sees pe')
+  marin_B-humble_close.wav  4.10s  (2.66s voiced)
+  cedar_A-flat_greeting.wav  6.00s  (3.56s voiced)
+    (2nd item muted, as on a call: "Thanks for asking — let me share the reason I'm calling.")
+  cedar_A-flat_reason.wav  5.00s  (2.72s voiced)
+    (2nd item muted, as on a call: 'Thanks for confirming — I just want to check which place she')
+  cedar_A-flat_close.wav  5.45s  (3.68s voiced)
+  cedar_B-humble_greeting.wav  7.05s  (3.86s voiced)
+    (2nd item muted, as on a call: "Oh, nothing urgent. Just a standard checkup. I'm just lookin")
+  cedar_B-humble_reason.wav  6.15s  (2.96s voiced)
+    (2nd item muted, as on a call: "Got it, thanks for confirming she's taking people; I'm just ")
+  cedar_B-humble_close.wav  5.20s  (3.02s voiced)
+
+==============================================================================
+  TRANSCRIPTS — the words are the control; only delivery should vary
+==============================================================================
+
+  marin  A-flat    greeting  scripted  6.50s   4.02s voiced
+    Hi there... good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  marin  A-flat    reason    natural   3.75s   2.52s voiced
+    Okay, thanks for asking—let me explain and then check one detail.
+
+  marin  A-flat    close     natural   5.05s   3.62s voiced
+    Thanks for confirming — any chance you could tell me which branch she sees people at?
+
+  marin  B-humble  greeting  scripted  6.60s   4.22s voiced
+    Hi there... good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  marin  B-humble  reason    natural   4.40s   3.14s voiced
+    Okay, I hear you, and I’ll keep it simple and clear for you.
+
+  marin  B-humble  close     natural   4.10s   2.66s voiced
+    Okay, thanks — do you know which branch she sees people at?
+
+  cedar  A-flat    greeting  scripted  6.00s   3.56s voiced
+    Hi there... good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  cedar  A-flat    reason    natural   5.00s   2.72s voiced
+    Okay, thanks for confirming that — and just so you know, it's nothing urgent.
+
+  cedar  A-flat    close     natural   5.45s   3.68s voiced
+    Thanks for confirming — I just want to check which place she's seeing people at before I make any plans.
+
+  cedar  B-humble  greeting  scripted  7.05s   3.86s voiced
+    Hi there... good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  cedar  B-humble  reason    natural   6.15s   2.96s voiced
+    Okay, thanks for asking — I'll keep it brief and then I just need one quick detail.
+
+  cedar  B-humble  close     natural   5.20s   3.02s voiced
+    Okay, thanks for confirming that part, do you know which branch she's seeing people at?
+
+------------------------------------------------------------------------------
+  ELLIPSIS / SENTENCE-COUNT WATCH
+------------------------------------------------------------------------------
+  marin/A-flat/greeting: 3 sentences — contains ...
+  marin/B-humble/greeting: 3 sentences — contains ...
+  cedar/A-flat/greeting: 3 sentences — contains ...
+  cedar/B-humble/greeting: 3 sentences — contains ...
+
+  These turns would read as pile-ups to conversation_metrics.
+  Measure-only, so no call behaviour changes — but if this is
+  common, protect '...' in objectives.sentences() before
+  trusting piled_turns on any call run under this persona.
+
+12 clips in C:\Users\varun\Desktop\conversational_ai\data\demo_audio

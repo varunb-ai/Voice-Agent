@@ -1,0 +1,15 @@
+
+rendering backchannels for voice=marin
+  marin/mmhm.ulaw  0.75s
+  marin/mmhm2: 0.00s — skipped (outside the 0.1-1.2s backchannel range)
+  marin/mm: 0.00s — skipped (outside the 0.1-1.2s backchannel range)
+  marin/mm2: 0.00s — skipped (outside the 0.1-1.2s backchannel range)
+
+rendering backchannels for voice=cedar
+  cedar/mmhm.ulaw  0.65s
+  cedar/mmhm2: 0.00s — skipped (outside the 0.1-1.2s backchannel range)
+  cedar/mm: 0.00s — skipped (outside the 0.1-1.2s backchannel range)
+  cedar/mm2.ulaw  0.30s
+
+3 clips written under C:\Users\varun\Desktop\conversational_ai\data\backchannels
+Backchannels are now live on calls using those voices.

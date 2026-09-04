@@ -553,6 +553,76 @@ def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
     # needs no branch of its own.
     usable = [t for t in sess.turns[since:until]
               if t.role == "caller" and t.text.strip() != "[...]"]
+    # ── A SELF-STANDING ANSWER REOPENS A CLOSED WINDOW ──────────────────────
+    #
+    # THE CEILING ASSUMES CALLERS ANSWER IN THE ORDER ASKED, AND THEY DO NOT.
+    # On call-20260904-0026 the agent asked "are you taking new patients right
+    # now?"; the receptionist said "Yeah, before that, I need to ask one
+    # information. What is your full name?", took a name and a date of birth,
+    # and only then came back with "Dr. Abel is completely booked and not
+    # accepting new patients right now." By then the agent's own branch ask had
+    # closed the window, so `usable` held two turns of THEIR questions and the
+    # actual answer sat outside it. classify_choice reads that sentence as NO
+    # without difficulty; the save was refused twice anyway, and the model —
+    # told the caller had not answered — asked them to "say it plainly", which
+    # is the robotic re-ask this whole file is upstream of.
+    #
+    # WHAT THE CEILING IS FOR IS UNTOUCHED, and the rescue is deliberately
+    # STRICTER than the in-window rule rather than equal to it. Past the
+    # ceiling there is no anchor left: position says nothing, so the turn has
+    # to carry the topic itself. Two conjuncts, and both are needed —
+    #
+    #   the FIELD'S OWN PROBE must match the turn. This is what keeps
+    #   call-20260831-1048 fixed. There "I don't know the branch name" — UNSURE,
+    #   correctly, in isolation — sat in a still-open identity window and
+    #   overwrote a confirmation from eight turns earlier. It says nothing about
+    #   identity; IDENTITY_ASK does not match it, and it stays out. The -0026
+    #   turn ("not accepting new patients right now") matches ACCEPTING_ASK,
+    #   and goes in.
+    #
+    #   `states_in_its_own_right`, the same gate the never-asked path uses, so
+    #   a bare "Yes." landing after a topic change cannot be read as an answer
+    #   to a question two turns upstream of it.
+    #
+    # THE PROBE TEST IS THE ONE THE NEVER-ASKED PATH WAS RIGHT TO DROP, and it
+    # is right here for the opposite reason. There it threw away
+    # call-20260825-0915's volunteered "we are full right now, but I can put you
+    # on the list" — a real answer carrying none of the ask's words — and that
+    # path is untouched. Here the turn has already lost its anchor, and the cost
+    # of being strict is one more natural ask later in the call rather than a
+    # status recorded from a sentence about something else.
+    # A CEILING IS NOT THE ONLY WAY A WINDOW CLOSES, and until call-20260904-
+    # 1013 this branch could only see one of them. There the caller answered at
+    # turn 11 — "Unfortunately, Dr. Abel is not taking any new patients right
+    # now." — the agent spelled the surname out, they confirmed, and the
+    # agent's NEXT turn both re-asked the accepting question and called
+    # save_new_patient_status. That turn is already in `sess.turns` when this
+    # runs, so it moved `since` past turn 11 AND reset `until` to None in the
+    # same step. The window opened after the last turn in the list, the rescue
+    # was gated on `until is not None` and never ran, and the guard reported
+    # "nothing has been transcribed since you asked" about a caller who had
+    # answered in as many words. Told they had not answered, the model asked
+    # again — the robotic re-ask this whole file is upstream of.
+    #
+    # THE ANCHOR IS LEFT ALONE ON PURPOSE. The obvious fix — do not let a
+    # trailing ask move `since` — was tried and is wrong: it re-admits every
+    # turn under the PREVIOUS ask with no test of what they say, and
+    # call-20260825-1731's "Yeah, it's a good time." then grounds a `yes` about
+    # new patients. Position is exactly what stops being trustworthy here, so
+    # the orphaned turn has to earn its way back on the two conjuncts above,
+    # not on where it sits.
+    #
+    # SO: turns OUTSIDE the window, wherever the window's edges came from,
+    # judged by the same strict pair. `_out` skips what is already in `usable`
+    # rather than re-testing it, so an in-window turn cannot be counted twice.
+    if asked:
+        _lo, _hi = since, (len(sess.turns) if until is None else until)
+        _out = [t for i, t in enumerate(sess.turns)
+                if not (_lo <= i < _hi)
+                and t.role == "caller" and t.text.strip() != "[...]"
+                and probe.search(t.text or "")
+                and states_in_its_own_right(t.text, status, classifier)]
+        usable += _out
     if not usable:
         if floored:
             # NOT the same as nothing being transcribed. We put a specific

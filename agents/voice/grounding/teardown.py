@@ -36,6 +36,9 @@ from agents.voice.objectives import (
 from agents.voice.tools import run_tool
 from agents.voice.grounding.vocabulary import (
     _CHOICE_SAVE_TOOLS,
+    _agent_stalled,
+    _spoken_farewell,
+    closing_directive,
 )
 from agents.voice.grounding.telemetry import (
     _objective_of,
@@ -128,8 +131,32 @@ async def _create_response(oai_ws, sess: "RealtimeSession", *, why: str,
 
 
 
+def _we_spoke_last(sess: "RealtimeSession") -> bool:
+    """Is the newest real turn on this call the AGENT's?
+
+    "Real" excludes the "[...]" placeholder, exactly as the two close walks
+    below do: that marker is a caller transcript still in flight, and reading
+    it as a caller turn would say the ball is with them when we do not yet
+    know what they said. The three sites now agree on what a turn is, which
+    is the only reason this is a function and not three inline `next(...)`
+    expressions - a predicate spelled out in several places is this repo's
+    documented bug class, and it has already cost `sounded_like_a_goodbye`
+    two live calls.
+
+    Empty transcript list -> False. Nothing has been said, so we cannot have
+    been the last to say it.
+    """
+    for _t in reversed(sess.turns):
+        _txt = (_t.text or "").strip()
+        if not _txt or _txt == "[...]":
+            continue
+        return _t.role == "agent"
+    return False
+
+
 def _decide_close(name: str, result: dict,
-                  sess: "RealtimeSession", ts: str) -> bool:
+                  sess: "RealtimeSession", ts: str,
+                  _response_had_audio: bool = True) -> str:
     """
     Is the call over, and if it is, may we hang up yet?
 
@@ -137,6 +164,30 @@ def _decide_close(name: str, result: dict,
     which the teardown needs, because a deferred close must not fall into
     the ordinary post-tool path either. Two outcomes, not one flag: done
     means hang up after the goodbye, deferred means wait for the person.
+
+    WHICH DEFERRAL, not merely whether, and the distinction is a second of
+    dead air. "" is no deferral. The other three values all mean the
+    objective is complete and we are not hanging up yet, but they want
+    different things from the line:
+
+      "ours"    we asked them something; the only correct next sound is
+                theirs, so nothing is created and nothing is said.
+      "theirs"  THEY asked US something we have not answered. We owe them
+                speech, and the caller is sitting in silence until it comes.
+      "spoken"  neither of them is holding a question, but WE were the last
+                voice on the line and this tool spoke no audio of its own.
+                Anything said now stacks on our own finished turn. Say
+                nothing; the goodbye is owed to their next turn, not to
+                ours.
+
+    Returned as a string rather than a bool because the caller has to tell
+    them apart; `if _close_deferred` still reads exactly as it did.
+
+    `_response_had_audio` DEFAULTS TO TRUE, and the default is the
+    conservative one on purpose: True is "this response spoke", which
+    reproduces the behaviour every call site had before the parameter
+    existed. A caller that forgets to pass it gets today's close, not a
+    silently deferred one.
 
     ASKED OF THE OBJECTIVE, NOT OF THE TOOL. See the block below - a
     successful save_branch used to end a call by definition, which was
@@ -182,7 +233,7 @@ def _decide_close(name: str, result: dict,
     # the model saying it has given up; holding that open for an answer is how
     # a call that has already failed stays on the line. Only the objective path
     # can be deferred, because only it can finish WITHOUT anyone deciding to.
-    _close_deferred = False
+    _close_deferred = ""
     if name == "escalate" and result.get("ok"):
         sess.done = True
     elif (result.get("ok")
@@ -234,6 +285,17 @@ def _decide_close(name: str, result: dict,
             if _txt == "[...]":
                 continue
             if _t.role == "agent":
+                # SPEAKING IS NOT ANSWERING, and this walk could not tell them
+                # apart. call-20260903-1126: the caller asked "Would you like
+                # me to add you to the list?" and the agent said "Okay, let me
+                # just think about how I want to handle the waitlist" in the
+                # same response as its tool calls. That turn discharged the
+                # obligation here — "we have spoken since" — so the deferral
+                # never armed and the close ran on a question still on the
+                # table. A stall advances nothing on the line and must not
+                # count as a reply to them.
+                if _agent_stalled(_txt):
+                    continue
                 break                   # we have spoken since; nothing owed
             if _t.role == "caller":
                 if _txt.endswith("?"):
@@ -252,7 +314,7 @@ def _decide_close(name: str, result: dict,
                 break
         if _their_question and not _unanswered:
             sess._close_when_answered = True
-            _close_deferred = True
+            _close_deferred = "theirs"
             print(f"\n[{ts}] CLOSE DEFERRED  : objective complete, but "
                   f"they have just asked us something and we have not "
                   f"answered it\n          they asked: "
@@ -261,11 +323,64 @@ def _decide_close(name: str, result: dict,
             return _close_deferred
         if _unanswered:
             sess._close_when_answered = True
-            _close_deferred = True
+            _close_deferred = "ours"
             print(f"\n[{ts}] ⏸️  CLOSE DEFERRED  : objective complete, but "
                   f"the turn just spoken is a question they have not "
                   f"answered — waiting for them\n"
                   f"          asked: {_unanswered[-70:]!r}", flush=True)
+        # ── THE GOODBYE WOULD BE OUR SECOND UTTERANCE IN A ROW ──────────────
+        # call-20260903-1422, the last thing the caller heard:
+        #
+        #   14:24:35 caller  "...would you like me to go ahead and add you?"
+        #   14:24:37 agent   "Thanks, that helps — I'm just going to think
+        #                     about it for now."          <- response A, spoke
+        #   14:24:38 note_info(call_outcome) -> COMPLETE  <- response B, silent
+        #   14:24:40 agent   "Okay, thanks for explaining that."
+        #
+        # Two agent turns back to back with no caller speech between them, and
+        # the second one thanks her for the second time. Nothing above catches
+        # it: neither party is holding a question — she offered, we declined,
+        # that exchange is closed — so both walks return "" and the close runs.
+        #
+        # WHAT ACTUALLY WENT WRONG IS THE RESPONSE BOUNDARY, not the wording.
+        # `_close_or_continue` asks for a goodbye whenever the response
+        # carrying the completing tool said nothing, which is the right
+        # question when the last voice on the line was THEIRS — a tool-only
+        # response after a caller turn leaves them sitting in silence and one
+        # is owed. It is the wrong question here: we had already spoken, that
+        # response had ended, and the goodbye arrives 3s later as a fresh
+        # utterance glued onto our own.
+        #
+        # Both conjuncts are load-bearing:
+        #
+        #   not _response_had_audio  a response that DID speak is still inside
+        #                            its own beat. "Great, I've got that." then
+        #                            "Thanks, have a good day." is one closing
+        #                            turn and reads as one. Deferring there
+        #                            would defer every well-run close in the
+        #                            suite, which is the trap the _unanswered
+        #                            walk above documents.
+        #   we spoke last            if the newest real turn is the CALLER's,
+        #                            the silence is ours to fill and the
+        #                            goodbye is owed immediately.
+        #
+        # SAFE IN ONE DIRECTION, and it is the same direction every other
+        # deferral here chose: a false positive holds the line for one more
+        # turn (and the silence watchdog still ends the call on its own
+        # budget), a false negative talks over somebody.
+        elif not _response_had_audio and _we_spoke_last(sess):
+            sess._close_when_answered = True
+            # NAMED, so the watchdog can tell this silence from the other two.
+            # "ours" and "theirs" are waiting on somebody who owes a turn and
+            # "still with me?" is the right thing to say into that. Here
+            # nobody owes anything — see _DEFERRED_CLOSE_WAIT_S.
+            sess._close_deferred_reason = "spoken"
+            _close_deferred = "spoken"
+            sess.stacked_closings += 1
+            print(f"\n[{ts}] ⏸️  CLOSE DEFERRED  : objective complete, but we "
+                  f"were the last voice on the line and this tool said "
+                  f"nothing\n          a goodbye now would stack on our own "
+                  f"turn — waiting for them", flush=True)
         else:
             sess.done = True
     return _close_deferred
@@ -273,7 +388,7 @@ def _decide_close(name: str, result: dict,
 
 
 async def _close_or_continue(sess: "RealtimeSession", oai_ws,
-                             _close_deferred: bool,
+                             _close_deferred: str,
                              _response_had_audio: bool
                              ) -> tuple[Optional[bool], Optional[bool]]:
     """
@@ -283,9 +398,17 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
                         was answered - say goodbye and hang up, either by
                         letting the turn just spoken stand as one or by
                         asking for one.
-      close deferred    the objective is met but the agent has just asked
+      deferred "ours"   the objective is met but the agent has just asked
                         them something. Say NOTHING. The only correct next
                         sound on the line is theirs.
+      deferred "theirs" the objective is met and THEY asked US something.
+                        The opposite obligation: answer it, then close. Asks
+                        for the reply here rather than letting the line go
+                        dead until the empty-response guard notices.
+      deferred "spoken" the objective is met, nobody is holding a question,
+                        and WE were the last voice on the line. Say nothing,
+                        for the same reason as "ours": another utterance
+                        here stacks on our own turn. See _decide_close.
       neither           an ordinary tool call mid-conversation; the model
                         gets a response to speak the result into.
 
@@ -312,7 +435,22 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
         # An utterance ending in a question mark is not a farewell.
         last_agent = next((t.text for t in reversed(sess.turns)
                            if t.role == "agent"), "")
-        sounded_like_a_goodbye = bool(last_agent) and not last_agent.rstrip().endswith("?")
+        # ── ONE DEFINITION OF A GOODBYE, SHARED WITH lifecycle.py ───────────
+        # This was `not last_agent.rstrip().endswith("?")` — every declarative
+        # sentence in English counted as a farewell. The identical test in
+        # lifecycle.py was replaced with _spoken_farewell after
+        # call-20260902-1842 ("Okay, thanks for explaining that list - let me
+        # think about it for a moment" taken as a goodbye, line cut 2.2s
+        # later), AND THIS COPY WAS LEFT BEHIND. call-20260903-1126 is the same
+        # failure through the surviving twin, one day later: the caller asked
+        # "Would you like me to add you to the list?", the agent said "Okay,
+        # let me just think about how I want to handle the waitlist", and this
+        # branch hung up on them.
+        #
+        # Fixing a predicate in one of two places is this repo's documented bug
+        # class. The definition now lives once, in vocabulary.py, and the suite
+        # asserts both call sites agree on every candidate.
+        sounded_like_a_goodbye = _spoken_farewell(last_agent)
 
         if _response_had_audio and sounded_like_a_goodbye:
             # Model already said goodbye in its audio — don't inject another line
@@ -331,7 +469,9 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
                     "role": "user",
                     "content": [{
                         "type": "input_text",
-                        "text": "(say a brief warm goodbye now, then stop)",
+                        # ONE DEFINITION, and lifecycle.py's deferred close
+                        # asks with the same words. See closing_directive.
+                        "text": closing_directive(last_agent),
                     }],
                 },
             }))
@@ -351,10 +491,48 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
                                    allow_when_done=True,
                                    allow_when_active=True)
             _closing_sent = True  # skip tool-call response.done, close on closing's
+    elif _close_deferred == "theirs":
+        # THEY ASKED US SOMETHING AND WE OWE THEM AN ANSWER, so this is the one
+        # deferral that must still produce speech. It used to fall into the
+        # branch below and say nothing — and the line did not stay quiet, it
+        # went dead until the empty-response guard in lifecycle.py noticed the
+        # silence and re-requested, twice, at a full inference round trip each.
+        # On call-20260902-2207 that is the whole of a 4.69s reply: the caller
+        # asked "Would you like me to add you?" at 22:09:45 and heard nothing
+        # back until 22:09:50.
+        #
+        # A CONVERSATION ITEM, NOT AN `instructions` OVERRIDE, for the reason
+        # the goodbye path a few lines up gives: an override replaces the
+        # session instructions for that response and lands it on a different,
+        # uncacheable prefix. The measured cache hit rate is 98.2% and cached
+        # text bills at a tenth of uncached, so an override would spend both
+        # money and the latency this change exists to remove. Appending an item
+        # extends the cached prefix instead of invalidating it.
+        #
+        # PENDING, NOT IMMEDIATE. The response carrying this tool call has not
+        # emitted response.done yet; creating into that is the collision this
+        # module has been bitten by twice. The flag fires at response.done,
+        # which the stage data measures at 0.00s.
+        await oai_ws.send(json.dumps({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "(answer what they just asked you, briefly, "
+                            "then close warmly)",
+                }],
+            },
+        }))
+        _pending_response_create = True
     elif _close_deferred:
-        # NO CONVERSATION ITEM AND NO response.create. The response carrying
-        # this tool call has already put a question to them; the only correct
-        # next sound on this line is theirs.
+        # "ours" and "spoken", which want the same thing from the line for two
+        # different reasons: the first has just put a question to them, the
+        # second has just finished saying something to them. Either way the
+        # only correct next sound is theirs.
+        #
+        # NO CONVERSATION ITEM AND NO response.create.
         #
         # Which is why this is its own branch and not a fall-through to the
         # `else`. `_pending_response_create` fires a create at the next

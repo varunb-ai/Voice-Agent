@@ -201,9 +201,34 @@ async def main() -> int:
         # without invoking the handler. 404 means something else has the port.
         async with httpx.AsyncClient(timeout=6.0, follow_redirects=False) as c:
             r = await c.get(settings.server_public_url.rstrip("/") + "/answer")
+        # WHO SENT THE STATUS MATTERS MORE THAN THE STATUS. ngrok's edge stamps
+        # its own errors with Ngrok-Error-Code and serves them with the same
+        # codes an app uses, so a bare status conflates two opposite states:
+        # ERR_NGROK_3200 is "no tunnel on this hostname" — the URL is dead —
+        # while a 404 from our side means the port is answering but is not us.
+        # Read as status alone, a dead tunnel printed "another app is answering
+        # on this port, check what is bound to 127.0.0.1:8000", sending the
+        # reader after a port conflict while nothing was listening at all.
+        _ngrok_err = r.headers.get("ngrok-error-code", "")
         if r.status_code == 405:
             print(f"{_PASS} SERVER_PUBLIC_URL reaches THIS agent "
                   f"(/answer -> 405, route present)")
+        elif _ngrok_err.startswith("ERR_NGROK_32"):
+            # 32xx: the hostname resolves to no running agent. Always stale.
+            check(False, "SERVER_PUBLIC_URL reaches this agent",
+                  f"/answer -> {r.status_code} from ngrok's edge "
+                  f"({_ngrok_err}) — nothing is served here. This URL is a "
+                  f"dead tunnel, not a port conflict: the agent that owned it "
+                  f"has exited. Start the tunnel, then `python "
+                  f"update_ngrok_url.py` to write the new URL into .env.")
+        elif _ngrok_err:
+            # Most often ERR_NGROK_8012: the tunnel is up, nothing on 8000.
+            # A warning, not a failure, on the same grounds as the unreachable
+            # branch below — the server not being started yet is ordinary.
+            print(f"{_WARN} /answer -> {r.status_code} from ngrok's edge "
+                  f"({_ngrok_err}). The tunnel is live but nothing answered "
+                  f"behind it — start the agent (`python run_twilio.py`) and "
+                  f"re-run. The URL itself is fine.")
         elif r.status_code == 404:
             check(False, "SERVER_PUBLIC_URL reaches this agent",
                   f"/answer -> 404. The tunnel is up but another app is "
@@ -257,8 +282,22 @@ async def main() -> int:
     # Template 1 is truthful about WHO and WHY — it names the organisation and
     # uses no pretext. Announcing automation upfront is the forage_ai_disclosed
     # variant, so assert per template rather than assuming one shape.
-    check(settings.org_name.split()[0].lower() in greeting.lower(),
-          f"greeting names the organisation ({settings.org_name})")
+    #
+    # SCOPED BY `names_org`, WHICH THE TEMPLATE DECLARES — the same way the
+    # protocol suite scopes it, and for the same reason. This asserted the one
+    # shape unconditionally and so failed patient_discovery for doing exactly
+    # what it exists to do: the prospective-patient opener names no
+    # organisation. The comment above already said "per template"; the code
+    # under it did not. An `if` with no `else` would fix the false failure and
+    # stop measuring the one greeting property that script guarantees, so the
+    # negative branch asserts the inverse rather than skipping.
+    if tpl.names_org:
+        check(settings.org_name.split()[0].lower() in greeting.lower(),
+              f"greeting names the organisation ({settings.org_name})")
+    else:
+        check(settings.org_name.split()[0].lower() not in greeting.lower(),
+              f"names_org=False — greeting keeps the organisation "
+              f"({settings.org_name}) out of the opener entirely")
     check(settings.org_name not in tpl.instructions,
           "organisation kept out of the cached instructions")
     if tpl.name == "forage_ai_disclosed":

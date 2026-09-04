@@ -1,0 +1,50 @@
+
+model   gpt-realtime-2
+voices  cedar
+out     C:\Users\varun\Desktop\conversational_ai\data\demo_audio
+
+  cedar_A-flat_greeting.wav  6.35s  (3.50s voiced)
+    (2nd item muted, as on a call: 'Thanks for letting me know.')
+  cedar_A-flat_reason.wav  3.35s  (1.92s voiced)
+    (2nd item muted, as on a call: 'Thanks for confirming — let me just get one more detail so I')
+  cedar_A-flat_close.wav  4.00s  (3.12s voiced)
+  cedar_B-humble_greeting.wav  6.35s  (3.62s voiced)
+    (2nd item muted, as on a call: 'Okay, thanks for asking — let me answer that and then ask wh')
+  cedar_B-humble_reason.wav  5.35s  (3.28s voiced)
+    (2nd item muted, as on a call: 'Thanks, before I decide about booking, I need to make sure I')
+  cedar_B-humble_close.wav  5.45s  (3.70s voiced)
+
+==============================================================================
+  TRANSCRIPTS — the words are the control; only delivery should vary
+==============================================================================
+
+  cedar  A-flat    greeting  scripted  6.35s   3.50s voiced
+    Hi there... good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  cedar  A-flat    reason    natural   3.35s   1.92s voiced
+    Okay, thanks — I just want to be clear about why I'm calling.
+
+  cedar  A-flat    close     natural   4.00s   3.12s voiced
+    Thanks for confirming — let me just get one more detail so I know where to go.
+
+  cedar  B-humble  greeting  scripted  6.35s   3.62s voiced
+    Hi there... good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  cedar  B-humble  reason    natural   5.35s   3.28s voiced
+    Okay, got it, let me answer that and then ask something quick about where to go.
+
+  cedar  B-humble  close     natural   5.45s   3.70s voiced
+    Got it, thanks for confirming that, I just need one more quick detail from you.
+
+------------------------------------------------------------------------------
+  ELLIPSIS / SENTENCE-COUNT WATCH
+------------------------------------------------------------------------------
+  cedar/A-flat/greeting: 3 sentences — contains ...
+  cedar/B-humble/greeting: 3 sentences — contains ...
+
+  These turns would read as pile-ups to conversation_metrics.
+  Measure-only, so no call behaviour changes — but if this is
+  common, protect '...' in objectives.sentences() before
+  trusting piled_turns on any call run under this persona.
+
+6 clips in C:\Users\varun\Desktop\conversational_ai\data\demo_audio

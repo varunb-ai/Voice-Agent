@@ -1,0 +1,15 @@
+
+rendering backchannels for voice=marin
+  marin/mmhm.ulaw  0.70s
+  marin/mmhm2.ulaw  1.00s
+  marin/mm.ulaw  1.20s
+  marin/mm2.ulaw  1.20s
+
+rendering backchannels for voice=cedar
+  cedar/mmhm.ulaw  1.10s
+  cedar/mmhm2.ulaw  0.55s
+  cedar/mm.ulaw  0.65s
+  cedar/mm2.ulaw  0.65s
+
+8 clips written under C:\Users\varun\Desktop\conversational_ai\data\backchannels
+Backchannels are now live on calls using those voices.

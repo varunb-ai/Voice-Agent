@@ -28,6 +28,38 @@ _COMMA_CLAUSE = re.compile(r",\s+(?:but|and|so|then|though|yet|because)\b\s*",
                            re.I)
 
 
+# Thanking somebody for a FIELD NAME. The nouns are the ones the call actually
+# collects plus the generic stand-ins the model reaches for; "help" and
+# "checking" are deliberately absent because they describe an ACT the person
+# performed rather than a slot on a form — and the prompt already bans those
+# two by name a few lines below the rule this watches.
+# Discourse markers people open a turn with. Same closed list objectives.py
+# uses to decide whether a bare "yes" is an answer — one vocabulary, so the
+# two cannot drift apart on what counts as an opener.
+_OPENER_LEAD = re.compile(
+    r"^(?:\W|\b(?:ah|oh|uh+|um+|er+|hmm+|well|so|okay|ok|right|now|sure|yeah)\b)+",
+    re.I)
+
+
+def _opening_clause(sentence: str) -> str:
+    """The first clause of one SENTENCE, with any leading marker removed.
+
+    "Okay, thanks for explaining that — ..." and "Thanks for explaining that —
+    ..." open with the same words; only a marker separates them, and a
+    comparison that keeps it is measuring the marker rather than the repeat.
+    """
+    for clause in _clauses(sentence):
+        return _norm_clause(_OPENER_LEAD.sub("", clause.strip()))
+    return ""
+
+
+_CATEGORY_ECHO = re.compile(
+    r"\b(?:thanks?(?:\s+you)?|thank you)\s+(?:so much\s+|very much\s+)?"
+    r"for\s+(?:the|that|this)\s+"
+    r"(?:location|information|info|details?|branch|address|name|"
+    r"confirmation|clarification|update|answer)\b", re.I)
+
+
 def _double_ask(text: str) -> bool:
     """Two requests for the same thing inside one turn.
 
@@ -48,7 +80,7 @@ def _double_ask(text: str) -> bool:
         return True
     return sum(1 for p in questions if _is_location_ask(p)) > 1
 
-def conversation_metrics(turns: list) -> dict:
+def conversation_metrics(turns: list, raw: "list | None" = None) -> dict:
     """Count the conversational failures that prose rules keep failing to stop.
 
     Three attempts at fixing the same behaviour by writing more forceful
@@ -65,6 +97,25 @@ def conversation_metrics(turns: list) -> dict:
                            one of theirs. Six of these in one 111s call.
       back_to_back_asks  — agent asked again WITHOUT BEING ANSWERED in between.
       repeated_sentences — same agent sentence said more than once.
+
+    `raw` IS THE UNMERGED TRANSCRIPT, and it exists because save() hands this
+    function the MERGED one — which collapses consecutive agent turns inside
+    5s into a single turn. Every counter above wants that: a reply flushed in
+    two fragments is one thing the caller heard. `stacked_agent_turns` is the
+    one counter that wants the opposite, because the merge is precisely what
+    it is looking for, and reading it off `turns` would report zero on every
+    call that has the defect.
+
+    That is not hypothetical here. The verbatim-repeat carve-out a few lines
+    into save()'s merge exists because the fragment rule deleted a live
+    🔁 REPEATED SENTENCE before `repeated_sentences` could count it, and the
+    artifact then read zero on the fault it was written to measure. Same trap,
+    one counter over; the way past it is to keep both transcripts rather than
+    to add a second carve-out.
+
+    Defaults to `turns` so every existing call site — and the whole suite,
+    which passes hand-built lists that are already unmerged — keeps meaning
+    exactly what it did.
     """
     agent = [t for t in turns if t.role == "agent"]
     stapled = back_to_back = 0
@@ -215,6 +266,96 @@ def conversation_metrics(turns: list) -> dict:
     # four caller turns upstream of the compliant answer, behind two stalls and
     # a re-prompt — a last-turn-only window false-flags the disclosure the
     # guard wanted while missing nothing.
+    # ── Thanking them for the CATEGORY instead of the thing ─────────────────
+    # "Got it, thanks for the location — is she taking new patients right now?"
+    # A person says "thanks, Northgate". Naming the field back is slot-labelling
+    # and it is the single most audible tell that a form is being filled in.
+    #
+    # WHY IT IS COUNTED RATHER THAN GUARDED. The fix is a WORD CHOICE, which is
+    # the one thing only the model can make — there is nothing here to reject
+    # and nothing to inject that would not itself be a prose rule. So this is
+    # measure-only by nature, not by convenience, and the rule it watches
+    # (templates.py, "say the PLACE back, never the word 'location'") stays in
+    # the prompt where it belongs.
+    #
+    # IT EXISTS BECAUSE THE REWORD NEEDS A VERDICT. Measured before the change:
+    # 38 of 937 agent turns, 4.1% overall — forage 4.9%, provider_verification
+    # 4.7%, patient_discovery 1.3% — with "location" 21 of the 38. A prompt
+    # rule with no number against it is a rule nobody can tell has stopped
+    # working, which is how the intake disclaimer reached nine calls unnoticed.
+    category_noun_echoes = sum(1 for t in agent if _CATEGORY_ECHO.search(t.text))
+
+    # ── Two agent turns in a row opening with the same clause ───────────────
+    # call-20260903-1259, the last two things the agent said:
+    #   "Okay, thanks for explaining that — I just need to know how to get on it."
+    #   "Thanks for explaining that — take care."
+    # Word for word the same opener, four words long, three seconds apart. All
+    # three passes above scored it zero.
+    #
+    # WHY THEY ALL MISSED IT. The sentences differ, so the sentence pass sees
+    # nothing. `clauses()` splits on the dash, giving "Okay, thanks for
+    # explaining that" and "Thanks for explaining that" — which are not equal,
+    # because of a single leading "Okay,". And the comma pass only splits
+    # before a coordinating conjunction, which "thanks" is not. A discourse
+    # marker in front of a repeat hides it from every existing pass.
+    #
+    # STRIPPED HERE, NOT IN _norm_clause. That function is read by the verbatim
+    # re-ask guard in turns.py; widening it would change which turns a GUARD
+    # fires on, and this is measure-only. Same reason the comma split lives in
+    # this file rather than in clauses().
+    #
+    # PER SENTENCE, NOT PER TURN, and that correction came from the same call.
+    # A first pass compared adjacent agent TURNS and scored -1259 zero — the
+    # two utterances were flushed three seconds apart but reached the
+    # transcript as ONE turn, so the repeat is inside a turn and not across
+    # two. Keying on sentences catches it either way, which is what the
+    # measurement has to survive: how the turns happen to be recorded is not
+    # something a listener can hear.
+    #
+    # ITS OWN COUNTER, not folded into repeated_sentences. That number means
+    # "a span said twice anywhere in the call" and carries a ≥4-word floor
+    # tuned for it; this one is specifically about OPENERS, where three words
+    # already sound like a loop. Merging them would make both mean less.
+    _openers: dict = {}
+    for t in agent:
+        for sentence in _sentences(t.text):
+            _o = _opening_clause(sentence)
+            if _o and len(_o.split()) >= 3:
+                _openers[_o] = _openers.get(_o, 0) + 1
+    shared_opening_clauses = sum(n - 1 for n in _openers.values() if n > 1)
+
+    # ── Two agent turns with no caller speech between them ──────────────────
+    # call-20260903-1422, the last four seconds of the call:
+    #   14:24:37 agent  "Thanks, that helps - I'm just going to think about it
+    #                    for now."
+    #   14:24:40 agent  "Okay, thanks for explaining that."
+    # Two turns, nobody between them, and the second thanks her for the second
+    # time. The teardown had asked for a goodbye because the response carrying
+    # the completing tool spoke no audio - see the "spoken" branch in
+    # _decide_close, which is the fix.
+    #
+    # NOTHING ELSE SCORED IT. shared_opening_clauses compares openers and these
+    # differ ("Thanks, that helps" vs "thanks for explaining that"); the
+    # sentence passes compare sentences and these differ too. And the
+    # transcript PRINTER merges consecutive agent turns onto one line, so
+    # afterwards there was not even anything to look at. The structure is what
+    # is wrong, so the structure is what is counted.
+    #
+    # OFF `raw`, NOT `turns`, AND THAT IS THE WHOLE COUNTER. save() merges
+    # consecutive agent turns within 5s into one before it gets here, so the
+    # pair this exists to find is a single turn by the time `turns` arrives
+    # and this would read zero on every call that has the defect. See the
+    # `raw` paragraph in the docstring.
+    #
+    # "[...]" IS NOT A CALLER TURN. It is their transcript still in flight -
+    # counting it would say somebody spoke between two of ours when the whole
+    # question is whether anybody did. Same exclusion the close walks make.
+    _real = [t for t in (turns if raw is None else raw)
+             if (t.text or "").strip() and (t.text or "").strip() != "[...]"]
+    stacked_agent_turns = sum(
+        1 for a, b in zip(_real, _real[1:])
+        if a.role == "agent" and b.role == "agent")
+
     unsolicited_pii_dumps = 0
     for i, t in enumerate(turns):
         if t.role != "agent" or not re.search(r"\b(19\d{2}|200[0-4])\b", t.text):
@@ -259,6 +400,19 @@ def conversation_metrics(turns: list) -> dict:
         "repeated_sentences": repeated,
         "back_to_back_repeats": back_to_back_repeats,
         "unsolicited_pii_dumps": unsolicited_pii_dumps,
+        # Turns that thanked them for a field name instead of the thing they
+        # said. The number the "say the PLACE back" reword has to move; without
+        # it the reword is a guess nobody can settle.
+        "category_noun_echoes": category_noun_echoes,
+        # Adjacent agent turns opening on the same clause. Non-zero is the
+        # agent reaching for the same stock phrase twice running — audible as
+        # a loop even when every existing repeat pass scores the call clean.
+        "shared_opening_clauses": shared_opening_clauses,
+        # Agent turns spoken straight onto another agent turn. Non-zero is the
+        # agent talking to itself: the caller had no gap to speak into and
+        # whatever the second turn says arrives as an afterthought on the
+        # first. The closing pair is where it shows up worst.
+        "stacked_agent_turns": stacked_agent_turns,
     }
 
 

@@ -77,6 +77,7 @@ from agents.voice.evidence.names import (
     _spell_out,
     _spelled_out,
     _surnames_named,
+    _note_name_heard,
     _wrong_doctor_named,
 )
 from agents.voice.evidence.guards import (
@@ -144,5 +145,6 @@ __all__ = [
     "_ungrounded_choice",
     "_ungrounded_detail",
     "_ungrounded_terms",
+    "_note_name_heard",
     "_wrong_doctor_named",
 ]

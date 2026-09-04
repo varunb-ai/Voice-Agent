@@ -18,6 +18,9 @@ Split from realtime_worker 2026-08-26. RealtimeSession moved whole and verbatim
 from __future__ import annotations
 
 import logging
+import statistics
+from collections import deque
+from typing import Deque
 from core.memory import CallMemory
 from agents.voice.audio import _outbound_conditioned, _effective_output_format, _agent_wire_sample_rate, _agent_wire_samples, _agent_wire_to_pcm16, _agent_to_caller_rate, _wire_sample_rate, _wire_to_pcm16
 from agents.voice.evidence import _is_location_ask, _revisit_grounding
@@ -36,6 +39,7 @@ import asyncio
 import json
 import numpy as np
 import threading
+import time
 
 log = logging.getLogger(__name__)
 
@@ -450,6 +454,22 @@ class RealtimeSession:
         # moments: one waits on a response we already asked for, this one waits
         # on a person. See call-20260831-1048.
         self._close_when_answered: bool = False
+        # WHICH deferral is armed, not merely that one is. "ours" and "theirs"
+        # are both waiting on somebody who owes a turn — a question is on the
+        # table and the silence watchdog's "still with me?" is the right thing
+        # to say into that silence. "spoken" is not: nobody owes anything, we
+        # have said our piece and the objective is complete, so asking whether
+        # they are still there is a question about a call that is over. Cleared
+        # wherever _close_when_answered is.
+        self._close_deferred_reason: str = ""
+        # Closes held because a goodbye would have been our second utterance
+        # in a row. Counted rather than only logged: call-20260903-1422 ended
+        # "I'm just going to think about it for now." / "Okay, thanks for
+        # explaining that." — two agent turns, no caller speech between them,
+        # two separate thank-yous — and no field in the artifact said so. The
+        # console line scrolled past and the transcript printer merged the two
+        # turns into one, so afterwards there was nothing left to look at.
+        self.stacked_closings: int = 0
         # escalate refused once because the caller's last turn was still
         # transcribing. ONE-SHOT: the placeholder resolves within a turn either
         # way, and a guard that can refuse forever cannot end a call.
@@ -476,10 +496,54 @@ class RealtimeSession:
         # recent one.
         self._last_voiced_frame_at: float = 0.0
         self._last_voiced_frame_rms: float = 0.0
+        # HOW LOUD THIS CALLER ACTUALLY IS, sampled only while nothing of ours
+        # is on the line. The backchannel echo floor was a flat 0.020 chosen
+        # against callers measuring 0.079-0.240, and on call-20260903-1259 the
+        # caller's median was 0.0436 with p25 at 0.0190 — a QUARTER of their
+        # speech sat under the floor, and 402 inbound frames (~8s) were thrown
+        # away as our own echo. The transcript shows the damage: one sentence
+        # arriving as "Dr. Abel is completely." / "Booked and." / "Not
+        # accepting a new patient's right, no.", and "waitlist" heard as
+        # "waitress".
+        #
+        # A quiet threshold has to be RELATIVE — the same lesson the transcribe
+        # hint learned. Bounded at 5s of speech so it tracks the line rather
+        # than averaging over a whole call.
+        self._caller_level: Deque[float] = deque(maxlen=250)
+        # Consecutive milliseconds the caller has held the DRAIN floor while
+        # our audio is out. The drain barge-in spends this, not a single frame
+        # — see the frame loop in realtime_worker. One 20ms frame above 0.02
+        # used to clear a greeting 3.16s early on clinic background
+        # (call-20260903-2017); a person interrupting sustains, a waiting room
+        # stutters.
+        self._voiced_run_ms: float = 0.0
         self.drain_barge_ins: list[dict] = []
         self._farewell_at: float = 0.0
         self._farewell_said: str = ""
         self.farewell_without_close: list[str] = []
+        # The agent promised a question and the response ended without one —
+        # tool-call padding. Armed on the turn, judged by the CLOCK rather than
+        # here, because "and then it never asked" is a fact about the silence
+        # that follows and not about the sentence. Disarmed the moment the
+        # agent speaks again, so a model that announces and then asks costs
+        # nothing. See _announced_an_ask and the recovery in _silence_watchdog.
+        self._padding_owed: str = ""
+        # Bounded like every other recovery here: the nudge creates a response,
+        # and a response can be padded exactly the way the one that caused the
+        # debt was. Without a cap that is the livelock the owed-substance caps
+        # were added for, one guard over.
+        self._padding_nudges: int = 0
+        # The directive is sent once per debt even if the response.create that
+        # should carry it is refused. Same shape as _owed_directive_sent, and
+        # for the same reason: the retry is the CREATE, not the instruction,
+        # and re-injecting it every half-second tells the model the same thing
+        # five times.
+        self._padding_directive_sent: bool = False
+        # Every announcement that had to be chased, with what was said and how
+        # long the line was silent first. Non-empty is dead air the caller sat
+        # through — the measurement the padding fix is judged on, and the
+        # reason this is not a console line.
+        self.tool_call_padding: list[dict] = []
         # Answers the caller gave to questions nobody had asked, with the state
         # they read as. Non-empty means the guard caught a field the ordinary
         # path — which only ever looks at the question on the table — would
@@ -504,6 +568,19 @@ class RealtimeSession:
         # key nothing read. A call that could not confirm the name and a call
         # that never asked must not produce the same record.
         self.name_mismatches: list[dict] = []
+        # Agent turns that handed over the persona's NAME AND DATE OF BIRTH
+        # together. The prompt calls that "the single event this whole section
+        # exists to prevent" — the person on the other end has a patient record
+        # open and the pair is enough to start one for somebody who has never
+        # been seen. It said so three separate ways and the model did it on all
+        # nine calls where a receptionist asked for intake details.
+        #
+        # RECORDED FROM THE LIVE SITE, not recomputed at save() from the
+        # transcript, so the number and the mid-call directive come from ONE
+        # evaluation. A count derived separately at the end is how the repeat
+        # detector once reported zero on a call that contained one — the
+        # cleanup ran before the tally.
+        self.compound_pii_dumps: list[dict] = []
         # Index into `turns` just after the agent spelled our doctor's surname
         # letter by letter. 0 means it never did. Everything before it is
         # evidence about a name the line mangled; everything after it is
@@ -554,6 +631,31 @@ class RealtimeSession:
         # the caller. Non-zero means the speakerphone echo is real and was
         # caught; zero across a call means it never happened.
         self._backchannel_echo_frames: int = 0
+        # WHEN THE CALLER WAS LAST AUDIBLY SPEAKING, on the monotonic clock,
+        # sampled per inbound frame inside the same clean window the level
+        # estimate uses. `caller_lull_s` is its only reader, and it exists
+        # because a backchannel has to land in a GAP between words: firing on
+        # elapsed speech alone put "mm-hm" through the middle of a syllable
+        # three times on call-20260903-1422, which is an interruption, not
+        # listening.
+        #
+        # THE GAP IS INVISIBLE IN THE EVENT STREAM, which is why the original
+        # comment said the pause "is not observable from the events we get" and
+        # settled for a timer. That is true of the EVENTS: speech_started fires
+        # once when they begin and speech_stopped only when the whole turn is
+        # over, so between them OpenAI tells us nothing. It is not true of the
+        # AUDIO — every 20ms frame passes through this process already, and its
+        # RMS is already computed one line away for the echo floor.
+        #
+        # 0.0 means no clean frame has been seen yet and is NOT a lull: an
+        # unmeasured line must never read as a quiet one, or the very first
+        # tick of every call would fire.
+        self._caller_voice_at: float = 0.0
+        # Ticks where a clip was due on elapsed speech and held because they
+        # were mid-word. Non-zero is this gate doing its job; zero on a call
+        # that did send clips means every one of them happened to land in a gap
+        # unaided, which is the behaviour that was already shipping.
+        self._backchannels_held: int = 0
         # Outbound conditioning, one per call because every stage of it carries
         # state between deltas. Built unconditionally — it is cheap, and a
         # session that flips to passthrough mid-call simply never calls it.
@@ -561,6 +663,18 @@ class RealtimeSession:
         # Answered-identity nudge, also one-shot for the same reason.
         self._identity_nudged: bool = False
         # Said the same sentence twice in a row, one-shot for the same reason.
+        # One-shot, like _self_repeat_nudged: the directive goes once.
+        self._pii_pair_nudged: bool = False
+        # The not-a-patient line said in two consecutive agent turns, and one
+        # of the persona's details handed over with none standing at all. Two
+        # halves of the same rule pulling opposite ways: the first is the
+        # doubling that makes the agent sound like a recording, the second is
+        # the safety failure the doubling was covering for. Each nudge is
+        # one-shot, like every other directive here.
+        self.repeated_disclaimers: list[dict] = []
+        self.bare_pii_details: list[dict] = []
+        self._disclaimer_repeat_nudged: bool = False
+        self._bare_detail_nudged: bool = False
         self._self_repeat_nudged: bool = False
         # Spoken persona and client org, set once the template is resolved.
         # _oai_to_twilio needs both to spot a re-introduction, and deriving
@@ -604,6 +718,80 @@ class RealtimeSession:
     # always been able to pass it: an unmeasurable segment is None, not 0.0,
     # and collapsing the two is what made a silent slice look like a real
     # measurement. The annotation said `float` and was simply wrong.
+    def note_caller_frame_rms(self, rms: float) -> None:
+        """Sample the caller's own level. Call ONLY on clean inbound frames.
+
+        Clean means: nothing of ours is audible — no backchannel window open
+        and no agent audio playing. Sampling during either would fold our own
+        echo into the estimate of how loud THEY are, which is the one number
+        the echo floor must not be contaminated by.
+
+        The 0.005 gate drops silence between words; it is far below any
+        plausible speech level and its only job is to stop the median
+        collapsing toward zero on a line that is mostly quiet.
+        """
+        if rms > 0.005:
+            self._caller_level.append(rms)
+
+    def note_caller_voice_gap(self, rms: float) -> None:
+        """Stamp the clock if this frame is the caller speaking, not a gap.
+
+        Call from EXACTLY where `note_caller_frame_rms` is called and nowhere
+        else — the two ask different questions of the same frame and both
+        require the same precondition, that nothing of ours is audible. A frame
+        sampled while our own audio is playing would keep this clock warm
+        through a silence and there would never be a lull to find.
+
+        The threshold is `caller_echo_floor()` rather than a constant of its
+        own, and that is deliberate: it is already the answer to "is this frame
+        this caller, or is it nothing", it is relative to how loud they actually
+        are, and a second threshold measuring the same thing is the two-places
+        bug this repo keeps paying for. It is a LOW bar, which is the safe
+        direction here — a soft syllable stays speech, so only a real gap reads
+        as a gap.
+        """
+        if rms >= self.caller_echo_floor():
+            self._caller_voice_at = time.monotonic()
+
+    def caller_lull_s(self) -> Optional[float]:
+        """Seconds since the caller was last audible, or None if unmeasured.
+
+        None, not 0.0, and the distinction is the whole guard: `0.0` would mean
+        "they are speaking right now" while the real answer before the first
+        clean frame is "nobody has looked". Collapsing those is how a silent
+        slice became a measurement once already — see note_caller_frame_rms's
+        annotation, which said `float` and was simply wrong.
+        """
+        if not self._caller_voice_at:
+            return None
+        return time.monotonic() - self._caller_voice_at
+
+    def caller_echo_floor(self) -> float:
+        """The level below which a frame is our backchannel rather than them.
+
+        RELATIVE, AND ONLY EVER DOWNWARD. `min` with the configured absolute is
+        the whole safety argument: a loud call behaves exactly as it does
+        today, so this cannot regress the calls the flat threshold was
+        calibrated on, and a quiet call gets the relief it needs. Measured over
+        three calls, at a quarter of the caller's median:
+
+            -1259 (median 0.0436)   25.9% of speech under the floor -> 13.8%
+            -1126 (median 0.1106)   15.6% -> 15.6%   (unchanged, min() holds)
+            -2207 (median 0.0833)   17.6% -> 17.6%   (unchanged)
+
+        A QUARTER, not a half: at 0.5 the quiet call is not helped at all, and
+        at 0.15 the floor drops on loud calls too, which is a change nothing
+        asked for. 0.25 is the value that moves only the case that is broken.
+
+        Falls back to the absolute until there is enough of the call to
+        measure — a floor derived from three frames is a guess wearing a
+        number.
+        """
+        _abs = settings.realtime_echo_rms
+        if len(self._caller_level) < 50:
+            return _abs
+        return min(_abs, statistics.median(self._caller_level) * 0.25)
+
     def note_utterance_rms(self, rms: Optional[float]) -> None:
         """Record one VAD segment's loudest-window RMS, keeping the loudest.
 
@@ -1179,6 +1367,10 @@ class RealtimeSession:
             # Sign-offs spoken while no tool had ended the call. Non-empty
             # means the agent tried to leave without writing a reason.
             "farewell_without_close": self.farewell_without_close or None,
+            # Turns that announced a question and asked none, with the silence
+            # that followed. Non-null means the caller was told to expect a
+            # question and then heard nothing until a guard intervened.
+            "tool_call_padding": self.tool_call_padding or None,
             "hard_refusal": self.hard_refusal or None,
             "drain_barge_ins": self.drain_barge_ins or None,
             # What `grounding` said while the call was still running, present
@@ -1223,6 +1415,13 @@ class RealtimeSession:
             "held_saves":     self.memory.get("deferred_saves") or None,
             "held_applied":   self.memory.get("deferred_applied") or None,
             "held_dropped":   self.memory.get("deferred_dropped") or None,
+            # Attempts to stamp how the call ended while the call was still
+            # owed a required answer. Non-empty means the model tried to stop
+            # working the call early — read it beside `missing`: if the two
+            # name the same field, the refusal is what sent the agent back for
+            # it. See objectives.premature_ending_label.
+            "ending_label_refusals":
+                self.memory.get("ending_label_refusals") or None,
             # Closed-set values accepted with a model-authored quote, because
             # this call transcribed nothing to check it against. Non-null means
             # `heard` on those fields was never corroborated.
@@ -1246,6 +1445,22 @@ class RealtimeSession:
             # Non-null with after_spelling false is a transcription problem;
             # with it true, the practice really does have somebody else.
             "name_mismatches": self.name_mismatches or None,
+            # Non-null means the EHR guard failed: name and date of birth left
+            # in one breath, which is all it takes for a record to be started
+            # for a person who does not exist. Distinct from
+            # unsolicited_pii_dumps, which asks whether they were ASKED — here
+            # they were, and that is not the question.
+            "compound_pii_dumps": self.compound_pii_dumps or None,
+            # The disclaimer said twice in consecutive turns. An AUDIO defect,
+            # not a safety one — the line was standing and the detail was
+            # covered; it just sounded like a recording. Non-null means the
+            # one-turn exception in templates.py did not hold.
+            "repeated_disclaimers": self.repeated_disclaimers or None,
+            # A name or a date of birth given with NO disclaimer standing.
+            # This one is the safety event: it is what they type into the
+            # record they have open. Non-null on any call is a regression in
+            # the rule the whole "Your Own Details" section exists for.
+            "bare_pii_details": self.bare_pii_details or None,
             # Backchannels played, and inbound frames withheld while one was
             # still audible. The second number is the whole reason the first
             # can be trusted: our clips are "mm-hm"/"okay"/"right"/"sure", and
@@ -1254,6 +1469,15 @@ class RealtimeSession:
             # means speakerphone echo is real on this line and was stopped.
             "backchannels_sent": self._backchannels_sent or None,
             "backchannel_echo_frames": self._backchannel_echo_frames or None,
+            # Ticks where a clip was due and held because they were mid-word.
+            # The number that says the lull gate is load-bearing rather than
+            # decorative: a call with clips sent and this null means every one
+            # of them landed in a gap by luck, which is what was shipping when
+            # three of them landed inside a syllable.
+            "backchannels_held": self._backchannels_held or None,
+            # Goodbyes that would have landed on top of the agent's own
+            # finished turn and were held for the caller's next one instead.
+            "stacked_closings": self.stacked_closings or None,
             # Of those, how many carried the substance of the turn and were
             # said on the next one instead of lost.
             "owed_substance_recovered": self._owed_recovered or None,
@@ -1288,7 +1512,9 @@ class RealtimeSession:
             # Countable conversational failures. Prose rules against these have
             # been ignored across three prompt versions; measuring them makes
             # the next edit evaluable instead of impressionistic.
-            "conversation":   conversation_metrics(merged),
+            # `self.turns` as well as the merged list: stacked_agent_turns is
+            # a count of the thing the merge removes. See conversation_metrics.
+            "conversation":   conversation_metrics(merged, self.turns),
             # Did the ask-budget directive actually work? It is injected as a
             # conversation item with no follow-up lever, so if the agent
             # acknowledges it and asks again there is nothing else to pull.
@@ -1454,7 +1680,7 @@ class RealtimeSession:
         print(f"  JSON     : data/3 cases jsons/{self.call_id}.json", flush=True)
         print("═" * _W + "\n", flush=True)
 
-        m = conversation_metrics(merged)
+        m = conversation_metrics(merged, self.turns)
         print(f"  CONVERSATION SHAPE", flush=True)
         print(f"    agent turns          {m['agent_turns']}", flush=True)
         print(f"    of which questions   {m['question_turns']}", flush=True)
@@ -1474,6 +1700,15 @@ class RealtimeSession:
         print(f"    said twice in a row  {m['back_to_back_repeats']}"
               f"{'   <- word for word, back to back' if m['back_to_back_repeats'] else ''}",
               flush=True)
+        print(f"    spoke over itself    {m['stacked_agent_turns']}"
+              f"{'   <- agent turns with no caller speech between them' if m['stacked_agent_turns'] else ''}",
+              flush=True)
+        if self.repeated_disclaimers or self.bare_pii_details:
+            print(f"    intake disclaimer    "
+                  f"{len(self.repeated_disclaimers)} repeated, "
+                  f"{len(self.bare_pii_details)} detail(s) given bare"
+                  f"{'   <- a record can be started off that' if self.bare_pii_details else ''}",
+                  flush=True)
         if self.dropped_second_items:
             _by: dict = {}
             for _d in self.dropped_second_items:

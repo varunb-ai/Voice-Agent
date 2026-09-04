@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Refusal Loop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root{
+  --paper:#f1f4f5; --surface:#fff; --surface-2:#e7edef; --surface-3:#dde5e8;
+  --ink:#151c20; --ink-2:#3c4a51; --ink-3:#6c7d85;
+  --rule:#d0dadd; --rule-2:#bcc9cd;
+  --accent:#0a6a68; --accent-soft:#dcedeb;
+  --p0:#a62d19; --p0-soft:#f7e1dc;
+  --p1:#95610d; --p1-soft:#f8ebd6;
+  --p2:#3f5a8c; --p2-soft:#e2e9f5;
+  --p3:#5f6d74; --p3-soft:#e6ebed;
+  --ok:#1c6a46; --ok-soft:#dcefe5;
+  --agent:#0a6a68; --caller:#7a4a12;
+  --shadow:0 1px 2px rgba(21,28,32,.06), 0 8px 24px -14px rgba(21,28,32,.28);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#0e1418; --surface:#161e23; --surface-2:#1d272d; --surface-3:#243038;
+  --ink:#e7eef1; --ink-2:#b2c1c8; --ink-3:#7f9098;
+  --rule:#2a363d; --rule-2:#39474f;
+  --accent:#54c6bd; --accent-soft:#10322f;
+  --p0:#f08468; --p0-soft:#3a1c15;
+  --p1:#e0ac55; --p1-soft:#33260f;
+  --p2:#8fa9db; --p2-soft:#1b2436;
+  --p3:#9aa8af; --p3-soft:#222b30;
+  --ok:#5cc494; --ok-soft:#123023;
+  --agent:#54c6bd; --caller:#d8a25f;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -14px rgba(0,0,0,.7);
+}}
+:root[data-theme="dark"]{
+  --paper:#0e1418; --surface:#161e23; --surface-2:#1d272d; --surface-3:#243038;
+  --ink:#e7eef1; --ink-2:#b2c1c8; --ink-3:#7f9098;
+  --rule:#2a363d; --rule-2:#39474f;
+  --accent:#54c6bd; --accent-soft:#10322f;
+  --p0:#f08468; --p0-soft:#3a1c15;
+  --p1:#e0ac55; --p1-soft:#33260f;
+  --p2:#8fa9db; --p2-soft:#1b2436;
+  --p3:#9aa8af; --p3-soft:#222b30;
+  --ok:#5cc494; --ok-soft:#123023;
+  --agent:#54c6bd; --caller:#d8a25f;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{
+  background:var(--paper); color:var(--ink);
+  font-family:"Source Serif 4",Georgia,"Times New Roman",serif;
+  font-size:17px; line-height:1.62; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 24px 96px}
+.col{max-width:68ch}
+h1,h2,h3,h4,.disp{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;text-wrap:balance}
+h2{font-size:1.62rem;font-weight:700;letter-spacing:-.014em;margin:0 0 6px;line-height:1.2}
+h3{font-size:1.12rem;font-weight:600;letter-spacing:-.005em;margin:34px 0 8px;line-height:1.3}
+h4{font-size:.94rem;font-weight:600;margin:22px 0 6px}
+p{margin:0 0 14px}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
+code{font-size:.845em;background:var(--surface-2);padding:.1em .34em;border-radius:3px;
+  border:1px solid var(--rule);word-break:break-word}
+a{color:var(--accent)}
+strong{font-weight:600}
+.eyebrow{font-family:Archivo,sans-serif;font-size:.685rem;font-weight:600;letter-spacing:.15em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 10px}
+
+/* ── masthead ─────────────────────────────────────── */
+header.mast{border-bottom:1px solid var(--rule);background:var(--surface);}
+.mast-in{max-width:1180px;margin:0 auto;padding:40px 24px 34px}
+.mast h1{font-size:clamp(2.1rem,5.2vw,3.3rem);font-weight:700;letter-spacing:-.03em;
+  line-height:1.02;margin:0 0 16px;max-width:16ch}
+.kicker{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:20px}
+.chip{font-family:Archivo,sans-serif;font-size:.7rem;font-weight:600;letter-spacing:.07em;
+  text-transform:uppercase;padding:4px 9px;border-radius:3px;border:1px solid var(--rule-2);
+  color:var(--ink-2);background:var(--surface-2)}
+.chip.hot{background:var(--p0-soft);border-color:var(--p0);color:var(--p0)}
+.lede{font-size:1.2rem;line-height:1.55;color:var(--ink-2);max-width:62ch;margin:0}
+.lede b{color:var(--ink)}
+
+/* ── nav rail ──────────────────────────────────────── */
+nav.rail{position:sticky;top:0;z-index:20;background:var(--paper);
+  border-bottom:1px solid var(--rule);}
+.rail-in{max-width:1180px;margin:0 auto;padding:0 24px;display:flex;gap:2px;
+  overflow-x:auto;scrollbar-width:thin}
+.rail a{font-family:Archivo,sans-serif;font-size:.755rem;font-weight:500;letter-spacing:.02em;
+  color:var(--ink-3);text-decoration:none;padding:11px 11px;white-space:nowrap;
+  border-bottom:2px solid transparent}
+.rail a:hover{color:var(--ink);border-bottom-color:var(--rule-2)}
+.rail a:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
+section{padding-top:52px}
+.sechead{display:flex;gap:14px;align-items:baseline;margin-bottom:20px;
+  border-top:2px solid var(--ink);padding-top:12px}
+.secno{font-family:"IBM Plex Mono",monospace;font-size:.78rem;font-weight:500;
+  color:var(--ink-3);padding-top:5px}
+
+/* ── verdict block ─────────────────────────────────── */
+.verdict{background:var(--surface);border:1px solid var(--rule);border-left:4px solid var(--p0);
+  padding:26px 28px;margin:30px 0;box-shadow:var(--shadow)}
+.verdict .q{font-family:Archivo,sans-serif;font-size:.72rem;font-weight:600;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 12px}
+.verdict .a{font-family:Archivo,sans-serif;font-size:1.28rem;line-height:1.42;font-weight:500;
+  letter-spacing:-.01em;margin:0;max-width:56ch}
+.verdict .a em{font-style:normal;color:var(--p0);font-weight:600}
+
+/* ── metric tiles ──────────────────────────────────── */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:1px;
+  background:var(--rule);border:1px solid var(--rule);margin:30px 0}
+.tile{background:var(--surface);padding:20px 20px 18px}
+.tile .lab{font-family:Archivo,sans-serif;font-size:.68rem;font-weight:600;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 10px;line-height:1.35}
+.tile .big{font-family:Archivo,sans-serif;font-size:2.1rem;font-weight:700;letter-spacing:-.03em;
+  line-height:1;font-variant-numeric:tabular-nums;margin:0 0 7px}
+.tile .big.bad{color:var(--p0)} .tile .big.good{color:var(--ok)}
+.tile .sub{font-size:.86rem;line-height:1.42;color:var(--ink-2);margin:0}
+
+/* ── tables ────────────────────────────────────────── */
+.tw{overflow-x:auto;margin:20px 0;border:1px solid var(--rule);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:.87rem;
+  font-family:Archivo,sans-serif}
+th{text-align:left;font-weight:600;font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-3);padding:11px 14px;border-bottom:1px solid var(--rule-2);white-space:nowrap;
+  background:var(--surface-2)}
+td{padding:10px 14px;border-bottom:1px solid var(--rule);vertical-align:top;line-height:1.45}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;
+  font-family:"IBM Plex Mono",monospace;white-space:nowrap}
+td.mono{font-family:"IBM Plex Mono",monospace;font-size:.82rem}
+tr.hi td{background:var(--p0-soft)}
+tr.okrow td{background:var(--ok-soft)}
+caption{caption-side:bottom;text-align:left;font-size:.8rem;color:var(--ink-3);
+  padding:10px 14px;font-family:Archivo,sans-serif;line-height:1.5}
+
+/* ── call log ──────────────────────────────────────── */
+.log{border:1px solid var(--rule);background:var(--surface);margin:22px 0;overflow:hidden}
+.log-h{padding:11px 16px;background:var(--surface-2);border-bottom:1px solid var(--rule);
+  font-family:"IBM Plex Mono",monospace;font-size:.75rem;color:var(--ink-2);
+  display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.turn{display:grid;grid-template-columns:38px 74px 1fr;gap:0 14px;padding:9px 16px;
+  border-bottom:1px solid var(--rule);align-items:start}
+.turn:last-child{border-bottom:none}
+.turn .n{font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:var(--ink-3);
+  padding-top:3px;font-variant-numeric:tabular-nums}
+.turn .who{font-family:Archivo,sans-serif;font-size:.68rem;font-weight:600;letter-spacing:.07em;
+  text-transform:uppercase;padding-top:4px}
+.turn.a .who{color:var(--agent)} .turn.c .who{color:var(--caller)}
+.turn .say{font-size:.95rem;line-height:1.5}
+.turn.a{background:var(--surface)}
+.turn.c{background:var(--surface-2)}
+.turn.fault{box-shadow:inset 3px 0 0 var(--p0)}
+.note{grid-column:3;margin-top:7px;font-family:Archivo,sans-serif;font-size:.79rem;
+  line-height:1.5;color:var(--p0);border-left:2px solid var(--p0);padding-left:11px}
+.note.mech{color:var(--ink-2);border-left-color:var(--rule-2)}
+.note b{color:inherit}
+
+/* ── findings ──────────────────────────────────────── */
+.find{background:var(--surface);border:1px solid var(--rule);margin:22px 0;box-shadow:var(--shadow)}
+.find-h{display:flex;gap:12px;align-items:flex-start;padding:17px 20px 14px;
+  border-bottom:1px solid var(--rule)}
+.sev{font-family:Archivo,sans-serif;font-size:.7rem;font-weight:700;letter-spacing:.08em;
+  padding:3px 8px;border-radius:3px;flex:0 0 auto;margin-top:2px}
+.sev.p0{background:var(--p0-soft);color:var(--p0)}
+.sev.p1{background:var(--p1-soft);color:var(--p1)}
+.sev.p2{background:var(--p2-soft);color:var(--p2)}
+.sev.p3{background:var(--p3-soft);color:var(--p3)}
+.find-h h3{margin:0;font-size:1.06rem;line-height:1.32}
+.find-b{padding:4px 20px 18px}
+.fr{display:grid;grid-template-columns:118px 1fr;gap:0 16px;padding:11px 0;
+  border-bottom:1px solid var(--rule)}
+.fr:last-child{border-bottom:none}
+.fr dt{font-family:Archivo,sans-serif;font-size:.66rem;font-weight:600;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-3);padding-top:3px}
+.fr dd{margin:0;font-size:.93rem;line-height:1.55}
+.fr dd p{margin:0 0 8px}.fr dd p:last-child{margin:0}
+.fr dd ul{margin:0;padding-left:18px}
+.fr dd li{margin-bottom:5px}
+.risk-lo{color:var(--ok);font-weight:600}
+.risk-md{color:var(--p1);font-weight:600}
+.risk-hi{color:var(--p0);font-weight:600}
+
+/* ── misc ──────────────────────────────────────────── */
+.callout{border:1px solid var(--rule);border-left:3px solid var(--accent);
+  background:var(--accent-soft);padding:16px 20px;margin:22px 0}
+.callout p:last-child{margin:0}
+.callout .t{font-family:Archivo,sans-serif;font-weight:600;font-size:.93rem;margin:0 0 6px}
+.callout.warn{border-left-color:var(--p1);background:var(--p1-soft)}
+.callout.stop{border-left-color:var(--p0);background:var(--p0-soft)}
+ul.body,ol.body{max-width:68ch;padding-left:22px;margin:0 0 16px}
+ul.body li,ol.body li{margin-bottom:9px}
+.flow{font-family:"IBM Plex Mono",monospace;font-size:.8rem;line-height:1.75;
+  background:var(--surface);border:1px solid var(--rule);padding:18px 20px;margin:22px 0;
+  overflow-x:auto;white-space:pre;color:var(--ink-2)}
+.flow b{color:var(--p0);font-weight:500}
+.flow i{color:var(--ok);font-style:normal}
+hr.soft{border:none;border-top:1px solid var(--rule);margin:38px 0}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:24px;margin:22px 0}
+.pane{border:1px solid var(--rule);background:var(--surface);padding:18px 20px}
+.pane h4{margin-top:0}
+.pane ul{margin:0;padding-left:19px;font-size:.93rem}
+.pane li{margin-bottom:7px}
+footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--rule);
+  font-family:Archivo,sans-serif;font-size:.8rem;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (max-width:640px){
+  .turn{grid-template-columns:30px 1fr;gap:0 10px}
+  .turn .who{grid-column:2;padding-top:0;margin-bottom:2px}
+  .turn .say{grid-column:2}.note{grid-column:2}
+  .fr{grid-template-columns:1fr;gap:4px}
+}
+</style>
+
+</head>
+<body>
+<header class="mast">
+  <div class="mast-in">
+    <div class="kicker">
+      <span class="chip hot">Root cause found</span>
+      <span class="chip">patient_discovery</span>
+      <span class="chip">51 calls · 43 recordings</span>
+      <span class="chip">code · logs · waveforms</span>
+    </div>
+    <h1>The Refusal Loop</h1>
+    <p class="lede">The patient does not sound robotic because of its voice. Measured against the human receptionist on the same line, <b>the agent is the more prosodically varied speaker.</b> It sounds robotic because the guard layer keeps telling it the receptionist never answered — and the only move it has left is to ask again.</p>
+  </div>
+</header>
+
+<nav class="rail"><div class="rail-in">
+  <a href="#diagnosis">Diagnosis</a>
+  <a href="#evidence">Failure evidence</a>
+  <a href="#trace">Runtime trace</a>
+  <a href="#voice">Voice &amp; prosody</a>
+  <a href="#audio">Audio pipeline</a>
+  <a href="#prompt">Prompt</a>
+  <a href="#state">Conversation state</a>
+  <a href="#turngen">Turn generation</a>
+  <a href="#bargein">Barge-in</a>
+  <a href="#backchannel">Backchannels</a>
+  <a href="#latency">Latency</a>
+  <a href="#ranking">Ranking</a>
+  <a href="#plan">Fix plan</a>
+  <a href="#nochange">Don't change</a>
+  <a href="#tests">Tests</a>
+</div></nav>
+
+<div class="wrap">
+
+<!-- ══════════════ DIAGNOSIS ══════════════ -->
+<section id="diagnosis">
+  <div class="sechead"><span class="secno">01</span><h2>Executive summary</h2></div>
+
+  <div class="verdict">
+    <p class="q">Why does this agent sound monotonic, robotic and scripted despite a green suite?</p>
+    <p class="a">Because <em>three grounding guards throw away real answers</em>, the agent is told the receptionist said nothing, and it re-asks. The suite is green because it is a regression corpus built from this project's own calls — every fixture is a phrasing this system has already seen, from one office of colleagues who answer in one word.</p>
+  </div>
+
+  <div class="col">
+    <p>The investigation traced the full path from Twilio media in to Twilio media out, measured the delivered waveform against the human on the same call, and audited every save refusal in 51 September calls. Three things came back clearly.</p>
+  </div>
+
+  <div class="tiles">
+    <div class="tile">
+      <p class="lab">Agent pitch dynamism, delivered</p>
+      <p class="big good">3.71 st</p>
+      <p class="sub">Against the human receptionist's <b>2.61 st</b> on the same recording. The voice is <b>not</b> flat. Holds across 28 calls.</p>
+    </div>
+    <div class="tile">
+      <p class="lab">classify_identity miss rate</p>
+      <p class="big bad">65%</p>
+      <p class="sub">17 of 26 realistic US front-desk confirmations return <code>None</code>. Identity is question one and the gate for every other field.</p>
+    </div>
+    <div class="tile">
+      <p class="lab">True response gap, median</p>
+      <p class="big bad">2.16 s</p>
+      <p class="sub">Measured off the Twilio recordings, n=53 turns. Only 34% land under 2 s. The artifact under-reports this by 0.86 s.</p>
+    </div>
+    <div class="tile">
+      <p class="lab">Save refusals, 51 calls</p>
+      <p class="big bad">79</p>
+      <p class="sub">69% of calls carry at least one. <b>56 of 79 are on <code>save_doctor_identity</code></b> — the first question asked.</p>
+    </div>
+  </div>
+
+  <div class="col">
+    <h3>The one-paragraph mechanism</h3>
+    <p>A US receptionist answers the phone with a greeting in front of the answer: <i>"Good afternoon, yes, Dr. Abel is one of our pediatricians here."</i> <code>classify_identity</code> anchors its affirmative at <code>^\W*(yes|yeah|yep|yup)</code> — string start — so the greeting defeats it, and the named-subject form (<i>"Dr. Abel is one of our…"</i>) is not in the pattern at all. The guard returns <code>None</code>, the save is refused, and the refusal text goes back to the model saying <i>nothing the caller said since you asked reads as that answer</i>. The model retries, is refused again, and eventually does the only thing left: it re-asks a question that was already answered. The receptionist hears a machine. Everything downstream — the stacked questions, the narration, the dead air, the backwards walk through the objective — is this loop plus the repairs bolted on top of it.</p>
+  </div>
+
+  <div class="callout stop">
+    <p class="t">The most important correction to the current mental model</p>
+    <p>Previous work treated flat delivery as a prompt-tone problem and spent a token-ceiling raise on it. The measurement says the tone work succeeded and was never the bottleneck: <b>marin delivers more pitch variation than the human it is talking to, on every call in the corpus.</b> Continuing to tune the persona will not move the complaint.</p>
+  </div>
+</section>
+
+<!-- ══════════════ EVIDENCE ══════════════ -->
+<section id="evidence">
+  <div class="sechead"><span class="secno">02</span><h2>Actual failure evidence</h2></div>
+  <div class="col">
+    <p><code>call-20260904-0026-a446</code> — <code>patient_discovery</code>, 160 s, outcome <b>partial</b>, <code>missing: ["branch_confirmed"]</code>, cost $0.40. Every failure in the brief is in this one call. Faults are marked against the turn that produced them.</p>
+  </div>
+
+  <div class="log">
+    <div class="log-h"><span>call-20260904-0026-a446 · Mercy General · Dr. Mark F. Abel (Pediatric)</span><span>marin · server_vad 400 ms · pcm out, conditioned</span></div>
+
+    <div class="turn a"><span class="n">0</span><span class="who">Patient</span><span class="say">Hi there, good afternoon. I'm looking for a new pediatric doctor — any chance this is Dr. Abel's office?</span></div>
+
+    <div class="turn c"><span class="n">1</span><span class="who">Desk</span><span class="say">Good afternoon, yes, Dr. Abel is one of our pediatrician here.</span>
+      <span class="note"><b>Failure A begins.</b> <code>classify_identity()</code> on this exact string returns <code>None</code> — verified by running the shipped function. <code>save_doctor_identity</code> is then refused <b>five times</b> (00:26:47 → :53), burning <code>inference_2 = 9.75 s</code>. The refusal text tells the model the caller never answered.</span></div>
+
+    <div class="turn a fault"><span class="n">2</span><span class="who">Patient</span><span class="say">Got it — does Dr. Abel, the pediatric doctor, work there?</span>
+      <span class="note"><b>The re-ask is the guard's output, not the model's mistake.</b> Told five times that nothing was heard, the model asks again. Total silence before this turn: <b>12.14 s</b>.</span></div>
+
+    <div class="turn c"><span class="n">3</span><span class="who">Desk</span><span class="say">Yes.</span>
+      <span class="note mech">A bare "Yes." finally matches <code>^\W*(yes)</code>. The save succeeds. The receptionist had to be trained down to a single word.</span></div>
+
+    <div class="turn a"><span class="n">4</span><span class="who">Patient</span><span class="say">Okay — could you tell me which branch she sees people at?</span></div>
+
+    <div class="turn c"><span class="n">5</span><span class="who">Desk</span><span class="say">She sees notary clinic.</span>
+      <span class="note mech">The transcriber mangles the clinic name. The model hears the audio and writes <code>branch="North Clinic"</code>; grounding reads the transcript, finds no "north", and the save is held then <b>contradicted</b>. <code>branch_confirmed</code> becomes uncollectable for the rest of the call — which is what drives Failure E.</span></div>
+
+    <div class="turn a"><span class="n">6</span><span class="who">Patient</span><span class="say">Got it — are you taking new patients right now?</span></div>
+
+    <div class="turn c"><span class="n">7</span><span class="who">Desk</span><span class="say">Yeah, before that, I need to ask one information. What is your full name?</span>
+      <span class="note mech">The caller <b>defers</b> the answer. This turn is the last thing the accepting-window will ever contain.</span></div>
+
+    <div class="turn a"><span class="n">8</span><span class="who">Patient</span><span class="say">Oh, I'm not a patient here yet — I'm just looking. It's Ingrid Bennett.</span>
+      <span class="note mech">Correct. The not-a-patient disclaimer is now <b>standing</b>, which CALL CONTEXT says lasts one turn.</span></div>
+
+    <div class="turn c"><span class="n">9</span><span class="who">Desk</span><span class="say">Okay, and your date of birth?</span></div>
+
+    <div class="turn a fault"><span class="n">10</span><span class="who">Patient</span><span class="say">Okay, let me think about how to answer that. <b>‖</b> Sure, it's November 3, 2000 — and could you tell me the exact branch name where Dr. Abel sees patients?</span>
+      <span class="note"><b>Failure B, four separate defects in one turn.</b> ‖ marks the item boundary — the model emitted <b>two audio items</b>; the second was held and released, so the caller heard both glued together.
+      <br>① <i>"let me think about how to answer that"</i> is explicitly banned by the prompt (<i>"a sentence that narrates … 'let me think'"</i>) and produced anyway, at the point of maximum rule conflict.
+      <br>② <i>"Sure, it's November 3, 2000"</i> is read <b>verbatim</b> out of CALL CONTEXT, which prescribes it as "THE EXACT SENTENCE" while the static prompt says every quoted phrase is "a PATTERN TO VARY FROM".
+      <br>③ The branch ask stapled on is the objective still owing <code>branch_confirmed</code>.
+      <br>④ That branch ask <b>closes the accepting-new-patients evidence window</b> — see turn 13.</span></div>
+
+    <div class="turn c"><span class="n">11</span><span class="who">Desk</span><span class="say">Okay. Let me pull up the data.</span></div>
+
+    <div class="turn a fault"><span class="n">12</span><span class="who">Patient</span><span class="say">Okay, I'm not registered with you yet, and I'll wait while you check.</span>
+      <span class="note"><b>Failure C is a guard false-positive, not a model whim.</b> Because the released second item is added to <code>sess.turns</code> as its own agent turn, <code>_prev_agent</code> for turn 10 was the model's <i>own filler</i>, so <code>_detail_left_bare</code> could not see the disclaimer standing at turn 8. It fired, recorded <code>bare_pii_details</code>, and injected <i>"Tell them now … that you are not registered with them yet"</i>. The model obeyed — on a turn where the receptionist had asked it to hold. The narration <i>"I'll wait while you check"</i> is the hold acknowledgement, invented because both prompt-approved hold lines also appear on the banned-housekeeping list.</span></div>
+
+    <div class="turn c"><span class="n">13</span><span class="who">Desk</span><span class="say">Okay, unfortunately it looks like Dr. Ables is completely booked and not accepting new patients right now.</span>
+      <span class="note"><b>Failure D.</b> <code>classify_choice</code> reads this correctly as <code>no</code> — but the save was refused twice, quoting <i>THEY SAID: 'Yeah, before that, I need to ask one information.'</i> The evidence window's <b>ceiling</b> had closed at turn 10's branch ask, so the window held turns 7–9 and excluded the answer entirely.</span></div>
+
+    <div class="turn a fault"><span class="n">14</span><span class="who">Patient</span><span class="say">Thanks for letting me know — is there a waiting list, and how would I get on it? <b>‖</b> Got it — could you just say it plainly for me, are you taking new patients for Dr. Abel right now?</span>
+      <span class="note">Two items again, both released. The second is the re-ask forced by the refusal — <i>"could you just say it plainly for me"</i> is the model caught between the tool saying <i>they did not answer</i> and the prompt saying <i>if you heard them fine, do NOT ask again</i>. 39 words, two asks, one turn.</span></div>
+
+    <div class="turn c"><span class="n">15</span><span class="who">Desk</span><span class="say">No, we are not taking.</span></div>
+
+    <div class="turn a fault"><span class="n">16</span><span class="who">Patient</span><span class="say">Thanks for telling me that — is there a waiting list, and how would I get on it?</span>
+      <span class="note">Verbatim repeat of the second half of turn 14. <code>repeated_sentences: 1</code>. The prompt forbids this in a dedicated section titled "Never Say The Same Thing Twice"; the staple in turn 14 meant the first asking was never answered.</span></div>
+
+    <div class="turn c"><span class="n">17</span><span class="who">Desk</span><span class="say">No, no, there is no waiting list here. Thank you.</span></div>
+
+    <div class="turn a fault"><span class="n">18</span><span class="who">Patient</span><span class="say">Thanks for checking — which clinic site does Dr. Abel see patients at?</span>
+      <span class="note"><b>Failure E.</b> <code>branch_confirmed</code> is still owed (turn 5's save was contradicted), so the objective walks the conversation backwards to a field it can no longer collect. And <i>"Thanks for checking —"</i> is on the prompt's explicit banned-housekeeping list <b>and</b> is the illustrative example inside <code>_TONE_PATIENT</code>. The prompt contradicts itself on this exact string.</span></div>
+
+    <div class="turn c"><span class="n">19</span><span class="who">Desk</span><span class="say">No, I already said no. Thank you.</span>
+      <span class="note mech">The receptionist has now told the agent it is repeating itself. This is the audible cost of the whole chain.</span></div>
+
+    <div class="turn a"><span class="n">20</span><span class="who">Patient</span><span class="say">Okay, thanks for your time. I'll sort out my schedule and call back another time.</span>
+      <span class="note mech"><code>ending_label_refusals</code>: the model's <code>no_capacity</code> label was refused because <code>branch_confirmed</code> was still owed — correct per the zombie-goodbye fix, and a symptom of the same unreachable field.</span></div>
+  </div>
+
+  <h3>The same defects, across the corpus</h3>
+  <div class="tw"><table>
+    <caption>Every <code>save_refusals</code> entry in 51 September calls, classified by the branch of <code>_ungrounded_choice</code> (or the name check) that produced it.</caption>
+    <thead><tr><th>Cause</th><th class="num">n</th><th>What the caller had actually said</th></tr></thead>
+    <tbody>
+      <tr class="hi"><td>Classifier returned no-answer</td><td class="num">36</td><td class="mono">"Yes, Dr. Okafor works here. What do you need to be seen for?"</td></tr>
+      <tr class="hi"><td>Surname mangled → read as a different doctor</td><td class="num">17</td><td class="mono">"Dr. Abul is one of our pediatrician here" · "Dr. Okofor" · "Dr. April"</td></tr>
+      <tr class="hi"><td>Window held only questions</td><td class="num">10</td><td class="mono">"Hello, yes, Dr. Abel is work here. How can I help you today?"</td></tr>
+      <tr><td>Identity gate shut → downstream save blocked</td><td class="num">6</td><td class="mono">"Okay, she sees patients out of the Northgate Clinic."</td></tr>
+      <tr><td>Branch rejected (transcription)</td><td class="num">4</td><td class="mono">"at Notke Klinik." · "She's at a Harivatsai campus."</td></tr>
+      <tr><td>Nothing transcribed yet</td><td class="num">3</td><td class="mono">"Yes, this is Dr. Okafor's office."</td></tr>
+      <tr><td>Other</td><td class="num">3</td><td class="mono">—</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <p>Read the second column. <b>Almost every refused turn is a receptionist answering the question correctly.</b> The canonical American front-desk sentence — <i>"Hello, yes, Dr. X is one of our physicians here. How can I help you today?"</i> — appears in six separate calls and is refused every time.</p>
+  </div>
+</section>
+
+<!-- ══════════════ TRACE ══════════════ -->
+<section id="trace">
+  <div class="sechead"><span class="secno">03</span><h2>End-to-end runtime trace</h2></div>
+  <div class="col"><p>The path, with the measured cost of each leg and the point at which each defect enters. Legs marked in red are where the felt latency and the robotic behaviour are created.</p></div>
+
+  <div class="flow">Twilio media in  ── μ-law 8 k, passthrough ─────────────────  <i>~0 ms, no conversion</i>
+  │  <span>agents/voice/realtime_worker.py::_twilio_to_oai</span>
+  ▼
+Echo gate / drain barge-in  ── floor 0.060, 300 ms voiced ───  <i>32 events / 51 calls</i>
+  ▼
+OpenAI server_vad  ── threshold 0.55, silence 400 ms ───────  <b>0.38 – 0.49 s</b>
+  ▼
+Realtime session  ── gpt-realtime-2, marin, 1500 tok cap
+  │  instructions = 6,927 tok static  +  405 tok CALL CONTEXT
+  │  + up to 28 mid-call directives injected as role:"user"     <b>← contaminates the dialogue channel</b>
+  ▼
+inference 1  ── model emits function_call ───────────────────  <b>0.63 – 3.22 s</b>
+  ▼
+tools.run_tool → grounding guards                              <i>our_work = 0.00 s</i>
+  │  _ungrounded_identity / _ungrounded_choice / _ungrounded_terms
+  │  <b>REFUSED on 79 of ~330 tool calls — the root cause enters here</b>
+  ▼
+function_call_output ── refusal text re-enters model context
+  ▼
+wait for response.done, then a SECOND response.create           <i>deferral 0.00 – 0.03 s</i>
+  ▼
+inference 2  ── model finally speaks ───────────────────────  <b>1.14 – 9.75 s</b>
+  │  <b>on refusal the model retries the tool → this leg repeats</b>
+  ▼
+audio deltas ── second item held on item_id mismatch            <i>7.9% of agent turns</i>
+  ▼
+OutboundConditioner ── presence EQ, 3:1 comp, decimate, μ-law   <i>prosody-transparent, measured</i>
+  ▼
+Twilio media out ── US ⇄ India ⇄ US via ngrok ──────────────  <b>~0.9 s, on 100% of turns</b>
+  ▼
+Receptionist hears the patient  ─────────────────────────────  <b>median 2.16 s after they stopped</b></div>
+
+  <div class="col">
+    <p>Two structural facts fall out of the trace and matter more than any single bug:</p>
+    <ul class="body">
+      <li><b>Every substantive turn costs two model inferences.</b> A tool-bearing turn measured 2.26–11.27 s of felt latency; a turn with no tool measured 1.13–1.24 s. The tool round trip is not <i>our</i> work — <code>our_work</code> is 0.00 s on every stage — it is the second inference the architecture requires after <code>function_call_output</code>.</li>
+      <li><b>Refusals multiply that second inference.</b> Turn 1's <code>inference_2</code> was 9.75 s because the model made five tool calls into a guard that rejected all five.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══════════════ VOICE ══════════════ -->
+<section id="voice">
+  <div class="sechead"><span class="secno">04</span><h2>Voice &amp; prosody — measured, not assumed</h2></div>
+  <div class="col">
+    <p>F0 by autocorrelation, 40 ms frames / 10 ms hop, voiced frames only, median-filtered for octave errors. Pitch dynamism is reported in <b>semitones</b> — the standard perceptual unit, and the only one not confounded by speaker mean. Below ~1.5 st reads as monotone; ordinary engaged conversation sits around 2.5–4 st.</p>
+    <p>The comparison is controlled the same way the outbound-conditioning work was: <b>agent against the human on the same recording</b>, same codec, same line, same instrument. Channel assignment was established empirically — matching segment onsets and words-per-minute against the transcript, then confirmed by f0 (marin renders at 200 Hz offline and measures 208 Hz live).</p>
+  </div>
+
+  <div class="tw"><table>
+    <caption>Twilio dual-channel recording of <code>call-20260904-0026-a446</code>, and the same measurement repeated across 28 recordings.</caption>
+    <thead><tr><th>Speaker</th><th class="num">f0 median</th><th class="num">pitch SD</th><th class="num">energy SD</th><th>Reading</th></tr></thead>
+    <tbody>
+      <tr class="okrow"><td><b>Agent</b> (marin, delivered)</td><td class="num">208 Hz</td><td class="num">3.71 st</td><td class="num">4.64 dB</td><td>Normal-to-expressive. Not monotone.</td></tr>
+      <tr><td>Human receptionist, same line</td><td class="num">128 Hz</td><td class="num">2.61 st</td><td class="num">6.68 dB</td><td>The reference — and it is <b>flatter</b> in pitch.</td></tr>
+      <tr><td colspan="5" style="background:var(--surface-2);font-size:.8rem;color:var(--ink-3)">Across 28 calls: agent 3.3 – 5.1 st (mean ≈ 4.0) · humans 2.1 – 3.7 st (mean ≈ 2.8). The agent is the more pitch-dynamic speaker on essentially every call.</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <p class="t">The falsifiable claim, and it survived</p>
+    <p>If the complaint were acoustic, the agent's pitch dynamism would sit below the human's. It sits <b>42% above</b> it, on the failing call and across the corpus. Voice selection, Realtime voice config, resampling, μ-law and the 8 kHz band are all <b>excluded as causes of "monotonic"</b>.</p>
+  </div>
+
+  <h3>What the measurement <i>does</i> find</h3>
+  <div class="two">
+    <div class="pane">
+      <h4>Energy is genuinely flatter, and identical every call</h4>
+      <p style="font-size:.93rem;margin:0 0 8px">Agent energy SD lands at <b>4.5–5.2 dB on every single call</b>; humans scatter 5.0–9.2 dB. That is the 3:1 compressor doing exactly what it was built to do for intelligibility. It costs ~1.7 dB of loudness variation, and — the more interesting half — it removes the <i>call-to-call</i> variation a person has. Real but second-order.</p>
+    </div>
+    <div class="pane">
+      <h4>The persona instruction measurably flattens pitch</h4>
+      <p style="font-size:.93rem;margin:0 0 8px">From the existing A/B renders, same line, only delivery varying:</p>
+      <p class="mono" style="font-size:.78rem;line-height:1.7;margin:0">marin A-flat &nbsp; 3.85 / 3.93 / 4.51 st<br>marin B-humble &nbsp;2.90 / 3.23 / 2.24 st</p>
+      <p style="font-size:.93rem;margin:8px 0 0">"Subtly under the weather" removes <b>25–40%</b> of pitch dynamism. It still lands inside the normal band, so it is not the complaint — but the headroom is real if you want it back.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ AUDIO ══════════════ -->
+<section id="audio">
+  <div class="sechead"><span class="secno">05</span><h2>Audio pipeline — proven not responsible</h2></div>
+  <div class="col">
+    <p>The brief asked for proof rather than assertion, so the conditioner was measured directly: a real agent utterance upsampled to 24 kHz, pushed through the shipping <code>OutboundConditioner.process()</code>, and the μ-law output decoded and re-analysed.</p>
+  </div>
+
+  <div class="tw"><table>
+    <caption>Same signal, before and after the full outbound chain: presence EQ (+5 dB, 1.8–3.4 kHz) → elliptic anti-alias → decimate 24 k → 8 k → 3:1 compressor → +8.17 dB makeup → μ-law.</caption>
+    <thead><tr><th>Stage</th><th class="num">f0 median</th><th class="num">pitch SD</th><th class="num">energy SD</th><th class="num">energy range</th></tr></thead>
+    <tbody>
+      <tr><td>Input, 24 kHz PCM</td><td class="num">200.0 Hz</td><td class="num">3.83 st</td><td class="num">4.37 dB</td><td class="num">14.5 dB</td></tr>
+      <tr><td>Output, 8 kHz μ-law</td><td class="num">200.0 Hz</td><td class="num">3.84 st</td><td class="num">4.36 dB</td><td class="num">15.1 dB</td></tr>
+      <tr class="okrow"><td><b>Delta</b></td><td class="num">0.0</td><td class="num">+0.01</td><td class="num">−0.01</td><td class="num">+0.6</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <p>The chain is <b>prosody-transparent</b>, and it is transparent by construction, not by luck:</p>
+    <ul class="body">
+      <li>A linear filter cannot move F0. Decimation to 8 kHz cannot either — the whole 70–350 Hz F0 range sits an octave and more below Nyquist.</li>
+      <li>The compressor acts on level, with 5 ms attack and 80 ms release. It reduces crest by ~4 dB and leaves timing, pitch and pause structure untouched.</li>
+      <li>The seam defect the class was written to fix is genuinely fixed: the suite asserts chunked output is byte-identical to one-shot, including ragged chunk sizes.</li>
+    </ul>
+    <p>Control tests also rule out the transport as a measurement artefact: applying a 300 Hz PSTN high-pass and a 22.05 kHz MP3 rate round-trip to a known render moved f0 by 5 Hz and pitch SD by 0.08 st. Nothing in decoding, conversion, filtering, normalisation, chunking or buffering is flattening dynamics, pitch, timing or transients.</p>
+  </div>
+
+  <div class="callout warn">
+    <p class="t">One real audio finding, and it is about silence, not spectrum</p>
+    <p><b>43% of the failing call is silence</b> with neither party speaking. That is the audible "robotic" texture at the waveform level — not the timbre of the voice, but the shape of the gaps between turns. See <a href="#latency">Latency</a>.</p>
+  </div>
+</section>
+
+<!-- ══════════════ PROMPT ══════════════ -->
+<section id="prompt">
+  <div class="sechead"><span class="secno">06</span><h2>Prompt investigation</h2></div>
+
+  <div class="tw"><table>
+    <caption>Rendered <code>patient_discovery</code> instructions, counted with <code>o200k_base</code>. CALL CONTEXT is sent separately as the first <code>user</code> item.</caption>
+    <thead><tr><th>Measure</th><th class="num">Count</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>Static instruction tokens</td><td class="num">6,927</td><td>5,149 words · 438 lines · 28,959 chars</td></tr>
+      <tr><td>CALL CONTEXT tokens</td><td class="num">405</td><td>Per-call, and it carries <b>exact scripted sentences</b></td></tr>
+      <tr class="hi"><td>Negative / prohibitive constructions</td><td class="num">234</td><td>NEVER, DO NOT, don't, BANNED, Wrong:</td></tr>
+      <tr class="hi"><td>ALL-CAPS hard directives</td><td class="num">49</td><td>NEVER / MUST / ONLY / BANNED / NOT</td></tr>
+      <tr class="hi"><td>Quoted example phrases</td><td class="num">129</td><td>Each one a phrasing the model can copy verbatim</td></tr>
+      <tr><td>Rule lines</td><td class="num">89</td><td>Conversation Flow alone: 96 lines, 53 negatives, 49 quotes</td></tr>
+      <tr><td>Mid-call directive injection sites</td><td class="num">~28</td><td>All sent as <code>role:"user"</code>, all opening <code>(system: …)</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Demonstrated contradictions — prompt says X, call does Y</h3>
+  <div class="col"><p>These are not stylistic quibbles. Each pairs a rule in the shipped prompt with the line the model produced on this call.</p></div>
+
+  <div class="tw"><table>
+    <thead><tr><th>The prompt says</th><th>The call did</th><th>Why the rule could not hold</th></tr></thead>
+    <tbody>
+      <tr class="hi"><td><i>"a sentence that narrates what you are doing … <b>'let me think'</b>"</i> — banned, with an operational test</td><td class="mono">"Okay, let me think about how to answer that."</td><td>The same section says <i>"A HESITATION IS NOT A SENTENCE and the test does not reach one"</i>. The model is asked to draw a line between a welcome hesitation and a banned narration, at the exact moment eight other rules are active.</td></tr>
+      <tr class="hi"><td>Banned housekeeping list: <i>"<b>Thanks for checking —</b>"</i></td><td class="mono">"Thanks for checking — which clinic site does Dr. Abel see patients at?"</td><td><code>_TONE_PATIENT</code> uses <i>"Thanks for checking, and — is there a waiting list?"</i> as its <b>positive example</b> of a good join. The banned string is prescribed 400 lines away.</td></tr>
+      <tr class="hi"><td>Hold acknowledgements: <i>"Of course, take your time." "Sure, no rush."</i></td><td class="mono">"…and I'll wait while you check."</td><td><i>"Of course, take your time."</i> is <b>also on the banned housekeeping list</b>. Both approved lines are contested, so the model invented a third — and the invention narrates.</td></tr>
+      <tr class="hi"><td><i>"Every quoted phrase in these instructions is a PATTERN TO VARY FROM, never a script to read word for word."</i></td><td class="mono">"Sure, it's November 3, 2000"</td><td>CALL CONTEXT says <i>"YOUR DETAILS, AND <b>THE EXACT SENTENCE</b> FOR EACH"</i> and supplies that string verbatim. The two documents give opposite instructions about the same text.</td></tr>
+      <tr><td><i>"Begin immediately; never leave a gap before answering."</i></td><td>median 2.16 s gap</td><td>The same section asks for <i>"a small pause … BEFORE you answer, when you are thinking"</i>. And the gap is not the model's to control — it is VAD + two inferences + transport.</td></tr>
+      <tr><td><i>"ONE ASK PER TURN"</i></td><td>19.6% of question turns carry two</td><td>Competing with <i>"Answering them and asking in the same breath … is usually right"</i> and <i>"Ending a turn with nothing for them to respond to is worse"</i>. Three rules, different conditions, one turn.</td></tr>
+      <tr><td>"Never Say The Same Thing Twice" (a dedicated section)</td><td>turn 16 repeats turn 14 verbatim</td><td>The first asking was stapled behind another ask and never answered.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Is the model over-prompted? Yes — but the static prompt is the smaller half</h3>
+  <div class="col">
+    <p>6,927 tokens of instruction with 234 prohibitions is a lot, and the "one ask / answer and ask / not every turn" cluster is a genuine source of the two-item defect. But the sharper problem is <b>where the workflow instructions arrive</b>.</p>
+    <p>All ~28 mid-call directives are injected as <code>role:"user"</code> messages whose text begins <code>(system: …)</code>. From the model's side, the conversation reads like this:</p>
+  </div>
+
+  <div class="flow">user      "Good afternoon, yes, Dr. Abel is one of our pediatrician here."
+assistant [function_call save_doctor_identity]
+tool      <b>"NOT SAVED — identity='confirmed' — nothing the caller said</b>
+          <b>since you asked reads as that answer | RE-READ: their turns"</b>
+assistant [function_call save_doctor_identity]      ×5
+user      <b>"(system: you just gave one of your own details with nothing</b>
+          <b>in front of it … Tell them now, in one short sentence …)"</b>
+assistant "Okay, I'm not registered with you yet, and I'll wait while…"</div>
+
+  <div class="col">
+    <p>The <code>user</code> channel is where the receptionist lives. Filling it with workflow commands does three things at once: it breaks the turn-taking rhythm the model has a strong prior for, it establishes in-context that turns can be instructions, and it makes the next assistant turn <b>a reply to a workflow command</b>. That reply comes out in workflow register — <i>"let me think about how to answer that"</i>, <i>"I'll wait while you check"</i>, <i>"could you just say it plainly for me"</i>. All three of the call's most robotic lines follow a refusal or an injected directive.</p>
+  </div>
+</section>
+
+<!-- ══════════════ STATE ══════════════ -->
+<section id="state">
+  <div class="sechead"><span class="secno">07</span><h2>Conversation state &amp; the objective system</h2></div>
+
+  <div class="verdict" style="border-left-color:var(--p1)">
+    <p class="q">Does the objective system prioritise database completion over natural conversation?</p>
+    <p class="a">Not by design — the budgets, gates and deferrals are sound. It happens because <b>a field the guards have made uncollectable stays "owed" forever</b>, and an owed field is indistinguishable from an unasked one.</p>
+  </div>
+
+  <div class="col">
+    <p>Turn 5 is the whole story. The caller named the clinic; the transcriber rendered it "notary clinic"; the model heard the audio and wrote "North Clinic"; grounding read the transcript and contradicted it. From that moment <code>branch_confirmed</code> could never be satisfied, because the only evidence that could satisfy it was a transcript line that does not contain the words.</p>
+    <p>Everything the user read as "the objective forcing the conversation backwards" follows mechanically:</p>
+    <ul class="body">
+      <li><b>Turn 10</b> — the branch ask is stapled onto the DOB answer because the field is owed.</li>
+      <li><b>Turn 18</b> — after the waitlist question is fully answered, the only outstanding field is the branch, so the agent returns to it. Failure E is the objective working exactly as specified against a field that cannot be collected.</li>
+      <li><b>Turn 20</b> — <code>premature_ending_label</code> refuses <code>no_capacity</code> because a required field is still owed. Correct guard, unreachable precondition.</li>
+    </ul>
+    <p>The ask budget did <b>not</b> misfire: <code>ask_budget.verdict = "not needed"</code>, <code>directive_sent: false</code>. The give-up path never armed. This is not a budget problem.</p>
+  </div>
+
+  <h3>The evidence-window ceiling is a second false-negative</h3>
+  <div class="col">
+    <p><code>_ungrounded_choice</code> bounds its window <b>above</b> as well as below: an ask for any other field closes the current field's window. That ceiling was added for a real defect (an identity confirmed at turn 2 being overwritten by a branch answer eight turns later) and it is correct for that case.</p>
+    <p>It assumes callers answer questions in the order asked. Real callers defer. Here the receptionist said <i>"Yeah, before that, I need to ask one information"</i>, answered a name and a date of birth, and only then came back to new patients — by which time the agent's own branch ask had closed the window. The guard's own message is precise about what it did: <code>THEY SAID: 'Yeah, before that, I need to ask one information.'</code></p>
+  </div>
+</section>
+
+<!-- ══════════════ TURNGEN ══════════════ -->
+<section id="turngen">
+  <div class="sechead"><span class="secno">08</span><h2>Turn generation &amp; the second spoken item</h2></div>
+
+  <div class="col">
+    <p><b>The hold-and-release machinery is not masking the root cause, and it should not be removed.</b> It is doing the job it was built for: on this call it correctly discarded two verbatim duplicates and correctly released two items carrying real substance. Removing it would put the call back to the state where the model split a retry four times and the caller heard four filler intros and never the question.</p>
+    <p>But it has two costs that were not visible before, and both are real:</p>
+  </div>
+
+  <div class="two">
+    <div class="pane">
+      <h4>① Release manufactures stapled turns</h4>
+      <p style="font-size:.93rem">A released item is played immediately after the first, so the caller hears one long turn containing two separate moves. Turns 10 and 14 are both this. Corpus-wide: <b>33 second-item events across 417 agent turns (7.9%)</b>, and <b>44 stapled questions across 224 question turns (19.6%)</b>. Some of that staple rate is manufactured downstream of generation, not produced by the model as one turn.</p>
+    </div>
+    <div class="pane">
+      <h4>② Release corrupts every "previous agent turn" guard</h4>
+      <p style="font-size:.93rem">A released item calls <code>sess.add_turn("agent", …)</code> in its own right — deliberately, so the turn guards see it. The side effect is that <code>_prev_agent</code> for the second item is <b>the model's own first item</b>. That is exactly how <code>_detail_left_bare</code> lost sight of a disclaimer standing one caller-turn back and fired the directive that produced Failure C.</p>
+    </div>
+  </div>
+
+  <h3>Why the model emits two items in the first place</h3>
+  <div class="col">
+    <p>Three of the four second items on this call were a <b>filler-only first item plus the substance</b>. The prompt's turn-shape section explicitly bans that split — <i>"Wrong: 'Got it.' (reacted, told them nothing, they wait)"</i> — and asks for reaction and ask <i>"folded into ONE sentence"</i>. The model complies with the intent by producing both, and disagrees with the API about how many items that is.</p>
+    <p>The reliable trigger is the moment the model must satisfy several turn-shape rules at once: answer them first, one ask per turn, never end with nothing, don't repeat, don't staple. Turn 10 is the maximum of that function, and it is the turn that produced both the banned filler <i>and</i> a second item. This is the best available evidence that the turn-shape rule cluster — not prompt length as such — is what drives the split.</p>
+  </div>
+</section>
+
+<!-- ══════════════ BARGE-IN ══════════════ -->
+<section id="bargein">
+  <div class="sechead"><span class="secno">09</span><h2>Barge-in &amp; interruption</h2></div>
+  <div class="col">
+    <p><b>Currently healthy, and recently fixed.</b> 32 drain barge-ins across 51 calls (~0.6/call). The failing call recorded <b>zero</b>, and no <code>rejection_cancels</code>, no cancelled-by-OpenAI events, no repair prompts fired anywhere in the corpus.</p>
+    <p>The artifacts do show the earlier defect and its fix. Before 2026-09-03 the drain floor was <code>0.020</code> and the events cluster at levels of 0.0227–0.0266 — barely above the floor, and almost certainly the agent's own echo being read as the caller speaking. From <code>call-20260903-2231</code> onward the floor is <code>0.060</code> with a 300 ms voiced-run requirement, and the two events on that call measure 0.2057 and 0.1497 — unambiguous speech.</p>
+    <p>VAD settings are <code>server_vad</code>, threshold 0.55, 400 ms silence, 300 ms prefix padding. Measured <code>vad_to_resp</code> is a tight 0.38–0.49 s across every stage on every call. Nothing here is misclassifying receptionist pauses or cancelling responses. <b>Not a contributor to the complaint.</b></p>
+  </div>
+</section>
+
+<!-- ══════════════ BACKCHANNEL ══════════════ -->
+<section id="backchannel">
+  <div class="sechead"><span class="secno">10</span><h2>Backchannels</h2></div>
+  <div class="col">
+    <p>Armed and firing: 20 calls carried 1–9 clips each after the 2026-09-03 pause-detection rewrite, with <code>backchannel_echo_frames</code> recorded alongside. They are working as specified.</p>
+    <p>On the failing call <b>zero fired, correctly</b>. <code>_BACKCHANNEL_AFTER_S</code> is 6.5 s and the receptionist's longest single turn was 5.8 s of speech. The gate is behaving; the call simply had no qualifying turn.</p>
+    <p>Which is the finding worth recording: <b>backchannels are structurally unable to help this failure mode.</b> They fire inside a long caller turn. The problem here is the 2.16 s of silence <i>after</i> the caller finishes — the moment a backchannel is explicitly not for. They are neither masking a turn-taking problem nor solving one; treat them as unrelated to the complaint.</p>
+  </div>
+</section>
+
+<!-- ══════════════ LATENCY ══════════════ -->
+<section id="latency">
+  <div class="sechead"><span class="secno">11</span><h2>Latency — the second real cause</h2></div>
+  <div class="col">
+    <p>Measured from the Twilio dual-channel recordings rather than from in-process instrumentation: 20 ms energy frames per channel, segments merged across gaps under 600 ms, gap = caller's last speech frame → agent's first. This is what the receptionist actually experienced.</p>
+  </div>
+
+  <div class="tw"><table>
+    <caption>n = 53 agent responses across 9 recordings. Human conversational turn-gaps sit near 200 ms; past about 1 s a listener reads the pause as a problem.</caption>
+    <thead><tr><th>Call</th><th class="num">n</th><th class="num">True median</th><th class="num">True p90</th><th class="num">Artifact says</th><th class="num">Under-report</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">20260903-2026-f0f2</td><td class="num">3</td><td class="num">0.70 s</td><td class="num">0.81 s</td><td class="num">1.36</td><td class="num">−0.66</td></tr>
+      <tr><td class="mono">20260903-2121-06ce</td><td class="num">13</td><td class="num">1.94 s</td><td class="num">3.06 s</td><td class="num">1.54</td><td class="num">+0.40</td></tr>
+      <tr><td class="mono">20260904-0024-90a9</td><td class="num">5</td><td class="num">2.02 s</td><td class="num">2.34 s</td><td class="num">1.05</td><td class="num">+0.97</td></tr>
+      <tr><td class="mono">20260903-2229-1256</td><td class="num">3</td><td class="num">2.08 s</td><td class="num">3.22 s</td><td class="num">1.18</td><td class="num">+0.90</td></tr>
+      <tr><td class="mono">20260903-2007-8b34</td><td class="num">5</td><td class="num">2.22 s</td><td class="num">3.14 s</td><td class="num">1.48</td><td class="num">+0.74</td></tr>
+      <tr><td class="mono">20260903-2234-932d</td><td class="num">8</td><td class="num">2.28 s</td><td class="num">3.21 s</td><td class="num">1.42</td><td class="num">+0.86</td></tr>
+      <tr><td class="mono">20260903-1912-912c</td><td class="num">3</td><td class="num">2.68 s</td><td class="num">3.83 s</td><td class="num">1.92</td><td class="num">+0.76</td></tr>
+      <tr><td class="mono">20260903-1910-e5fc</td><td class="num">3</td><td class="num">2.76 s</td><td class="num">3.77 s</td><td class="num">1.85</td><td class="num">+0.91</td></tr>
+      <tr class="hi"><td class="mono">20260904-0026-a446</td><td class="num">10</td><td class="num">3.44 s</td><td class="num">7.36 s</td><td class="num">2.52</td><td class="num">+0.92</td></tr>
+      <tr class="okrow"><td><b>Pooled</b></td><td class="num">53</td><td class="num"><b>2.16 s</b></td><td class="num"><b>4.00 s</b></td><td class="num">—</td><td class="num"><b>+0.86</b></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="col">
+    <p>Only <b>34%</b> of agent responses arrive within 2 s; only <b>17%</b> within 1 s. Separating the three latencies the brief asked about:</p>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>Component</th><th class="num">Cost</th><th>Controllable from code?</th></tr></thead>
+    <tbody>
+      <tr><td>VAD detection (<code>silence_duration_ms</code> 400 + detect)</td><td class="num">0.38–0.49 s</td><td>Yes — but 400 ms is already aggressive; cutting it costs false endpointing.</td></tr>
+      <tr><td>Inference 1 — model emits the tool call</td><td class="num">0.63–3.22 s</td><td>Partly. Prompt size affects it; 94.9% cache hit rate already mitigates.</td></tr>
+      <tr><td>Our tool work</td><td class="num">0.00 s</td><td>Nothing to win. Measured zero on every stage.</td></tr>
+      <tr class="hi"><td>Inference 2 — model speaks after <code>function_call_output</code></td><td class="num">1.14–9.75 s</td><td><b>Yes — this is the biggest code-side lever.</b> Refusals multiply it; a speak-then-save ordering removes it from the critical path.</td></tr>
+      <tr class="hi"><td>Twilio media leg, US ⇄ India ⇄ US via ngrok</td><td class="num">~0.9 s</td><td>Only by deploying in-region. Charged on 100% of turns.</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout warn">
+    <p class="t">The instrument is still not honest, and that has cost two investigations already</p>
+    <p><code>reply_latency</code> under-reports the caller's experience by a median <b>0.86 s</b>. Every latency decision made by reading the artifact has been made against a number 40% too low. Recording the true gap should be part of this work, not a follow-up.</p>
+  </div>
+</section>
+
+<!-- ══════════════ RANKING ══════════════ -->
+<section id="ranking">
+  <div class="sechead"><span class="secno">12</span><h2>Root-cause ranking</h2></div>
+
+  <!-- P0 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p0">P0</span><h3><code>classify_identity</code> rejects the way Americans answer a phone</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>The CONFIRMED pattern anchors its affirmative at string start (<code>^\W*(yes|yeah|yep|yup)\b</code>) and accepts a presence claim only with a <b>pronoun</b> subject (<code>(he|she|they) (works?|practi[cs]es?) here</code>). A greeting before the "yes" defeats it, and the named-subject form — <i>"Dr. Abel is one of our pediatricians here"</i> — is not in the pattern at all. Notably, <code>not (one of )?our</code> <b>is</b> in the NOT_HERE pattern; only the positive was never written.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd>
+        <p>Running the shipped function over 26 realistic front-desk confirmations: <b>17 miss (65%)</b>. Every miss is a greeting prefix, a named subject, or "one of our…".</p>
+        <p><b>56 of 79 refusals</b> in the corpus are on <code>save_doctor_identity</code>; 36 are the classifier returning no-answer and 10 more are the window then reading as questions-only. Six separate calls contain the same refused sentence shape: <i>"Hello, yes, Dr. X is one of our physicians here. How can I help you today?"</i></p>
+        <p>On the failing call it produced 5 refusals, 9.75 s of <code>inference_2</code>, 12.14 s of silence, and Failure A's re-ask.</p>
+      </dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/objectives.py</code> — <code>_IDENTITY_PATTERNS</code>, the <code>IdentityAnswer.CONFIRMED</code> entry (~line 570) and <code>classify_identity</code>.</dd></div>
+      <div class="fr"><dt>Why it sounds robotic</dt><dd>The model is told, in its own context, that a question it heard answered was not answered. The prompt simultaneously forbids re-asking (<i>"if you heard them fine, do NOT ask again"</i>) and forbids telling the caller they did not say something. The only behaviour that satisfies the tool and the prompt is a hedged re-ask — <i>"could you just say it plainly for me"</i> — which is precisely the register a person never uses.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Extend the existing <code>_LEAD_IN</code> idea to cover greetings, and add the named-subject and "one of our" forms. A candidate was written and tested during this investigation: positives go <b>56% → 97%</b> (31/32) with <b>0 of 18 negatives broken</b>, including five adversarial greeting-prefixed denials (<i>"Good morning, no, Dr. Abel doesn't work here."</i> still lands NOT_HERE). The existing ordering — WRONG_NUMBER, UNSURE, NOT_HERE, then CONFIRMED — and <code>_negated_before</code> are what make the loosening safe, and both are untouched.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-lo">Low</span>, and quantified rather than asserted. The change loosens only the lead-in and adds two positive presence forms; it cannot outrank a denial because CONFIRMED is checked last.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P0 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p0">P0</span><h3>A mangled surname is read as a different doctor</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd><code>_wrong_doctor_named</code> compares the transcriber's rendering of the surname against ours. The transcriber mangles surnames routinely, and every mangling reads as the receptionist naming somebody else.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd><b>17 refusals</b> — 22% of all refusals — on: <code>abul</code>, <code>okofor</code>, <code>rokofor</code>, <code>pokofor</code>, <code>okopher</code>, <code>april</code>, <code>brown</code>, <code>walcott</code>, and once the word <code>here</code>. On the failing call, <code>name_mismatches</code> records <code>heard:"ables" / ours:"abel"</code> with <code>passive:true</code>. These are one edit away from ours, in a sentence that otherwise confirms the doctor.</dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/evidence/names.py</code>, called from <code>_ungrounded_identity</code> in <code>agents/voice/realtime_worker.py</code>.</dd></div>
+      <div class="fr"><dt>Why it sounds robotic</dt><dd>It forces the spell-and-confirm repair on calls where nothing was ambiguous, and blocks identity — which gates every other field.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Do <b>not</b> add fuzzy matching — the existing note is right that no threshold separates <code>Riaz→Reyes</code> from <code>Kapoor→Okafor</code>. Instead narrow the trigger: fire <code>_wrong_doctor_named</code> only when the named surname is <b>contrastive</b> — the sentence is a correction or an offer of an alternative — rather than on any near-miss token appearing beside a confirmation. A sentence that both names a doctor and affirms presence is evidence <i>for</i> our doctor with a bad transcript, not evidence of a different one.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-md">Medium.</span> This guard prevents the highest-severity defect in the project — a row confirmed against the wrong person. Narrow it with a corpus built from the 17 observed cases plus the genuine wrong-doctor cases already in the suite, and keep the passive/active distinction that <code>name_mismatches</code> already records.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P1 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p1">P1</span><h3>The evidence-window ceiling discards a deferred answer</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>In <code>_ungrounded_choice</code>, an ask for any other field sets <code>until</code> and closes the current field's window. It assumes callers answer in the order asked.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd>Turn 13's clear <code>no</code> was refused twice quoting <code>THEY SAID: 'Yeah, before that, I need to ask one information.'</code> — the window ran turns 7–9 and the answer was at 13. Corpus-wide, 10 refusals land in the questions-only branch.</dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/evidence/guards.py</code> — <code>_ungrounded_choice</code>, the <code>until</code> loop (~line 496–522).</dd></div>
+      <div class="fr"><dt>Why it sounds robotic</dt><dd>Produces Failure D's <i>"could you just say it plainly for me"</i> — asking a receptionist to repeat something they just said plainly.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Keep the ceiling; make it <b>reopenable</b>. A caller turn that <code>states_in_its_own_right</code> the field's value should count even past <code>until</code> — that predicate already exists and is already trusted for the never-asked path, where it does exactly this job. The overwrite case the ceiling was built for is a <i>bare</i> answer classified by proximity, which <code>states_in_its_own_right</code> rejects by construction.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-lo">Low.</span> Reuses an existing, tested predicate; does not widen the never-asked path.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P1 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p1">P1</span><h3>The tool round trip puts a second inference on the critical path</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>The model emits a <code>function_call</code>, we run the tool, send <code>function_call_output</code>, wait for <code>response.done</code>, and only then <code>response.create</code> for speech. The caller hears nothing until inference 2 completes.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd>Stage data, same call: tool turns felt 2.26 / 2.78 / 4.06 / 5.81 / 11.27 s; no-tool turns felt 1.13 / 1.16 / 1.18 / 1.24 s. <code>our_work</code> is 0.00 s on every stage, and <code>deferral</code> 0.00–0.03 s — the gap is entirely the extra inference.</dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/lifecycle.py::_handle_response_done</code> (the <code>_pending_response_create</code> branch), <code>agents/voice/grounding/teardown.py</code>.</dd></div>
+      <div class="fr"><dt>Why it sounds robotic</dt><dd>It makes the pause length <i>correlate with how substantive the caller's turn was</i>. The receptionist says something important and the patient goes quiet for four seconds. That is the single most machine-like timing signature available.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Teach the prompt to <b>acknowledge out loud in the same response as the tool call</b>, so the caller hears the reaction after inference 1 and the substantive follow-up after inference 2. The Realtime API emits multiple output items per response and a <code>function_call</code> item produces no audio deltas, so this does not collide with the second-item mute. This is a re-ordering, not new machinery — and it should be measured, not assumed, on live calls.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-md">Medium.</span> Interacts with the second-item hold and with <code>_close_deferred</code>. Do it after the P0 classifier fixes, which remove most of the retries that make this leg long.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P1 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p1">P1</span><h3>Released second items corrupt every "previous agent turn" guard</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>A released item calls <code>sess.add_turn("agent", …)</code> as an independent turn, so <code>_prev_agent</code> for it is the model's own first item and <code>_callers_since</code> resets to 0.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd><code>bare_pii_details</code> on the failing call records <code>prev_agent: "Okay, let me think about how to answer that."</code>, <code>callers_since: 0</code>. The real previous agent turn carried the disclaimer one caller-turn earlier. <b>The model followed CALL CONTEXT's one-turn exception exactly and the guard punished it for it.</b></dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/turns.py</code> ~2159–2175 (the <code>_prev_agent</code>/<code>_callers_since</code> walk) and ~2013–2057 (the release site).</dd></div>
+      <div class="fr"><dt>Why it sounds robotic</dt><dd>Produced Failure C directly: a spurious safety directive fired, and its repair landed on a hold, giving <i>"I'm not registered with you yet, and I'll wait while you check."</i></dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Mark the released item as a continuation of the same response (a flag on the turn, or record the response id), and have the <code>_prev_agent</code> walk skip turns from the response currently being judged. The item must stay a real turn — the turn guards need to see what the caller heard — so the fix is in the walk, not in whether it is added.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-lo">Low</span>, if scoped to the walk. Several guards read <code>_prev_agent</code>; fix it once, in one place, and assert all of them agree.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P2 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p2">P2</span><h3>Prompt self-contradictions on four specific strings</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>Four phrases are simultaneously banned and prescribed: <i>"Thanks for checking —"</i>, <i>"Of course, take your time."</i>, <i>"let me think"</i>, and the CALL CONTEXT detail sentences. Every one produced an observed line on this call.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd>See the contradiction table in §06 — each row pairs the prompt text with the transcript line.</dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/templates.py</code> — <code>_TONE_PATIENT</code>, the shared Shape-Of-A-Turn block, <code>_PATIENT_DETAILS_GUARD</code>, and <code>PatientPersonaTemplate.build_context</code>.</dd></div>
+      <div class="fr"><dt>Why it sounds robotic</dt><dd>A contested phrase gets replaced by an invented one, and the inventions narrate. It also costs tokens the ceiling is already tight against.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Resolve each in one place. Change <code>_TONE_PATIENT</code>'s join example off the banned string. Delete <i>"Of course, take your time."</i> from one of the two lists. Replace CALL CONTEXT's "THE EXACT SENTENCE" framing with "the meaning, in your own words" and keep one example. Each is a few tokens and pays for itself.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-lo">Low.</span> Editing example text, not rules. Do <b>not</b> rewrite the prompt wholesale.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P2 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p2">P2</span><h3>Workflow directives arrive on the <code>user</code> channel</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>~28 injection sites send machine text as <code>role:"user"</code> items. The channel that carries the receptionist also carries the workflow.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd>All three of the call's most robotic lines follow either a refusal or an injected directive. Enumerated in §06.</dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/turns.py</code> (24 sites), <code>lifecycle.py</code>, <code>grounding/teardown.py</code>, <code>grounding/handlers.py</code>.</dd></div>
+      <div class="fr"><dt>Why it sounds robotic</dt><dd>It breaks the turn-taking prior and makes the next assistant turn a reply to an instruction, delivered in workflow register.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Two cheap steps before any architectural change: <b>(a)</b> cut the volume at source — the P0/P1 fixes remove most refusals, and each refusal is also a context item; <b>(b)</b> add an explicit prompt rule that a <code>(system: …)</code> turn is never something to acknowledge or react to out loud. Moving them to <code>response.create.instructions</code> is <b>not</b> recommended: it lands the response on an uncacheable prefix, and the 94.9% cache hit rate is worth real money and latency.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-lo">Low</span> for both steps. Anything beyond them is a larger design change and should wait for evidence that the volume reduction was not enough.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P2 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p2">P2</span><h3><code>reply_latency</code> under-reports by 0.86 s</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>The instrument measures from VAD detection to our first outbound delta, and never counts the Twilio media leg — which is charged on 100% of turns.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd>Recording vs artifact, 8 of 9 calls, median <b>+0.86 s</b>, consistent in sign and magnitude.</dd></div>
+      <div class="fr"><dt>Files</dt><dd><code>agents/voice/latency.py</code>, <code>agents/voice/metrics.py</code>.</dd></div>
+      <div class="fr"><dt>Why it matters</dt><dd>It is not itself a cause — it is why the cause stayed invisible. Every latency judgement made from the artifact has been made against a number 40% low.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Add a declared transport constant to the recorded figure, or record a <code>felt_gap</code> derived from the recording in post. The record must say what happened, not what was requested.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-lo">Low.</span> Measurement only.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P2 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p2">P2</span><h3>US-region deployment — ~0.9 s on every turn</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Root cause</dt><dd>Twilio's media leg runs US → India → US through ngrok. OpenAI's own leg is ~30 ms; this one is not.</dd></div>
+      <div class="fr"><dt>Evidence</dt><dd>The gap between the true median (2.16 s) and the in-process median (~1.3 s) is this leg, and it is charged on 100% of turns.</dd></div>
+      <div class="fr"><dt>Recommended fix</dt><dd>Deploy in <code>us-east-1</code> and serve Twilio directly. Unchanged as the largest single latency lever — but note it is now <b>second</b> behind the refusal loop, because a refusal costs a whole extra inference, not 0.9 s.</dd></div>
+      <div class="fr"><dt>Risk</dt><dd><span class="risk-md">Medium</span> operationally, none behaviourally.</dd></div>
+    </dl></div>
+  </div>
+
+  <!-- P3 -->
+  <div class="find">
+    <div class="find-h"><span class="sev p3">P3</span><h3>Cosmetic contributors — real, and not the complaint</h3></div>
+    <div class="find-b"><dl>
+      <div class="fr"><dt>Energy compression</dt><dd>3:1 with +8.17 dB makeup costs ~1.7 dB of loudness variation against the human, and makes every call measure the same. Deliberate, evidence-based, and correct for intelligibility. Revisit only after everything above.</dd></div>
+      <div class="fr"><dt>Persona flattening</dt><dd>"Subtly under the weather" removes 25–40% of pitch dynamism versus the flat baseline. Still inside the normal band. Headroom, not a defect.</dd></div>
+      <div class="fr"><dt>Speaking rate</dt><dd>Measured near 200 wpm from the recording, against ~150 wpm typical US conversation — but the human on the same call measured similarly, and per-utterance wpm from short turns is noisy. <b>Not established.</b> If it is worth settling, probe <code>audio.output.speed</code> with <code>check_realtime.py</code>; the session config sends no <code>speed</code> today.</dd></div>
+      <div class="fr"><dt>Backchannels</dt><dd>Working as specified, structurally unrelated to this failure mode.</dd></div>
+      <div class="fr"><dt>Barge-in / VAD</dt><dd>Healthy; the echo-floor defect was fixed on 2026-09-03 and the fix is visible in the artifacts.</dd></div>
+    </dl></div>
+  </div>
+</section>
+
+<!-- ══════════════ PLAN ══════════════ -->
+<section id="plan">
+  <div class="sechead"><span class="secno">13</span><h2>Minimum safe fix plan</h2></div>
+  <div class="col">
+    <p>Ordered so that each step reduces the input to the next. The P0 pair removes most refusals; fewer refusals means fewer retries, fewer injected directives, shorter <code>inference_2</code>, and fewer re-asks — so the later steps are measured against a much quieter call.</p>
+  </div>
+
+  <div class="tw"><table>
+    <caption>The brief asked for prompt changes first. They are deliberately second: the prompt rules that were violated on this call were violated <i>because</i> a guard told the model the caller had not answered. Fixing the prompt first would leave the loop intact.</caption>
+    <thead><tr><th class="num">#</th><th>Change</th><th>File · function</th><th>Fixes</th><th>Must not change</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td><b>Widen <code>classify_identity</code>'s CONFIRMED pattern</b> — greeting lead-in, named subject, "one of our…". Candidate already tested: 56%→97% positives, 0/18 negatives broken.</td><td class="mono">objectives.py · _IDENTITY_PATTERNS</td><td>Failure A; ~46 of 79 refusals</td><td>Pattern <b>order</b> (CONFIRMED stays last) and <code>_negated_before</code>. Both are what keep it safe.</td></tr>
+      <tr><td class="num">2</td><td><b>Narrow <code>_wrong_doctor_named</code> to contrastive namings.</b> A sentence that names a doctor <i>and</i> affirms presence is a bad transcript, not a different doctor.</td><td class="mono">evidence/names.py</td><td>17 refusals; spurious spell-and-confirm</td><td>The genuine wrong-doctor case, and the active/passive distinction <code>name_mismatches</code> records.</td></tr>
+      <tr><td class="num">3</td><td><b>Let a self-standing answer reopen a closed window</b> — reuse <code>states_in_its_own_right</code> past <code>until</code>.</td><td class="mono">evidence/guards.py · _ungrounded_choice</td><td>Failure D; 10 refusals</td><td>The ceiling itself, and the never-asked path's gate.</td></tr>
+      <tr><td class="num">4</td><td><b>Skip same-response turns in the <code>_prev_agent</code> walk.</b></td><td class="mono">turns.py ~2159</td><td>Failure C</td><td>The released item stays a real turn in <code>sess.turns</code>.</td></tr>
+      <tr><td class="num">5</td><td><b>Resolve the four contradicted strings</b> in the prompt and CALL CONTEXT.</td><td class="mono">templates.py · _TONE_PATIENT, build_context</td><td>"Thanks for checking", scripted DOB, invented hold lines</td><td>Every rule. Only examples move. No wholesale rewrite.</td></tr>
+      <tr><td class="num">6</td><td><b>Add one prompt line:</b> a <code>(system: …)</code> turn is an instruction, never something to react to out loud.</td><td class="mono">templates.py · shared body</td><td>Workflow register leaking into speech</td><td>Costs ~15 tokens; pair it with an eviction.</td></tr>
+      <tr><td class="num">7</td><td><b>Record the true felt gap</b> alongside <code>reply_latency</code>.</td><td class="mono">latency.py · metrics.py</td><td>Makes step 8 measurable</td><td>Keep the existing field; add, don't replace.</td></tr>
+      <tr><td class="num">8</td><td><b>Speak in the same response as the tool call.</b> Measure before and after with step 7's number.</td><td class="mono">templates.py + lifecycle.py</td><td>1–3 s off every substantive turn</td><td>The second-item hold, and <code>_close_deferred</code>'s three policies.</td></tr>
+      <tr><td class="num">9</td><td><b>Deploy in us-east-1</b>, serve Twilio directly.</td><td class="mono">infrastructure</td><td>~0.9 s on 100% of turns</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <p class="t">Backchannels, VAD and audio conditioning have no step</p>
+    <p>Deliberately. The measurements clear all three. Changing them now would spend risk on layers that are already behaving, and would confound the before/after on the steps that matter.</p>
+  </div>
+</section>
+
+<!-- ══════════════ NO CHANGE ══════════════ -->
+<section id="nochange">
+  <div class="sechead"><span class="secno">14</span><h2>What not to change</h2></div>
+  <div class="two">
+    <div class="pane">
+      <h4>The second-item hold-and-release</h4>
+      <p style="font-size:.93rem">It correctly discarded two duplicates and released two substantive halves on this call alone. Fix its side effect on <code>_prev_agent</code>; keep the machinery.</p>
+    </div>
+    <div class="pane">
+      <h4>Objective tracking and the two-counter budget</h4>
+      <p style="font-size:.93rem">The budget never armed on this call (<code>verdict: "not needed"</code>). The objective walked backwards because a field was uncollectable, not because the tracking is wrong.</p>
+    </div>
+    <div class="pane">
+      <h4>The ending-label refusal and the deferred-save hold</h4>
+      <p style="font-size:.93rem">Both behaved exactly as designed. They are downstream symptoms of the branch defect — debugging either finds nothing, which is the lesson the zombie-goodbye cascade already bought.</p>
+    </div>
+    <div class="pane">
+      <h4>Outbound conditioning</h4>
+      <p style="font-size:.93rem">Measured prosody-transparent here, and it fixed a real intelligibility deficit and a real chunk-seam defect. Leave <code>realtime_output_format = "pcm"</code> alone.</p>
+    </div>
+    <div class="pane">
+      <h4>The grounding architecture itself</h4>
+      <p style="font-size:.93rem">The principle — never save what the caller did not say — is right and is why this project has no fabricated rows. The defect is that three specific predicates are too narrow, not that evidence should be optional.</p>
+    </div>
+    <div class="pane">
+      <h4>VAD, echo gate, drain floor, backchannels</h4>
+      <p style="font-size:.93rem">All measured healthy. The 0.060 drain floor is doing its job; leave it.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ TESTS ══════════════ -->
+<section id="tests">
+  <div class="sechead"><span class="secno">15</span><h2>Test plan &amp; live validation</h2></div>
+
+  <div class="callout stop">
+    <p class="t">Why the suite is green — and the one change that stops it happening again</p>
+    <p>Every positive fixture for <code>classify_identity</code> begins with the affirmative token or is the bare phone idiom "Speaking": <code>"Yes, this is Dr. Okafor's office."</code>, <code>"Yeah, it is."</code>, <code>"Yeah, this is, yeah, that's right, Dr. Kapoor is one of our cardiologists."</code>, <code>"Yes?"</code>, <code>"Speaking."</code>. Not one carries a greeting in front. The suite is a <b>regression corpus harvested from this project's own calls</b>, and every call so far has been a Hyderabad colleague who knows it is a test and answers in one word. 2,556 checks cannot fail on a phrasing the system has never been shown.</p>
+    <p>So the fix that matters most is not a fix at all: <b>the corpus needs a population it did not generate.</b></p>
+  </div>
+
+  <h3>Tests needed</h3>
+  <ol class="body">
+    <li><b>A held-out phrasing corpus for every closed-set classifier</b>, written from how US front desks actually answer rather than from what previous calls produced. Minimum: greeting-prefixed affirmatives, named-subject presence claims, "one of our…", trailing "how can I help you", and the matching greeting-prefixed <i>denials</i> as negatives. Track a miss rate as a number, and assert a ceiling on it — the same discipline the token ceiling already applies to the prompt.</li>
+    <li><b>Mutation-test each fix.</b> Revert it, confirm the new checks fail, restore. The P0 candidate was already validated this way during the investigation: 31/32 positives, 0/18 negatives broken.</li>
+    <li><b>A false-negative assertion for the window ceiling</b>: a caller who defers ("before that, I need to ask…"), the agent asks another field, the caller then answers the first — assert the save is <b>accepted</b>. This class of test does not currently exist anywhere.</li>
+    <li><b><code>_prev_agent</code> across a released second item</b>: assert the walk reaches the previous <i>real</i> agent turn, and that <code>_detail_left_bare</code> stays silent when a disclaimer is standing one caller-turn back.</li>
+    <li><b>Split the 11,354-line <code>main()</code></b> so pyright stops reporting "Code is too complex to analyze". A function pyright has given up on is one where nothing inside is checked — it has already hidden one real error.</li>
+  </ol>
+
+  <h3>Live call validation</h3>
+  <div class="col">
+    <p>Tests cannot settle this. The success criterion is a call that sounds like two people, so validate on calls and read the recordings, not the artifacts.</p>
+  </div>
+  <div class="tw"><table>
+    <thead><tr><th>Signal</th><th>Read it from</th><th class="num">Today</th><th class="num">Target</th></tr></thead>
+    <tbody>
+      <tr><td>Save refusals per call</td><td class="mono">artifact · save_refusals</td><td class="num">1.5 mean, 69% of calls</td><td class="num">&lt; 0.3, &lt; 20% of calls</td></tr>
+      <tr><td>Identity refusals</td><td class="mono">artifact · save_refusals[tool]</td><td class="num">56 of 79</td><td class="num">near zero</td></tr>
+      <tr><td>True response gap, median</td><td class="mono">Twilio recording</td><td class="num">2.16 s</td><td class="num">&lt; 1.2 s</td></tr>
+      <tr><td>Repeated / already-answered asks</td><td class="mono">conversation · repeated_sentences</td><td class="num">9 across 51 calls</td><td class="num">0</td></tr>
+      <tr><td>Stapled question rate</td><td class="mono">conversation · stapled_questions</td><td class="num">19.6% of question turns</td><td class="num">&lt; 8%</td></tr>
+      <tr><td>Second-item events</td><td class="mono">dropped + released</td><td class="num">7.9% of agent turns</td><td class="num">&lt; 3%</td></tr>
+      <tr><td>Agent pitch SD</td><td class="mono">Twilio recording</td><td class="num">3.71 st</td><td class="num">hold ≥ 3.0 st</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout warn">
+    <p class="t">The one validation step nothing else substitutes for</p>
+    <p><b>Place calls to a naive US receptionist</b> — someone who does not know it is a test. It has been next-action #2 for weeks and it is now the binding constraint: this whole failure mode exists because the system has never been exposed to how Americans answer a medical office phone, and neither has its test corpus. One such call will find more than another thousand offline checks.</p>
+  </div>
+</section>
+
+<!-- ══════════════ FINAL ══════════════ -->
+<section id="final">
+  <div class="sechead"><span class="secno">16</span><h2>Final diagnosis</h2></div>
+  <div class="col">
+    <p>The patient agent sounds monotonic, robotic and scripted <b>not because of anything in the audio path and not because the model is a poor speaker</b>. Measured against the human on the other end of the same call, the agent carries 42% more pitch variation, and the outbound conditioner alters pitch by 0.01 semitones end to end.</p>
+    <p>It sounds robotic because of a loop. A US receptionist gives a normal, correct, greeting-prefixed answer. Three grounding predicates — an affirmative anchored to string start, a name check that reads a transcription error as a different doctor, and an evidence window that closes when a caller defers — report that no answer was given. The refusal text goes back into the model's context. The model retries, costing a whole extra inference each time, and then does the only thing available: it asks again. The receptionist answers again. The record still cannot be written, so the objective keeps the field owed, the agent keeps returning to it, the repair directives fire, and each repair lands in the <code>user</code> channel where the receptionist's own words live.</p>
+    <p>Every symptom in the brief is a station on that loop. The repeated question is the refusal. The narration is a repair directive being obeyed. The stacked questions are a held second item being released. The dead air is the extra inference the retries bought. The backwards walk through the objective is a field the guards made uncollectable.</p>
+    <p>And the suite is green throughout, because it is a regression corpus grown from this project's own calls, and this project has only ever called colleagues who answer in one word.</p>
+    <p><b>The fix is not to loosen the safety principle. It is to make three narrow predicates recognise the language real receptionists speak</b> — which the tested candidate does at 97% with nothing broken — and then to stop making the caller wait through a second inference for every fact the agent writes down.</p>
+  </div>
+
+  <footer>
+    <p>Investigation scope: full repository trace · 51 September call artifacts · 43 Twilio dual-channel recordings · 12 A/B renders · direct execution of the shipped classifiers and the outbound conditioner. No code was modified.</p>
+  </footer>
+</section>
+
+</div>
+
+</body>
+</html>

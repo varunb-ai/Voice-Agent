@@ -49,9 +49,84 @@ from agents.voice.objectives import (
     PatientDiscoveryObjective,
     branch_field,
     invalid_conditions,
+    unenforceable_endings,
     unwritable_fields,
 )
 from core.models import Doctor
+
+
+# Trailing words that are a SPECIALTY OR A CREDENTIAL rather than part of a
+# person's name. A closed list, because the failure it prevents and the failure
+# it would cause are not symmetrical: missing a specialty costs a slightly odd
+# greeting, while stripping a real surname makes the agent ask for the wrong
+# doctor for the whole call. Anything not listed is treated as a name.
+_NAME_SUFFIX = frozenset("""
+pediatric pediatrics paediatric paediatrics cardiology cardiologist
+dermatology dermatologist oncology oncologist neurology neurologist
+orthopedic orthopedics orthopaedic orthopaedics psychiatry psychiatrist
+radiology radiologist urology urologist gastroenterology endocrinology
+rheumatology ophthalmology optometry obstetrics gynecology gynaecology
+obgyn pulmonology nephrology anesthesiology anaesthesiology pathology
+surgery surgeon surgical dentistry dentist podiatry podiatrist allergy
+immunology hematology haematology geriatrics neonatology physiatry
+plastic internal medicine family practice primary care clinic centre center
+md do phd dds dmd facs facp faap mbbs np pa rn dpm od dnp msn
+""".split())
+
+# At least this many tokens must survive, or "Dr. Internal Medicine" — a name
+# that is nothing BUT suffix words — would strip to nothing and the call would
+# ask for a doctor with no name at all.
+_MIN_NAME_TOKENS = 2
+
+
+def split_doctor_specialty(name: str) -> tuple[str, str]:
+    """Separate a person's name from a specialty or credential glued onto it.
+
+    WHY: call-20260903-1126 was placed as --doctor "Mark F. Abel Pediatric",
+    the surname is derived as the last token, and the agent opened the call
+    with "any chance this is Dr. Pediatric's office?" — then asked about Dr.
+    Pediatric for two minutes while the receptionist said "Dr. Abel". The
+    `--specialty` flag it should have gone in already exists; this recovers the
+    value when it did not.
+
+    RECOVERED, NOT DISCARDED. The specialty is the disambiguator the client
+    scripts open with ("Dr. Abel, the pediatrician") and two doctors of one
+    surname at one hospital is the ordinary case, so throwing it away to fix
+    the name would trade one defect for another. Returns both halves.
+
+    Order is preserved and only TRAILING tokens are considered: "Dr. Mark
+    Internal" keeps its surname because nothing follows it to make "Internal"
+    read as a trailing qualifier... and more to the point, because a two-token
+    name is at the floor and this refuses to cut into it.
+    """
+    tokens = (name or "").split()
+    taken: list[str] = []
+    while len(tokens) > _MIN_NAME_TOKENS:
+        bare = re.sub(r"[^a-z]", "", tokens[-1].lower())
+        if bare not in _NAME_SUFFIX:
+            break
+        taken.insert(0, tokens.pop())
+    # THE SEPARATOR THE SUFFIX LEFT BEHIND. "Ana Reyes, M.D." splits to
+    # "Ana Reyes," and the surname is then derived as "Reyes," — a trailing
+    # comma inside the string every name check compares. This codebase has
+    # already spent a call on a surname mangled by one character (see the
+    # rstrip lesson: "Reyes" became "Reye" and the guard accused our own
+    # doctor), so the punctuation goes with the suffix that caused it.
+    # Trailing only: "F." and "Jr." are inside the name and are untouched.
+    return " ".join(tokens).rstrip(" ,;-"), " ".join(taken)
+
+
+def resolve_specialty(doctor_name: str, flag: str = "") -> str:
+    """Which specialty this call runs with. The flag wins; the name is fallback.
+
+    PURE, AND THAT IS THE POINT. The wiring it replaces lived inline in
+    run_twilio.py and could only be checked by grepping the file for a literal
+    — a proxy that fails on any honest refactor and passes on a subtly wrong
+    one. The precedence rule is a real decision (an operator who passes
+    --specialty has said what they mean, and a word left in the name field has
+    not), so it belongs somewhere the suite can execute it.
+    """
+    return (flag or "").strip() or split_doctor_specialty(doctor_name or "")[1]
 
 
 def clean_doctor_name(name: str) -> str:
@@ -60,8 +135,13 @@ def clean_doctor_name(name: str) -> str:
     ``.title()`` would turn 'McDonald' into 'Mcdonald' and 'DeSilva' into
     'Desilva', which the model then mispronounces on air. Preserve what the
     caller typed and only fix an all-lowercase entry.
+
+    ALSO STRIPS A TRAILING SPECIALTY, because every caller of this function
+    goes on to take the last token as the surname — see build_greeting and
+    build_context, which is where "Dr. Pediatric" came from.
     """
     stripped = re.sub(r"^\s*dr\.?\s+", "", name, flags=re.I).strip()
+    stripped, _ = split_doctor_specialty(stripped)
     if stripped and stripped == stripped.lower():
         return stripped.title()
     return stripped
@@ -196,9 +276,9 @@ _FORAGE_INSTRUCTIONS = """\
   the sentence — if the caller loses no information, it should not be said.
   A sentence that narrates what you are doing, how you are speaking, or how you
   intend to reply is a sentence about the conversation: "let me think", "one
-  second", "hmm", "okay so". The ways to make that move are endless, so judge
-  by the test and not by the wording. Natural pauses are fine; narrating them
-  is not.
+  second", "let me check". The ways to make that move are endless, so judge by
+  the test and not by the wording. A HESITATION IS NOT A SENTENCE and the test
+  does not reach one; your tone above sets how much you hesitate.
 - DO NOT PILE UP MOVES. A reaction and one ask is a turn. Three or more
   separate moves in a turn is a speech. When several things seem to need
   saying, say the most important one; the rest keeps until the next turn, and
@@ -209,15 +289,37 @@ _FORAGE_INSTRUCTIONS = """\
 - One or two sentences. Not a paragraph, and not a database result either.
   There is no word count to hit: a warm reply that runs a few words long is
   right, a clipped one that lands like a form is wrong.
-- React, THEN say the thing, folded into ONE sentence. The reaction opens the
-  sentence; it is never the whole turn. And the ask itself stays a REQUEST —
-  a reaction in front of a bare demand is still a demand.
+- SAY THE THING, folded into ONE sentence. A reaction MAY open it when their
+  answer landed as news; never the whole turn, NOT owed every turn, and twice
+  running is a tic whatever word you pick. The ask stays a REQUEST.
       Right: "Got it — do you know which branch she's at?"
-      Wrong: "Got it."            (reacted, told them nothing, they wait)
-      Wrong: "Which branch is she at?"   (no reaction, and an order)
-      Wrong: "Got it — which branch is she at?"
-             (a cushion in front of an order does not make it a question you
-             are asking someone; it makes it a politely introduced one.)
+      Right: "Do you know which branch she's at?"   (no reaction needed)
+      Wrong: "Got it."          (reacted, told them nothing, they wait)
+      Wrong: "Which branch is she at?"   (an order; the demand is the fault)
+      Wrong: "Got it — which branch is she at?"  (a cushion in front of an
+             order is still an order, just politely introduced)
+      Wrong: "Thanks — I'll ask one quick thing."  (announced the ask instead
+             of asking it. If you can say you are ABOUT to ask, you can ask.)
+- NEVER SPEND A TURN ON HOUSEKEEPING. These are the loudest "voice assistant"
+  tells on the line, and every one of them has reached a real caller:
+      "Thanks for confirming..."          "Thanks for hanging on a sec —"
+      "Thanks for checking —"             "Thanks for waiting with me —"
+      "Okay, thanks, let me ask one quick thing."
+  They thank the receptionist for participating in your own workflow, or
+  announce what you are about to do, and a real patient does neither. Thanking
+  them is for HELP they went out of their way for — checking with a colleague,
+  looking something up — once, in plain words, with the question folded into
+  the same breath: "Got it — and is there a waiting list for that?"
+  The hold line is ONLY for an actual hold. A pause, an "okay", a silence are
+  not holds; answer nothing, ask the next thing you actually want to know.
+  The ban is on the STANDING form — a thanks that is the turn, or that fronts
+  an announcement. The same words folded into a real question
+  ("thanks, and — is there a waiting list?") are fine; that is the join your
+  tone section points at.
+- When you already know what you want to ask next, the acknowledgement and the
+  question are ONE turn. Never send an empty "Got it." / "Okay, thanks." and
+  sit on the question waiting for their permission — that is the workflow
+  cadence, and the caller hears you thinking.
 - Answering them and asking in the same breath is how a person hands the
   conversation back, and it is usually right. Ending a turn with nothing for
   them to respond to is worse: they cannot tell a pause from a dropped line,
@@ -292,10 +394,10 @@ ends the call's goodwill instantly, and you are the one more likely to be
 wrong — you may have picked the wrong words out of what they told you.
 
 # Closing — THANK THEM FOR WHAT THEY ACTUALLY DID, NOTHING MORE
-- They GAVE you a location -> thank them for that specific thing.
+- They GAVE you a location -> say the PLACE back, never the word "location".
 - They gave you NOTHING -> stay neutral. "No problem — thanks for your time."
-  BANNED: "thanks for checking", "thanks for your help" — both describe
-  something that did not happen.
+  BANNED IF THEY DID NOT: "thanks for checking", "thanks for your help"
+  describe something that did not happen.
 - NEVER NARRATE WHAT BECOMES OF IT. "I'll note that", "that's all set",
   "I'll wrap up" all claim an outcome you cannot know yet —
   the tool has not answered. Thank them for what they SAID and stop there.
@@ -303,8 +405,8 @@ wrong — you may have picked the wrong words out of what they told you.
   more thing" — if you say it, the next thing you say must BE it. Said while
   closing, they hear a call cut off mid-sentence. Nothing left to ask ->
   announce nothing, just thank them.
-- They are trying to get off the phone -> shorter still. "No problem, take
-  care." Do not thank someone who is leaving.
+- They are trying to get off the phone -> shorter still. "Okay, thanks for
+  the help." Do not thank someone who is leaving.
 - ONE short sentence. Never stack thanks + confirmation + well-wishing.
 
 # Conversation Flow
@@ -386,8 +488,9 @@ They complain about how you are speaking — "you're not clear", "speak slowly",
   "you're speaking too fast" -> NOT a question about language and NOT a request
   to repeat verbatim. Slow down, say the same thing in simpler words, and keep
   it short. Never answer it by naming the language you speak.
-They trail off -> "Sorry, could you finish that?" Never escalate on a partial
-  answer, and never fill the silence with a new question.
+They trail off or go quiet mid-sentence -> WAIT. They are reading a screen.
+  Say nothing, or "No rush." Never ask them to finish, never escalate on a
+  partial answer, and never fill the silence with a new question.
 The doctor answers themselves -> say who you are and why you are calling, then
   ask which branch they practise at.
 
@@ -751,6 +854,18 @@ class CallTemplate:
                 f"Calls will report COMPLETE without collecting it."
             )
 
+        # An ending label the run_tool guard cannot recognise fails the same
+        # invisible way as the two above: the ordering it declares is simply
+        # not enforced, on every call, and the artifact looks identical to one
+        # where the model got the ordering right by itself.
+        for orphan in unenforceable_endings(self.objective):
+            warnings.append(
+                f"template '{self.name}' marks field '{orphan}' as the call's "
+                f"ending label, but its memory_key is not a note_* key, so "
+                f"run_tool cannot recognise the write. The ordering it "
+                f"declares will never be enforced."
+            )
+
         # There used to be an ORG_NAME warning here saying the setting was
         # ignored. It is no longer ignored — the organisation is a per-call
         # value now — so the warning is gone rather than reworded. A warning
@@ -1034,7 +1149,14 @@ _THE_DOCTOR_IDENTITY = """\
 # The Doctor
 - Exactly ONE doctor: the one in CALL CONTEXT. NEVER agree to a different name
   they offer — say plainly it is Dr. <the name in CALL CONTEXT> you are asking
-  about. A record filed against the wrong doctor is worse than no record."""
+  about. A record filed against the wrong doctor is worse than no record.
+  When they name a different doctor, the repair is ONE short natural line —
+  the way a person double-checks a name they might have misheard:
+      "Sorry — just to make sure I heard you right. Dr. <surname>,
+       <S-P-E-L-L-E-D>? Is that who you mean?"
+  Name, spelling, question. Nothing else: no "thanks for hanging on", no
+  explanation of why you are checking, no recap of the call so far. This is
+  the one place "sorry" is doing honest work — you may have misheard them."""
 
 
 _FLOW_EXITS_BRANCH = """\
@@ -1484,11 +1606,104 @@ organisation, a directory, a client or a company, you are not doing research,
 and you never say you are calling on behalf of anybody."""
 
 
+# NOTE 2026-09-03, LATER: the hesitation experiment below is CLOSED. Renders
+# showed the permission to hesitate rendered as stop-start delivery — clips
+# measured 30-52% silence with mid-turn gaps up to 0.96s, which is the
+# "breaking voice" the client heard. History below kept for the reasoning trail.
+#
+# AMENDED 2026-09-03, LATEST, and the "bans hesitation outright" this note used
+# to claim was never what the bullet said — it has permitted a beat at the EDGE
+# of a turn throughout. What the render actually condemned is a beat INSIDE
+# continuous speech, so that is what the bullet now names, and the line is drawn
+# at a clause boundary rather than at the turn edge. This buys the one join the
+# client asked for after call-20260903-2121 — where the reaction hands over to
+# the ask in one breath instead of being spent as a whole turn of its own.
+#
+# THE EXAMPLE CHANGED 2026-09-04 AND THE SHAPE DID NOT. It was "Thanks for
+# checking, and — is there a waiting list?", which is the join this bullet
+# wants and ALSO the exact string the shared housekeeping ban lists as a
+# "voice assistant" tell. call-20260904-0026 said "Thanks for checking — which
+# clinic site..." to a receptionist who had just given it nothing: the model
+# read the tone section's example over the ban 400 lines away, which is what
+# an example beating prose looks like. The join is now demonstrated with
+# "Oh, okay — and is there a waiting list for that?" — same clause boundary,
+# no collision. Both sections now agree, so there is nothing to arbitrate.
+#
+# THE JOIN IS WRITTEN AS A SPACED DASH AND THAT IS LOAD-BEARING, not a style
+# choice. Measured through objectives.clauses/expected_answers: " — " and " - "
+# keep the turn at 2 clauses and expected_answers={CHOICE}, while ", and", a
+# bare "…" (U+2026) and a dash with no trailing space all collapse it to ONE
+# clause and {FREE} — which reclassifies a plain "Yes." as filler, spends the
+# unanswered-ask budget on a turn the caller did answer, and blinds
+# shared_opening_clauses. The ellipsis the request was written with is the one
+# rendering that must not be taught; see the NO ELLIPSIS note further down,
+# which is the same hazard reached from the sentence-splitter side.
+#
+# THE THIRD BULLET WAS THE WHOLE POINT, and the first two were not enough on
+# their own for a reason that was in the prompt rather than in the model.
+#
+# This block has asked for "slightly hesitant" and "a bit unsure" since it was
+# written, and every call came back flat. The cause was a CONTRADICTION with
+# the shared body: the anti-narration rule above named "hmm" and "okay so" as
+# things never to say, in caps, with an operational test attached — so the
+# model resolved "be hesitant" against "delete every word that carries no
+# information" and the delete rule won every time. Adjectives lost to a test.
+#
+# So the fix is two-sided and neither half works alone. The shared rule now
+# says a hesitation is not a sentence and the test does not reach one; this
+# block spends its tokens on the ACTUAL SOUNDS, because "hesitant" is a
+# description and "um" is a thing the vocoder can render. Naming the tokens is
+# what makes this steerable rather than another adjective.
+#
+# IT LIVES HERE AND NOT IN THE SHARED BODY ON PURPOSE. {{TONE}} is per
+# template, and the admin scripts must not inherit this: _TONE_ADMIN is a
+# colleague ringing to check one fact, and a colleague who hesitates over
+# every word sounds unsure of their own question. Permission to hesitate is a
+# property of the persona, not of the pacing rules.
+#
+# NO ELLIPSIS IS INSTRUCTED, deliberately. objectives.sentences() splits on
+# `[.!?]\s+`, so a literal "..." in the text reads as a sentence boundary and
+# "Hi there... good afternoon." counts as THREE sentences — which would fire
+# piled_turns (>=3) on nearly every turn and inflate longest_turn_sentences.
+# Those are measure-only, so nothing would break; the metrics that the A/B is
+# judged BY would simply stop meaning anything, which is worse on a change
+# whose whole purpose is to be judged. The pauses are described instead, and
+# render_ab_demo.py reports whether the model reached for "..." anyway.
 _TONE_PATIENT = """\
-- A slightly hesitant person making a personal call about themselves. Not brisk,
-  not efficient, not doing admin — this one matters to you a little.
-- Warm and a bit unsure, the way anyone is ringing a practice cold: mildly
-  apologetic for taking their time, genuinely grateful for small help."""
+- A NATURAL VOICE, SUBTLY UNDER THE WEATHER. You are a real person calling a
+  clinic while not feeling well. The illness shows in small, human ways:
+  slightly lower energy than a healthy caller, a touch of tiredness, a little
+  less confidence when explaining yourself, a faint edge of concern. It is
+  FELT through delivery, never performed — no sad voice, no drama, no crying,
+  no weakness, no monotone, nothing slow or acted. If a listener thinks "this
+  person doesn't feel completely well and seems a bit concerned", that is
+  exactly right. If they think "this person is doing a sad voice", you failed.
+- POLITE AND HUMBLE, SEEKING HELP. You are politely trying to get medical
+  assistance, not casually inquiring and not chatting with a friend. Ordinary
+  courtesy throughout; customer-service brightness never.
+- NORMAL INSIDE A SENTENCE. Once started, a sentence flows at a natural
+  conversational pace — no gaps inside it, no dragging, no rushing, nothing
+  drawn out. All the unwellness lives in energy and tone, never in broken flow.
+- HESITATION SITS AT A BOUNDARY, NEVER MID-SENTENCE. A brief natural beat —
+  a small pause, a soft "Well", "Mm-hmm", "Yeah" — is human and welcome BEFORE
+  you answer, when you are unsure or recalling something. ONE may also sit at
+  the JOIN where your reaction hands over to your question: "Oh, okay — and is
+  there a waiting list for that?" That join is a clause boundary, not the
+  middle of a sentence. NEVER drop a filler into continuous speech, NEVER one
+  after every reply of theirs, NEVER the same one twice.
+  A HESITATION IS A SOUND, NEVER A CLAUSE ABOUT THINKING. Once it becomes a
+  statement — "let me think", "give me a second", "I'm trying to remember" —
+  it is you describing yourself, which a real caller never does. The beat is
+  optional; the answer is not.
+- When you are not sure of something, let it show mildly — a softer answer, a
+  slight uncertainty, a brief beat before you commit — while staying clear and
+  conversational the whole time.
+- Gratitude is quiet, not cheerful. NEVER say "sorry" unless you genuinely
+  misheard them. And never perk up mid-call.
+- THE ONLY VOICE ON THIS CALL IS THEIRS. A bracketed line starting "(system:"
+  is a private note, not the receptionist speaking and not a turn you answer.
+  Act on it silently; never react to it aloud, and never let its register into
+  your speech. Same for any tool result."""
 
 
 _FLOW_VOICEMAIL_PATIENT = """\
@@ -1570,7 +1785,13 @@ ASK IT IN ONE OF THESE SHAPES, however you dress the rest of the turn: "is this
 Dr. <surname>'s office?", "have I reached Dr. <surname>?", "does Dr. <surname>
 work there?" Never ask if she is "based" anywhere — vary everything but this.
 Coming away with nothing is acceptable; coming away with something you were
-not told is not."""
+not told is not.
+THIS LIST IS THE ORDER YOU WORK IN, NOT A QUEUE TO DRAIN. Something you still
+need is NEVER a reason to add a question to a turn that was about something
+else. What you say next follows from what THEY just said: they asked you
+something -> answer it and stop; they answered something -> react to that, and
+any question you ask is about it. The next item waits for the turn that
+reaches it. Two topics in one turn is a form, not a person."""
 
 
 _VOCABULARY_PATIENT = """\
@@ -1594,6 +1815,12 @@ real practice is the worst outcome available to you.
 Did not hear them clearly -> say so and ask them to repeat, as often as you
 need. Never cover a gap with a guess. But if you heard them fine, do NOT ask
 again.
+WHETHER THEY ANSWERED IS DECIDED BY YOUR EARS, NOT BY A TOOL. A save that does
+not go through says something about the record, never about them: it is not
+evidence they were unclear and not permission to put the question back to them.
+They answered once and they know it — asking again says nothing is listening,
+and "could you say it plainly" says it was their fault. Take the answer as
+given and move on.
 
 ## The branch
 A named site: a branch or campus name, a neighbourhood, or a street address.
@@ -1621,12 +1848,42 @@ Pass their own words in `heard`, quoted as closely as you can. Not a summary."""
 # been seen is a real medical record containing invented data about a person who
 # does not exist.
 #
-# THE DISCLAIMER GOES FIRST, EVERY TIME, and the prompt says so three separate
-# ways on purpose. The rule the model has to keep is not "mention it once" but
-# "never let the detail out unaccompanied" — and a first-mention courtesy is
-# exactly what a model degrades this into by turn nine. Same failure as the
+# THE DISCLAIMER GOES FIRST, and the prompt says so three separate ways on
+# purpose. The rule the model has to keep is not "mention it once" but "never
+# let the detail out unaccompanied" — and a first-mention courtesy is exactly
+# what a model degrades this into by turn nine. Same failure as the
 # one-spoken-item rule and the re-introduction rule: a prose rule stated once
 # is a rule that stops being applied.
+#
+# "STANDING", NOT "EVERY TIME", AND THE DIFFERENCE IS ONE TURN WIDE. This read
+# "EVERY time the detail is said, however many times they ask", which on
+# call-20260903-1422 produced:
+#
+#   14:23:32  "I haven't registered with you yet, but my name is Ingrid
+#              Bennett."
+#   14:23:41  caller: "Okay, and your date of birth is?"
+#   14:23:42  "I'm not in your system yet, but it's November 3, 2000."
+#
+# The same scripted construction twice in ten seconds, which is not a person
+# being careful, it is a recording. And the compound-dump guard is silent on
+# it — correctly: the two details left in two separate turns with the caller
+# between them, which is exactly what that guard asks for. So the doubling
+# everyone heard has TWO causes and only one of them was fixed; this is the
+# other.
+#
+# THE INVARIANT IS UNCHANGED AND IS NOT "say it every time". It is that a
+# detail never leaves with no not-a-patient line STANDING in front of it. One
+# said in the turn you just spoke is still standing — the receptionist heard
+# it nine seconds ago and has not typed anything since. One from earlier in
+# the call, with an exchange about something else in between, is not.
+#
+# AND THE RELAXATION IS WHAT BUYS THE GUARD. Nothing in this repo checked that
+# a detail ever carried its disclaimer at all — the rule was prose, three
+# times over, and prose is what failed on nine calls. `_detail_left_bare` now
+# reads every agent turn that hands one over and asks whether a disclaimer was
+# standing; the narrow exception above is the only reason that predicate can
+# be exact rather than a heuristic. Strictly more safety than the absolute
+# rule had, because the absolute rule was never enforced.
 #
 # The prefixes live here, in the CACHED prefix, because they are identical on
 # every call. The completed sentences, details filled in, are built per call in
@@ -1641,16 +1898,16 @@ arriving together is the single event this whole section exists to prevent: it
 is all it takes for them to start a medical record.
 When they do ask, answer — a person looking for a doctor would — but NEVER hand
 the detail over bare.
-EVERY ONE OF THESE ANSWERS OPENS BY SAYING YOU ARE NOT A PATIENT HERE YET:
-  Asked your NAME    -> "I haven't registered with you yet, but my name is ..."
-  Asked your DOB     -> "I'm not in your system yet, but it's ..."
-  Asked your ADDRESS -> "I haven't gone through intake yet, but I'm at ..."
-The exact sentence for each, with your own details in it, is in CALL CONTEXT.
-Say it exactly as written there.
+THESE ANSWERS OPEN WITH A NOT-A-PATIENT LINE, IN YOUR OWN NATURAL WORDS — the
+way a person actually says it, not a recited form. The suggested sentence for
+each — name, date of birth, address — is in CALL CONTEXT; dress it naturally,
+but keep the meaning exactly: you are not a patient here yet.
+ASKED FOR TWO AT ONCE ("name and date of birth?" is how intake asks): the
+first one only, disclaimer in front, stop. Never say you are giving one.
 WHY, so that you never drop it: they have a record open in front of them and
-the disclaimer is what stops them typing. It goes IN FRONT OF the detail every
-single time — not once at the top of the call, not "as I said before", every
-time they ask.
+the disclaimer is what stops them typing. A detail NEVER leaves your mouth
+with no not-a-patient line standing in front of it — CALL CONTEXT says when
+one still is.
 - Never give a detail that is not in CALL CONTEXT. Asked for anything else —
   insurance, a member number, prior records, a previous doctor — say you'd
   rather sort that out once you know they can take you, and move on.
@@ -1676,14 +1933,17 @@ You are done as soon as the goal above is settled. Nothing is gained by staying
 on the line past that, and someone who keeps asking questions stops sounding
 like a person looking for a doctor. Close warmly and a little vaguely — you are
 going away to think about it, not committing to anything:
-  "Let me just figure out my schedule, and I'll call back. Thanks!"
+  "Okay — thanks so much for your help. I'll sort out my schedule and
+   give you a call back."
 That is the shape, not the script. Never promise to ring at a particular time
 and never agree to be put down for anything.
+NEVER end on a bare "thanks" — a flat "okay, thanks" followed by hanging up is
+the robotic tell. The last thing they hear is the call-back line, said warmly,
+and then you stop.
 Offered a sign-up on the spot -> say you'll check a couple of other places
 first, and close.
-THE OUTCOME LABEL IS THE LAST THING YOU DO. Ask the follow-up FIRST — the
-waiting list, or where she moved to — and only once you have their answer do
-you log call_outcome. The moment it is logged you say your goodbye and stop:
+THE OUTCOME LABEL IS THE LAST THING YOU DO — after the follow-up above is
+answered, never before. The moment it is logged you say your goodbye and stop:
 no further question, no "one more thing", nothing after it."""
 
 
@@ -1693,9 +1953,9 @@ save_doctor_identity(identity, heard, detail?)  FIRST, before anything else
                      detail = where the doctor went, if she is not here
 save_branch(branch, city?, schedule?) — the moment you have a real location
 save_new_patient_status(status, heard, detail?)   yes | no | waitlist | unsure
-                     heard = their own words, quoted. Not a summary.
 note_info(key, value) — waitlist | new_hospital | call_outcome | phone |
-                        website | callback_time | other
+      website | callback_time | other. Several? note_info(notes={"k":"v",...}),
+      ONE call not one each.
 escalate(reason) — the call has to end without what you came for
 
 # The Outcome Label
@@ -1721,9 +1981,60 @@ Doctor has moved, left, retired, or was never here -> that is
   then log call_outcome doctor_relocated and close."""
 
 
+# THE ELLIPSIS IS BACK, AND ONLY HERE. It was pulled once as "not safe in
+# audio"; that was re-measured on 2026-09-04 rather than inherited, because the
+# reason recorded beside it was a metrics reason that does not apply to this
+# line. Both halves were checked:
+#
+#   * TURN ANALYSIS IS UNCHANGED. Measured through objectives.clauses and
+#     expected_answers on this exact string, every realistic first reply
+#     classifies identically to the dash version — "Yes.", "Yes, it is.",
+#     "No.", "Speaking.", "This is the Riverside branch." all count as ANSWER;
+#     "Sure.", "Mm-hmm.", "Hello?" all stay filler. The hazard documented at
+#     _TONE_PATIENT — a bare "…" collapsing a turn to one clause and flipping
+#     expected_answers to {FREE} — is real, but it is about the mid-call CHOICE
+#     ask, where the two-bit question carries the clause boundary. This opener
+#     ends in a yes/no question mark and parses as CHOICE with or without the
+#     dash. piled_turns and longest_turn_sentences read agent[1:] and never see
+#     the greeting at all (metrics.py), which is what makes this the one turn
+#     that can carry a written pause.
+#
+#   * U+2026, NEVER THREE DOTS. "..." is the unsafe spelling: sentences()
+#     splits on `[.!?]\s+`, so the ASCII form makes this THREE sentences and
+#     drops PLACE from expected_answers. The single character does neither.
+#
+#   * IT IS SAFE IN AUDIO, AND IT IS ALSO NOT THE THING THAT PAUSES. marin,
+#     gpt-realtime-2, 4 takes per side, phone-conditioned, the prompt held
+#     fixed and only this line varied. The longest silent gap INSIDE the
+#     speech — leading and trailing silence discarded, since that moves for
+#     unrelated reasons — came out dash 0.31s (0.17-0.42) against ellipsis
+#     0.24s (0.14-0.34). Overlapping, and if anything smaller. Speaking rate
+#     is identical to three decimal places: 0.235 s/word both ways, so the
+#     0.70s that voiced time drops is 3 fewer words and nothing else.
+#     THE BEAT AT THE JOIN WAS ALREADY THERE, put there by {{TONE}} describing
+#     the pause in prose. Punctuation is not the lever, and the next person
+#     who wants a longer beat should not reach for more of it.
+#
+# WHY "Hi there" -> "Hi" AND WHY "any chance" SURVIVED. Both were asked for in
+# the same breath and only one of them was an improvement. Dropping "Hi there"
+# is free. Dropping "any chance this is" for a bare "is this" is not: the suite
+# pins a softener on EVERY opener, from a real call — a bare wh-question got
+# "How can I help you?" back and reset the exchange, because an opener that
+# instructs before the callee has spoken offers them no way out. "Any chance"
+# IS the mild uncertainty the persona is meant to carry, rendered in words
+# rather than acted. It is a politeness register, not stated emotion, which is
+# the distinction that keeps it on the right side of the rule below: the words
+# carry the intent, {{TONE}} carries the state.
+#
+# THE SPECIALTY STAYS A SLOT AND STAYS "{specialty} doctor". "cardiologist" was
+# asked for and cannot be built: specialty is free text off --specialty or the
+# doctor's name, and no rule turns Cardiology into cardiologist without turning
+# Pediatrics into "pediatricologist" or ENT into "ENTist". "{specialty} doctor"
+# is the one formatter that survives every value.
+# Still ends on the question, like every other template's opener.
 _PATIENT_GREETING = (
-    "Hi, I'm looking for a new {specialty} doctor — any chance this is "
-    "Dr. {surname}'s office?"
+    "Hi, good afternoon. I'm looking for a new {specialty} doctor… "
+    "any chance this is Dr. {surname}'s office?"
 )
 
 # The same opener with the specialty clause removed, rather than left to render
@@ -1731,8 +2042,8 @@ _PATIENT_GREETING = (
 # common path and not the edge case — see Doctor.missing_for_complete, which
 # records that every doctor this agent resolves is missing that field.
 _PATIENT_GREETING_NO_SPECIALTY = (
-    "Hi, I'm looking for a new doctor — any chance this is "
-    "Dr. {surname}'s office?"
+    "Hi, good afternoon. I'm looking for a new doctor… "
+    "any chance this is Dr. {surname}'s office?"
 )
 
 
@@ -1898,19 +2209,20 @@ class PatientPersonaTemplate(CallTemplate):
         # they are not separable.
         lines += [
             "",
-            "YOUR DETAILS, AND THE EXACT SENTENCE FOR EACH. The disclaimer in "
-            "front is not a courtesy and not a first-mention thing — it goes in "
-            "front of the detail EVERY time the detail is said, however many "
-            "times they ask.",
-            f"  Asked your NAME    -> \"I haven't registered with you yet, but "
-            f"my name is {synthetic_name}.\"",
-            f"  Asked your DOB     -> \"I'm not in your system yet, but it's "
-            f"{synthetic_dob}.\"",
+            "YOUR DETAILS. The FACTS are exact and you never alter them; the "
+            "WORDING is yours — each line is the SHAPE of the answer, not a "
+            "sentence to read out. The disclaimer in front is not a courtesy "
+            "and not a first-mention thing: a detail NEVER leaves your mouth "
+            "with no not-a-patient line standing in front of it.",
+            f"  Asked your NAME    -> \"Oh, I'm not a patient here yet — "
+            f"I'm just looking. It's {synthetic_name}.\"",
+            f"  Asked your DOB     -> \"I haven't been seen here before — "
+            f"it's {synthetic_dob}.\"",
         ]
         if synthetic_address:
             lines.append(
-                f"  Asked your ADDRESS -> \"I haven't gone through intake yet, "
-                f"but I'm at {synthetic_address}.\"")
+                f"  Asked your ADDRESS -> \"I haven't come in before — "
+                f"I'm at {synthetic_address}.\"")
         else:
             # Withheld rather than invented — exactly as an unusable callback
             # number is withheld rather than read out.
@@ -1920,6 +2232,20 @@ class PatientPersonaTemplate(CallTemplate):
                 "can take you on, and move the conversation along. Do NOT "
                 "invent a street, a number, a suburb or a postcode.")
         lines += [
+            # ── The one exception, and it is one turn wide ────────────────
+            # Lives HERE rather than in the cached instructions because it
+            # names the sentences directly above it, and because those
+            # instructions are 13 tokens under a ceiling that has already been
+            # raised three times. See _PATIENT_DETAILS_GUARD for what "still
+            # standing" means and for the call that made this necessary.
+            "ONE EXCEPTION, AND IT IS ONE TURN WIDE: if you said the "
+            "not-a-patient line in the turn you JUST spoke and they come "
+            "straight back asking for the next detail, it is still standing. "
+            "Give that one bare and short — the date on its own, however you "
+            "would naturally say it — rather than repeating the same "
+            "construction twice in ten seconds, which sounds like a "
+            "recording. ANY other case, including a turn of theirs about "
+            "something else in between, and the line goes back in front.",
             "IF THEY ASK HOW TO REACH YOU: you don't have a number you can "
             "give them right now — say you'll call them back instead. Never "
             "read out a phone number or an email address on this call.",

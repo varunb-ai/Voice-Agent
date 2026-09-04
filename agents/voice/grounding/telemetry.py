@@ -283,6 +283,12 @@ async def _report_tool_result(name: str, args: dict, result: dict,
     elif name == "note_info":
         print(f"[{ts}] {'📝 NOTE           ' if ok else '⛔ NOTE REJECTED  '}: {args}",
               flush=True)
+        # THE REASON, which only this branch was throwing away. Both save
+        # families print theirs; note_info could not be refused at all until
+        # the ending-label ordering guard, so the line said a note was rejected
+        # and left the operator with no way to see why from the log.
+        if not ok:
+            print(f"          reason: {result.get('error', '')}", flush=True)
     elif name in _CHOICE_SAVE_TOOLS:
         _short = name.replace("save_", "").replace("_status", "")
         if ok:

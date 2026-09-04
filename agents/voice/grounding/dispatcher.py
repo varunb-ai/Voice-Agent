@@ -181,7 +181,12 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
     await _report_tool_result(name, args, result, ok, ts, sess,
                               oai_ws)
 
-    _close_deferred = _decide_close(name, result, sess, ts)
+    # _response_had_audio IS PART OF THE CLOSE DECISION, not only of what to
+    # say once it is made. See the "spoken" branch in _decide_close: a
+    # completing tool that spoke nothing, after a turn of ours that did, means
+    # any goodbye asked for now stacks on our own finished utterance.
+    _close_deferred = _decide_close(name, result, sess, ts,
+                                    _response_had_audio)
 
     await oai_ws.send(json.dumps({
         "type": "conversation.item.create",

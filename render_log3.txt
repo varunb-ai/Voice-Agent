@@ -1,0 +1,27 @@
+
+model   gpt-realtime-2
+voices  marin, cedar
+out     C:\Users\varun\Desktop\conversational_ai\data\demo_audio
+
+  marin_A-flat_greeting.wav  6.15s  (4.10s voiced)
+  marin_B-humble_greeting.wav  6.55s  (4.20s voiced)
+  cedar_A-flat_greeting.wav  6.20s  (3.40s voiced)
+  cedar_B-humble_greeting.wav  5.65s  (3.24s voiced)
+
+==============================================================================
+  TRANSCRIPTS — the words are the control; only delivery should vary
+==============================================================================
+
+  marin  A-flat    greeting  scripted  6.15s   4.10s voiced
+    Hi there, good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  marin  B-humble  greeting  scripted  6.55s   4.20s voiced
+    Hi there, good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  cedar  A-flat    greeting  scripted  6.20s   3.40s voiced
+    Hi there, good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+  cedar  B-humble  greeting  scripted  5.65s   3.24s voiced
+    Hi there, good afternoon. I'm looking for a new doctor — any chance this is Dr. Okafor's office?
+
+4 clips in C:\Users\varun\Desktop\conversational_ai\data\demo_audio
