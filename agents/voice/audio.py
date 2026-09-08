@@ -854,12 +854,34 @@ async def _handle_audio_delta(
                       f"caller stopped ({_vad:.2f}s detector + "
                       f"{_after_vad:.2f}s think/round-trip)",
                       flush=True)
-                # t5 — the agent made a sound. Close the record.
+                # t5 — the agent made a sound.
+                #
+                # THE RECORD IS NOT CLOSED HERE ANY MORE. `sess._stage = None`
+                # stood on the line below, and because every later mark is
+                # guarded on the record existing, a model that SPEAKS BEFORE
+                # CALLING ITS TOOL had its whole tool round trip and second
+                # inference fall outside the instrument. That is not a rare
+                # shape — it is the padding cadence, and on call-20260904-1734
+                # it produced an artifact claiming `tool: null` on all eight
+                # turns of a call that made three save_branch calls.
+                #
+                # The row is still APPENDED and PRINTED here, so nothing about
+                # the live view changes; _restage rewrites it in place if a
+                # tool arrives afterwards. The record is dropped at the next
+                # t0, which overwrites sess._stage with a fresh dict.
                 _st = sess._stage
-                sess._stage = None
                 if _st is not None and "t0" in _st:
                     _st["t5"] = time.monotonic()
+                    # Frozen now: once a late tool stamps t2 the order in
+                    # which speech and the tool call happened can no longer be
+                    # read off the marks.
+                    _st["spoke_first"] = "t2" not in _st
                     _row = _stage_row(_st, _felt)
+                    # Where _restage will find it, and the felt gap it needs
+                    # to re-render with. Carried in the stage dict so latency.py
+                    # stays session-free.
+                    _st["row"] = len(sess.turn_stages)
+                    _st["felt"] = _felt
                     sess.turn_stages.append(_row)
                     # Printed as well as recorded: the whole reason this exists
                     # is that a slow turn was unattributable while the call was

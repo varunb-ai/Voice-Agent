@@ -29,7 +29,7 @@ from agents.voice.metrics import conversation_metrics
 from agents.voice.objectives import CallObjective, Outcome, default_objective, describe as _describe_objective
 from agents.voice.outbound_audio import DISABLED_REASON as OUTBOUND_UNAVAILABLE, OutboundConditioner
 from agents.voice import ambience as _ambience
-from agents.voice.turns import _norm_clause
+from agents.voice.turns import _norm_clause, _CADENCE_NUDGE_PER_KIND, _CADENCE_NUDGE_TOTAL
 from core.config import settings
 from core.models import Doctor, DoctorStatus, Source, TranscriptTurn
 from datetime import datetime, timezone
@@ -43,6 +43,14 @@ import threading
 import time
 
 log = logging.getLogger(__name__)
+
+
+# One inbound Twilio media frame, in seconds. 8 kHz mu-law is one byte per
+# sample and Twilio sends 160 of them, so this is 20 ms. It is only the
+# DEFAULT for note_caller_voice_gap — the live call site passes the frame's
+# real length off the wire, because a constant that silently disagrees with
+# the audio is how the voiced total would drift from the frames it counts.
+_TWILIO_FRAME_S = 0.020
 
 
 # Where call artefacts land. Indirected through functions so tests can point
@@ -287,6 +295,16 @@ class RealtimeSession:
         # produce an acceptable value retries forever, saying goodbye each
         # time. See _MAX_SAVE_REJECTIONS.
         self._save_rejections: int = 0
+        # (tool, canonical args) for every save already refused this call, so a
+        # byte-identical retry is recognisable as one. A set, not a count: the
+        # question is "have these exact arguments already been answered", and
+        # the answer to that is deterministic.
+        self._refused_calls: set = set()
+        # How many times we have told the model that re-sending identical
+        # arguments will not change the answer. Bounded like the cadence
+        # directives and for the same reason — a correction the model has
+        # ignored twice is not worth a third turn of the transcript.
+        self._refused_repeat_nudges: int = 0
         # Every save a guard refused ON THE SPOT, with the caller turn that
         # caused it. The counter above bounds the retry loop; this is the
         # evidence, and it is what check_refusals.py reads to find the next
@@ -613,6 +631,13 @@ class RealtimeSession:
         # reason was in every event, unread — so the dead air they caused was
         # diagnosed by guesswork twice before anyone read the field.
         self.response_failures: list[dict] = []
+        # A response.create the server refused because its own VAD had already
+        # opened one. DISTINCT FROM response_failures: nothing failed, we were
+        # simply too late, and the turn we intended never existed. Benign at
+        # the goodbye (the retry was unnecessary — the line is not silent) and
+        # not obviously benign mid-call, which is why it is recorded rather
+        # than swallowed by the generic error print.
+        self.active_response_races: list[dict] = []
         # Backchannels. When the caller's current utterance began (None if they
         # are not speaking), whether we already made a noise during it, and the
         # last clip used so the same one is not repeated.
@@ -621,6 +646,31 @@ class RealtimeSession:
         # with something substantive. See _HOLD_GRACE_S.
         self._hold_until: float = 0.0
         self._caller_speaking_since: Optional[float] = None
+        # ── HOW MUCH OF THIS UTTERANCE WAS ACTUALLY SPEECH ───────────────
+        # NOT THE SAME QUESTION AS _caller_speaking_since, and conflating the
+        # two is what made the backchannel unreachable. That mark is set at
+        # `speech_started` and the server VAD does not end a segment until
+        # `realtime_silence_ms` of quiet, so the WALL time since it includes
+        # every pause the caller took inside their own turn. A short answer
+        # delivered slowly, with two thinking pauses in it, clears a 6.5s wall
+        # bar without ever being a long explanation — which is exactly the
+        # "listening theatre on a turn that did not need it" the bar was
+        # raised to 6.5 to stop. Raising it did not fix that; it only made the
+        # feature stop firing at all.
+        #
+        # Measured on the callee leg of 50 dual-channel Twilio recordings,
+        # 858 utterances:
+        #
+        #     wall    p50 1.04s  p90 3.94s  p95 5.06s  p99 6.54s   max 8.12
+        #     voiced  p50 0.78s  p90 3.08s  p95 3.92s  p99 4.86s   max 6.44
+        #
+        # NOTHING in the corpus reaches 6.5s of voiced speech. On the right
+        # clock the old bar is not strict, it is unsatisfiable.
+        #
+        # Accumulated off the same clean-frame level the echo floor and the
+        # lull use, so all three agree about what counts as the caller
+        # speaking, and reset per utterance beside the done flag below.
+        self._utterance_voiced_s: float = 0.0
         self._backchannel_done_this_utterance: bool = False
         self._last_backchannel_at: float = 0.0
         self._last_backchannel_clip: Optional[str] = None
@@ -687,6 +737,44 @@ class RealtimeSession:
         self._disclaimer_repeat_nudged: bool = False
         self._bare_detail_nudged: bool = False
         self._self_repeat_nudged: bool = False
+        # ── The enquiry-bot cadence ─────────────────────────────────────────
+        # Two consecutive agent turns both opening on an acknowledgement, and
+        # turns spent thanking them for taking part in our own workflow. See
+        # grounding/vocabulary._ack_opener for the 70%/177 measurement and for
+        # why neither of these could be left to the prompt. Recorded from the
+        # live site for the reason compound_pii_dumps is: a count recomputed at
+        # save() is a count that can disagree with the directive that went out.
+        # Nudges are BOUNDED, not one-shot — see may_nudge_cadence and the
+        # caps in turns.py. The booleans that used to stand here disarmed
+        # themselves after one firing while the defect ran for the rest of
+        # the call.
+        self.ack_opener_runs: list[dict] = []
+        self.housekeeping_turns: list[dict] = []
+        # Announcing the answer instead of giving it — a different
+        # failure from tool_call_padding, which is a promised QUESTION.
+        # Here the caller is waiting on the fact they asked for.
+        self.reply_narration: list[dict] = []
+        # ── The instructions arriving in the audio ───────────────────────
+        # call-20260904-1651 spoke a first-person paraphrase of a rule in
+        # templates.py to the receptionist. Distinct from reply_narration:
+        # that one promises an answer, this one narrates the exchange in the
+        # third person, which is the prompt's own register and cannot occur
+        # in speech addressed to the person being spoken about.
+        self.leaked_instructions: list[dict] = []
+        # A name or date of birth handed over WITH a question on the end.
+        # The receptionist answers the question and the detail goes past
+        # them, so it has to be asked again — which is what -1651 did.
+        self.stapled_details: list[dict] = []
+        # How many cadence directives have gone out, in total and by kind.
+        # Read and written only through may_nudge_cadence.
+        self._cadence_nudges: int = 0
+        self._cadence_nudged_by_kind: dict[str, int] = {}
+        # The acknowledgement the PREVIOUS agent turn opened with, "" if it
+        # opened on anything else. Held rather than recomputed because the
+        # released-second-item walk that finds _prev_agent has its own rules
+        # about what counts as the turn before this one, and this must agree
+        # with them.
+        self._prev_ack_opener: str = ""
         # Spoken persona and client org, set once the template is resolved.
         # _oai_to_twilio needs both to spot a re-introduction, and deriving
         # them again there would let the detector and the greeting disagree
@@ -744,7 +832,8 @@ class RealtimeSession:
         if rms > 0.005:
             self._caller_level.append(rms)
 
-    def note_caller_voice_gap(self, rms: float) -> None:
+    def note_caller_voice_gap(self, rms: float,
+                              frame_s: float = _TWILIO_FRAME_S) -> None:
         """Stamp the clock if this frame is the caller speaking, not a gap.
 
         Call from EXACTLY where `note_caller_frame_rms` is called and nowhere
@@ -763,6 +852,14 @@ class RealtimeSession:
         """
         if rms >= self.caller_echo_floor():
             self._caller_voice_at = time.monotonic()
+            # THE SAME FRAME, THE SAME BAR, ONE MORE QUESTION. A frame that
+            # counts as "they are audible right now" is a frame of their
+            # speech, so the voiced total is this clock's running sum and
+            # cannot disagree with it. Charged only while an utterance is
+            # open: frames outside one belong to no turn and must not
+            # accumulate toward the next.
+            if self._caller_speaking_since is not None:
+                self._utterance_voiced_s += frame_s
 
     def caller_lull_s(self) -> Optional[float]:
         """Seconds since the caller was last audible, or None if unmeasured.
@@ -776,6 +873,27 @@ class RealtimeSession:
         if not self._caller_voice_at:
             return None
         return time.monotonic() - self._caller_voice_at
+
+    def may_nudge_cadence(self, kind: str) -> bool:
+        """Claim one cadence directive for `kind`. Mutates only on success.
+
+        CLAIM, NOT ASK, and the two must not be separated: every call site
+        sends the directive immediately, so a checker that did not spend the
+        budget would let one turn fire twice through two guards. Returning
+        False is the whole refusal — the occurrence is still recorded by the
+        caller, because the artifact has to show what happened whether or not
+        anything was said about it.
+
+        The caps and the reasoning behind both are in turns.py.
+        """
+        if self._cadence_nudges >= _CADENCE_NUDGE_TOTAL:
+            return False
+        if self._cadence_nudged_by_kind.get(kind, 0) >= _CADENCE_NUDGE_PER_KIND:
+            return False
+        self._cadence_nudged_by_kind[kind] = (
+            self._cadence_nudged_by_kind.get(kind, 0) + 1)
+        self._cadence_nudges += 1
+        return True
 
     def caller_echo_floor(self) -> float:
         """The level below which a frame is our backchannel rather than them.
@@ -1143,9 +1261,10 @@ class RealtimeSession:
             # It is ONE contiguous block because the pump never stops: the
             # timestamp is where it started and the length carries it to the
             # end of the call.
-            _tape = self.ambience.sent if self.ambience is not None else None
-            if _tape:
-                _t0  = self.ambience.started_at or 0.0
+            _amb  = self.ambience
+            _tape = _amb.sent if _amb is not None else None
+            if _amb is not None and _tape:
+                _t0  = _amb.started_at or 0.0
                 start = int(_t0 * _SR)
                 arr   = _agent_to_caller_rate(
                     _agent_wire_to_pcm16(b"".join(_tape)), _SR)
@@ -1493,6 +1612,19 @@ class RealtimeSession:
             # unsolicited_pii_dumps, which asks whether they were ASKED — here
             # they were, and that is not the question.
             "compound_pii_dumps": self.compound_pii_dumps or None,
+            # Two agent turns in a row both opening on an acknowledgement, and
+            # turns spent thanking them for taking part in the workflow. The
+            # enquiry-bot cadence, which every other counter in this artifact
+            # scored clean on the calls that had it worst — they measure the
+            # shape of a turn and this is its content.
+            "ack_opener_runs": self.ack_opener_runs or None,
+            "housekeeping_turns": self.housekeeping_turns or None,
+            # Said the answer was coming instead of saying it.
+            "reply_narration": self.reply_narration or None,
+            # The prompt's own register reaching the callee, and a plain
+            # fact shipped with a question stapled to it.
+            "leaked_instructions": self.leaked_instructions or None,
+            "stapled_details": self.stapled_details or None,
             # The disclaimer said twice in consecutive turns. An AUDIO defect,
             # not a safety one — the line was standing and the detail was
             # covered; it just sounded like a recording. Non-null means the
@@ -1530,6 +1662,7 @@ class RealtimeSession:
             "false_save_claims": self._false_save_claims or None,
             # Why any response failed. Non-null means dead air with a cause.
             "response_failures": self.response_failures or None,
+            "active_response_races": self.active_response_races or None,
             # Pickup to first sound, in seconds. The figure the callee
             # experiences; None when /answer could not be timed.
             "pickup_to_greeting_s": self.pickup_to_greeting_s,

@@ -387,9 +387,157 @@ def _decide_close(name: str, result: dict,
 
 
 
+def _saved_the_news(name: str, result: Optional[dict]) -> bool:
+    """Did an ordinary save just succeed? Then the call has news in it.
+
+    Deliberately the SAME predicate the post-save move uses for its first two
+    conditions, and deliberately not more: a refused or held save has nothing
+    to react to, and neither does note_info or escalate.
+    """
+    return (str(name or "").startswith("save_")
+            and bool(result) and bool(result.get("ok"))
+            and not result.get("pending"))
+
+
+def _next_move_item(sess: "RealtimeSession", name: str,
+                    result: dict) -> str:
+    """What the post-save response should be about, or "" to say nothing.
+
+    THE ONE UNGUIDED MOMENT IN THE CALL, and it is where the workflow cadence
+    comes from. Every ordinary tool call ends at the `else` below, which
+    creates a fresh response and tells it nothing. The model has just filed
+    something, is handed a turn, and has nothing to fill it with — so it fills
+    it with a thank-you. On call-20260907-1728 all THREE tool-carrying turns
+    came out that way:
+
+        save_doctor_identity    -> "Okay, thanks for confirming that for me."
+        save_branch             -> "Okay. I've got Riverside campus noted."
+        save_new_patient_status -> "That's good to know, thanks for checking."
+
+    The prompt already bans this in capitals ("AN ACKNOWLEDGEMENT IS NEVER
+    OWED", "NEVER SEND A BARE ACKNOWLEDGEMENT AND WAIT FOR PERMISSION") and the
+    model does it anyway, because a ban says what not to say at the moment
+    there is nothing else to say. This says what to say instead.
+
+    NO PHRASE LIBRARY AND NO NEW WORDING. The only content is
+    CallObjective.next_spoken(), which the cadence directives already use and
+    which is already measured: naming the outstanding field moved good
+    corrections from 0 of 9 to about 2 in 3. The label comes from the template,
+    so a script that changes its fields cannot leave a stale sentence here.
+
+    WHAT IT REFUSES TO DO, each for its own reason:
+      * a refused or held save — the model owes a correction, not a new
+        question, and the refusal text already says what to do
+      * nothing outstanding — next_spoken returns "" and this returns "";
+        asking a question the call does not need is the failure this replaces
+      * a hold in flight — they asked us to wait, and the whole point of the
+        hold is that the next sound is theirs
+    """
+    if not str(name or "").startswith("save_"):
+        return ""
+    if not result or not result.get("ok") or result.get("pending"):
+        return ""
+    if getattr(sess, "done", False):
+        return ""
+    # THEY ASKED US TO WAIT. Speaking here is the thing a hold exists to stop,
+    # and it is not this change's business to decide the hold is over.
+    #
+    # time.time(), NOT time.monotonic(), AND THE DIFFERENCE WAS THE WHOLE GATE.
+    # `_hold_until` has one setter — turns.py `sess._hold_until = time.time() +
+    # _HOLD_GRACE_S` — so it is an EPOCH stamp (~1.79e9). monotonic counts from
+    # an arbitrary origin, in practice uptime (~1.2e6), and is therefore always
+    # the smaller number: this read returned True for the REST OF THE CALL once
+    # any hold had ever been requested, and the steer below was never sent
+    # again. The watchdog's read of the same field (turns.py) was already
+    # time.time(), so the two disagreed about whether a hold was still running.
+    #
+    # What it cost, on call-20260908-1114: the caller asked for a minute at
+    # 11:15:45, and the save at 11:16:12 got "" instead of "ask about whether
+    # there's a waiting list now ... Any reaction rides in the same breath as
+    # the question." The model was handed a turn with nothing to fill it with
+    # and filled it with "Okay, thanks for checking that." — exactly the
+    # failure the docstring above predicts, from the gate meant to prevent a
+    # different one.
+    if time.time() < float(getattr(sess, "_hold_until", 0.0) or 0.0):
+        return ""
+    objective = getattr(sess, "objective", None)
+    if objective is None:
+        return ""
+    nxt = objective.next_spoken(sess.memory)
+    if not nxt:
+        return ""
+    # REACTION OPTIONAL, QUESTION NOT — the same shape the tone block asks for,
+    # and deliberately not a phrase to copy: it names the field and leaves the
+    # words to the model.
+    # POSITIVE ONLY, NAMING NO BANNED PHRASE. The corpus records the model
+    # saying the exact strings sitting under BANNED in the prompt 67 times
+    # in 470 turns; a directive that spells out what not to say hands the
+    # words over. This says what to do and stops.
+    # "that is recorded." IS GONE, and call-20260907-1854 is why. The agent
+    # said, out loud, to a receptionist:
+    #
+    #   "Okay, thanks for that-let me just note the Northgate location and
+    #    then I'll ask about new patients."
+    #
+    # which is this directive restated as a plan: "that is recorded" became
+    # "let me just note the Northgate location", and "Ask about {nxt}" became
+    # "then I'll ask about new patients". The model does not distinguish an
+    # instruction about the call from a thing to say about the call -- the
+    # corpus already showed it reproducing directive wording 67 times in 470
+    # turns, and this is the same defect from the other side.
+    #
+    # It was also redundant. The model does not need telling that the save
+    # landed; it needs telling what to ask. Saying less is the whole fix.
+    # ── THE LOOKAHEAD, AND WHY THE STEER WAS STALE WITHOUT IT ───────────────
+    # This directive is injected at turn N's save and consumed at turn N+1. It
+    # named ONE field, so the moment the caller ANSWERED that field the steer
+    # was spent — and its replacement is manufactured by the save inside the
+    # response being generated. call-20260908-1441 at 14:43:04: memory held
+    # {identity: confirmed}, the standing steer said "ask about which office
+    # they're at", the caller had just said "At our Northgate clinic location",
+    # and the model — correctly declining to re-ask — had nothing left to say
+    # and announced instead ("I'll just note the location and then ask about
+    # new patients"), then sat silent for 8 seconds.
+    #
+    # Measured: the window between us being told the caller stopped and the
+    # response existing is median +0.000s, p90 +0.016s over 677 turns. There is
+    # NO later moment to inject at. A turn of lookahead is the only slack there
+    # is.
+    #
+    # STRICTLY missing()[1] — the field the model is being told to ask NOW is
+    # index 0, so the one thing this can never do is name the field the caller
+    # just answered. It reads no transcript, asserts nothing about what was
+    # said, saves nothing, and respects RequiredWhen through the same
+    # is_required/present pair next_spoken uses: `waitlist_available` is not
+    # applicable until `accepting_new_patients` is known, so it never appears
+    # as a lookahead, and on this objective exactly one state has one at all
+    # (identity confirmed -> ask the office, with new patients behind it).
+    #
+    # ── THE RISK, STATED PLAINLY ────────────────────────────────────────────
+    # The comment above records this directive's own wording being SPOKEN: on
+    # call-20260907-1854 "Ask about {nxt}" came out as "then I'll ask about new
+    # patients". A clause naming a second field is that same hazard with a
+    # second target, so it is written to be as unsayable as possible — a
+    # fragment, not a sentence, explicitly marked as not-for-this-turn. If a
+    # live call reproduces "then I'll ask about X", this clause is the first
+    # suspect and reverting it is one line.
+    _rest = [f.label for f in objective.fields
+             if f.is_required(objective, sess.memory)
+             and not f.present(sess.memory)]
+    _look = ""
+    if len(_rest) > 1 and _rest[1] and _rest[1] != nxt:
+        _look = (f" Not this turn, but next: {_rest[1]}. Do not ask that or "
+                 f"mention it now.")
+    return (f"(system: ask about {nxt} now, in your own words, in this "
+            f"turn. Any reaction rides in the same breath as the question."
+            f"{_look})")
+
+
 async def _close_or_continue(sess: "RealtimeSession", oai_ws,
                              _close_deferred: str,
-                             _response_had_audio: bool
+                             _response_had_audio: bool,
+                             name: str = "",
+                             result: Optional[dict] = None
                              ) -> tuple[Optional[bool], Optional[bool]]:
     """
     What happens to the line once the tool has been answered. Three ways out.
@@ -471,7 +619,14 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
                         "type": "input_text",
                         # ONE DEFINITION, and lifecycle.py's deferred close
                         # asks with the same words. See closing_directive.
-                        "text": closing_directive(last_agent),
+                        # THE ONLY CALL SITE THAT PASSES IT. lifecycle's
+                        # deferred close and turns.py's are unchanged: this is
+                        # the branch where a save has just completed the
+                        # objective, so there IS news to react to. See
+                        # _saved_the_news.
+                        "text": closing_directive(
+                            last_agent,
+                            react_to_news=_saved_the_news(name, result)),
                     }],
                 },
             }))
@@ -520,8 +675,34 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
                 "role": "user",
                 "content": [{
                     "type": "input_text",
-                    "text": "(answer what they just asked you, briefly, "
-                            "then close warmly)",
+                    # ONE MOVE, NOT TWO, AND THAT IS THE WHOLE EDIT.
+                    # This read "answer what they just asked you, briefly,
+                    # then close warmly" and call-20260908-1249 said:
+                    #
+                    #   "Thanks for explaining that… let me give you a quick
+                    #    answer, then I'll be on my way."
+                    #
+                    # — a first-person paraphrase of the two moves, in order.
+                    # "answer ... briefly" became "let me give you a quick
+                    # answer" and "then close warmly" became "then I'll be on
+                    # my way". A directive that names a SEQUENCE hands the
+                    # model a sentence describing the sequence, which is the
+                    # process narration `_narrated_the_reply` then flags after
+                    # the audio is already on the wire.
+                    #
+                    # The second move was redundant as well as harmful: this
+                    # branch defers the close, `_rearm_close_if_answered` sets
+                    # `_close_after_response` when they reply, and the goodbye
+                    # is asked for separately by closing_directive. Nothing
+                    # here ever needed to mention closing.
+                    #
+                    # The added clauses are the ones its sibling already
+                    # carries — own words, a length bound, no narration — and
+                    # no wording is supplied. See closing_directive.
+                    "text": "(they asked you something. Answer it, in your "
+                            "own words — ONE short sentence, spoken to them. "
+                            "Do not describe what you are about to say and "
+                            "do not announce anything about the call.)",
                 }],
             },
         }))
@@ -546,6 +727,18 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
         # not False.
         pass
     else:
+        # THE ORDINARY MID-CALL SAVE. Timing is untouched: this still sets
+        # _pending_response_create and the response is still created at
+        # response.done, so every stacked-reply, barge-in and drain guard
+        # applies exactly as before. The only change is that the response now
+        # has something to be about. See _next_move_item.
+        _move = _next_move_item(sess, name, result or {})
+        if _move:
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": _move}]},
+            }))
         _pending_response_create = True
     return _closing_sent, _pending_response_create
 
@@ -664,7 +857,7 @@ async def _resolve_deferred_save(sess: "RealtimeSession", oai_ws) -> None:
         "type": "conversation.item.create",
         "item": {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": (
-                     f"(system: the answer you recorded for {name} was not "
+                     f"(system: the answer you gave for {name} was not "
                      f"borne out by what they actually said. It has NOT been "
                      f"saved. Ask them again, plainly, and wait for their "
                      f"reply. NEED: {_need})")}]},

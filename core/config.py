@@ -417,17 +417,44 @@ class Settings(BaseSettings):
     # to unit RMS at load, so these mean what they say whatever level the asset
     # was rendered at.
     #
-    # -45 IS NEAR THE PRACTICAL FLOOR AND THE DUCK TARGET IS BELOW IT. mu-law's
-    # step size near zero is 8/32768 = -72.2 dBFS, which is also the smallest
-    # non-zero magnitude it can carry — the same 0.000244 this codebase knows
-    # as the audio_rms of a turn with nothing under it. (0xFF itself decodes to
-    # exactly 0.) -45 dBFS sits ~27 dB above that step, which is ample for
-    # noise; -58 dBFS is about two and a half steps — and under -16 dBFS speech it is below the voice's own step
-    # size. So the duck target does not set how loud the bed is under speech —
-    # under speech it is not representable at all. Below about -60 it is
-    # indistinguishable from muting, and there is no point going lower.
+    # -45 IS NEAR THE PRACTICAL FLOOR. mu-law's step size near zero is
+    # 8/32768 = -72.2 dBFS, which is also the smallest non-zero magnitude it
+    # can carry — the same 0.000244 this codebase knows as the audio_rms of a
+    # turn with nothing under it. (0xFF itself decodes to exactly 0.) -45 dBFS
+    # sits ~27 dB above that step, which is ample for noise.
+    #
+    # ── THE PARAGRAPH THAT USED TO BE HERE WAS WRONG, 2026-09-04 ────────────
+    # It read: "the duck target does not set how loud the bed is under speech —
+    # under speech it is not representable at all." ambience.py's own module
+    # note was corrected on that point and this copy was left standing, which
+    # is this file's documented fix-one-leave-the-other shape. It matters
+    # because a reader who believes it will not tune the one setting that
+    # controls the thing being complained about.
+    #
+    # MEASURED THROUGH THE REAL MIXER, differencing a full run against an
+    # identical run with a zero bed, so the number is the bed as it survives
+    # mu-law rather than the level we asked for:
+    #
+    #     duck target      bed under speech     bytes carrying it
+    #        -64 dBFS         -60.0 dBFS               44%
+    #        -58 dBFS         -56.0 dBFS               60%
+    #        -54 dBFS         -53.0 dBFS               70%
+    #        -50 dBFS         -49.6 dBFS               78%
+    #
+    # The measured level tracks the setting within ~2 dB across a 14 dB range.
+    # It is a live control, not an inert one. Below about -70 there is
+    # genuinely nothing left to send.
+    #
+    # -54 RATHER THAN -58, and the reason is the requirement rather than the
+    # codec: the bed has to read as one continuous room, and a 13 dB duck is
+    # deep enough that the room audibly closes when the agent starts talking.
+    # 9 dB is ordinary broadcast practice and still leaves the voice 28.6 dB
+    # dominant — measured — which is emphatically "very low, does not compete".
+    # STILL A STARTING POINT: none of these five numbers has been on a live
+    # call. If a receptionist reports hearing the bed at all under speech,
+    # this is the number to move, and down.
     realtime_ambience_db: float = -45.0
-    realtime_ambience_duck_db: float = -58.0
+    realtime_ambience_duck_db: float = -54.0
 
     # THE TRANSITION IS THE PART WORTH TUNING, per the note above: the levels
     # are pinned by the codec, the shape is not. Time to cover 90% of the gap,

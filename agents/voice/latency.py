@@ -52,7 +52,44 @@ def _stage_row(st: dict, felt: float) -> dict:
         # A turn with no tool call has one inference, not two. Recorded under
         # its own name so it never averages together with either half.
         "no_tool_s":   _d("t1", "t5") if g("t2") is None else None,
+        # response opened -> the caller heard SOMETHING. Recorded on every
+        # turn, including tool turns, because on a turn where the model speaks
+        # BEFORE calling its tool this is the only interval that says when the
+        # line stopped being silent — and `inference_1` above then spans the
+        # padding sentence rather than measuring an inference.
+        "to_first_audio": _d("t1", "t5"),
+        # DID THE MODEL SPEAK BEFORE IT CALLED ITS TOOL? Decided at t5 and
+        # frozen there, because after a late tool stamps t2 the ordering is no
+        # longer recoverable from the marks alone. This is the discriminator
+        # between the two shapes of tool turn: tool-first, where the caller
+        # waits in silence for the whole round trip, and speech-first, where
+        # they hear a contentless sentence quickly and wait for the real one
+        # afterwards. They cost the same and only one of them looks fast.
+        "spoke_first": g("spoke_first"),
     }
+
+
+def _restage(stage: dict, rows: list) -> None:
+    """Re-render a row that was already appended, after later marks arrived.
+
+    WHY A ROW IS WRITTEN TWICE. The record used to be closed and DISCARDED at
+    the first audio delta, which is correct only if nothing interesting happens
+    afterwards. On a turn where the model speaks before calling its tool,
+    everything interesting happens afterwards: call-20260904-1734 made three
+    save_branch calls and its artifact reported `tool: null` on all eight
+    turns, median 2.2s, because every t2/t3 stamp is guarded on the record
+    still existing and it no longer did.
+
+    So the row is appended at t5 — the printed line still arrives while the
+    call is in front of someone — and rewritten in place by whichever late mark
+    lands. `row` and `felt` are carried in the stage dict itself so this stays
+    session-free, which is the property that made this module safe to split
+    out and is asserted by the suite.
+    """
+    i = stage.get("row")
+    if i is None or not (0 <= i < len(rows)):
+        return
+    rows[i] = _stage_row(stage, stage.get("felt") or 0.0)
 
 
 def _fmt_stages(r: dict) -> str:
@@ -74,5 +111,6 @@ def _fmt_stages(r: dict) -> str:
 # from burying a real warning.
 __all__ = [
     "_fmt_stages",
+    "_restage",
     "_stage_row",
 ]

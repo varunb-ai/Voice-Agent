@@ -45,6 +45,7 @@ from agents.voice.grounding.vocabulary import (
     _CALL_SHAPE_EXITS,
     _CHOICE_SAVE_TOOLS,
     _FACTUAL_ESCALATIONS,
+    _NAME_NEGATED,
     _ORG_WORD,
     _SELF_ID,
     _SELF_ID_WEAK,
@@ -201,6 +202,32 @@ def _address_dropped(args: dict, sess: "RealtimeSession") -> Optional[str]:
     return None if number in saved else addr
 
 
+# How many words a sentence may carry and still be a bare naming rather than a
+# statement that happens to mention the place. Six covers every real one in the
+# corpus ("Northside Medical Group, this is Varun" is exactly six) and keeps
+# out the sentences that say something ABOUT the organisation.
+_BARE_NAME_MAX_WORDS = 6
+
+
+def _bare_self_naming(text: str, on_record: set) -> str:
+    """A short, un-negated sentence naming the organisation on record, or "".
+
+    The clearing half of hospital_mismatch, and only ever reached while a
+    mismatch is already standing — so this cannot make the guard fire less
+    often on a call where nothing is wrong. See the annotation at its call site
+    for the -1734 evidence and the four negated forms it must keep refusing.
+    """
+    for part in re.split(r"[.!?]+", text or ""):
+        part = part.strip(" ,;:-—–")
+        if not part or len(part.split()) > _BARE_NAME_MAX_WORDS:
+            continue
+        if _NAME_NEGATED.search(part):
+            continue
+        if _distinctive(part) & on_record:
+            return part
+    return ""
+
+
 def hospital_mismatch(sess: "RealtimeSession") -> str:
     """The caller answered as a DIFFERENT organisation than the one on record.
 
@@ -257,6 +284,49 @@ def hospital_mismatch(sess: "RealtimeSession") -> str:
         if _mismatch:
             # Only a positive self-ID as the place on record clears it.
             if any(_distinctive(c) & on_record for c in claims):
+                return ""
+            # ── OR THE BARE NAME, WHICH IS WHAT OUR OWN QUESTION ASKS FOR ────
+            # call-20260904-1734. The record said "VCU Medical Center", the
+            # caller's first turn read as "this is patient at our Northgate
+            # clinic", and the mismatch stood. The agent then asked the exact
+            # question the rejection demands — "Which place have I reached
+            # right now?" — and the caller answered:
+            #
+            #     "It's, I already said, right. VCU Medical Center."
+            #
+            # The name on record, in answer to our own question, and it could
+            # not be consumed: the clear above needs the name wrapped in a
+            # self-identification ("this is X", "you've reached X"), and a
+            # person answering "which place is this" says the name and stops.
+            # So the mismatch stood for the whole call and refused all three
+            # save_branch calls — including "Riverside Campus", which was a
+            # real answer, correctly heard. The call ended PARTIAL with
+            # branch=None, and the three refused round trips cost the caller
+            # ~3.7s of extra second-inference passes.
+            #
+            # THIS IS THE -1440 DEFECT IN A NEW SUIT, and the note above says
+            # what that one cost. That fix made a self-ID clear the mismatch;
+            # it left the asymmetry that our own NEED message provokes a bare
+            # name, which the clear cannot read.
+            #
+            # A SENTENCE, NOT THE TURN, and short and un-negated. That is the
+            # whole safety argument, because the risk here is that the four
+            # cases the comment above names all CONTAIN the recorded name:
+            #
+            #     "We're not Northside Medical Group"        negated
+            #     "Dr. Okafor isn't at Northside any more"   negated
+            #     "No, this is a different medical group."   negated
+            #     "We used to be Northside Medical Center."  negated
+            #
+            # Driven over 1,157 caller turns of corpus: 31 sentences qualify
+            # and every one is a genuine identification as the place on record
+            # — pickup greetings ("Mercy General, this is Varun") plus the
+            # -1734 answer. All four cases above stay refused.
+            #
+            # Splitting by sentence rather than testing the turn is what lets
+            # "We're not Northside. This is Mercy General." clear on its second
+            # half while a turn-level test would see the negator and refuse.
+            if _bare_self_naming(turn.text, on_record):
                 return ""
             continue
         # If the recorded name appears anywhere in this turn, they are the right
@@ -321,11 +391,40 @@ def _strip_ungrounded_detail(args: dict, sess: "RealtimeSession",
     # Keep each whitespace word unless its alphabetic core was ungrounded, so
     # punctuation and digits ride along with the words that survive.
     kept = []
-    for word in value.split():
+    _kept_at = []
+    for _i, word in enumerate(value.split()):
         core = "".join(re.findall(r"[a-z']+", word.lower())).strip("'")
         if core and core in dropped:
             continue
         kept.append(word)
+        _kept_at.append(_i)
+
+    # ── NEVER STITCH ────────────────────────────────────────────────────────
+    # A deletion from the MIDDLE does not trim the qualifier, it manufactures a
+    # new sentence out of whatever survived. call-20260908-1249 stored
+    #
+    #     detail in : "They said Dr. Abel is one of our pediatricians here"
+    #     stored    : "They Dr. is one"
+    #
+    # — which reads like a claim the caller made and is not one anybody said.
+    # Trailing and leading deletions are different: they shorten a span the
+    # caller's own words still back end to end, which is what carries "Book
+    # online or call the front desk" down to "Book online or call".
+    #
+    # So the test is contiguity, not count: the survivors must be one unbroken
+    # run of the original. If they are not, the field is emptied and the reason
+    # recorded — the same visible-refusal path the negator and the
+    # nothing-informative cases already take, and never a silent blank.
+    #
+    # This is strictly a REFUSAL, so it cannot weaken grounding: every value it
+    # rejects is one the old code would have rewritten and kept.
+    if _kept_at and (_kept_at[-1] - _kept_at[0] + 1) != len(_kept_at):
+        args[key] = ""
+        return tuple(dropped), (
+            "dropped whole - " + ", ".join(repr(w) for w in dropped)
+            + " came from the middle, and stitching what is left either side "
+              "of them would invent a sentence nobody said")
+
     remainder = " ".join(kept).strip()
     # Trim the danglers a deletion leaves behind. Removing "desk" from "call
     # the front desk" leaves "call the", which is not wrong so much as visibly
@@ -904,9 +1003,140 @@ __all__ = [
     "_candidate_location",
     "_discarded_location",
     "_guard_choice_save",
+    "_guard_note_info",
+    "_note_backs_a_field",
+    "_note_lacks_evidence",
     "_guard_escalate",
     "_guard_save_branch",
     "_strip_ungrounded_detail",
     "_ungrounded_escalation",
     "hospital_mismatch",
 ]
+
+
+def _note_backs_a_field(sess: "RealtimeSession", key: str):
+    """The objective field this note key lands on, or None.
+
+    KEYED ON THE MEMORY KEY THE TEMPLATE DECLARES, exactly as
+    _ending_label_owed does it — never on a list of key names kept in step by
+    hand. note_info writes note_<key>, so a field whose memory_key is
+    "note_waitlist" is the field `note_info(key="waitlist")` collects.
+
+    The model's spelling is lowercased for the lookup and NOT for the write,
+    for the reason tools.py gives at the same juncture: note_info stores the
+    key it is handed, so `Waitlist` writes note_Waitlist and reads back as not
+    collected. Judging intent case-insensitively closes the bypass without
+    changing what gets stored.
+    """
+    _obj = getattr(sess, "objective", None)
+    for f in (getattr(_obj, "fields", None) or []):
+        if (getattr(f, "memory_key", "") or "").lower() == f"note_{key}".lower():
+            return f
+    return None
+
+
+def _note_lacks_evidence(sess: "RealtimeSession", key: str) -> str:
+    """Empty if this objective-backed note may be written.
+
+    THE HOLE THIS CLOSES, call-20260907-1602. Three of patient_discovery's six
+    fields are backed by note keys, and note_info was the one collection path
+    with no guard on it at all: the dispatcher sends save_branch, the four
+    CHOICE saves and escalate to guards, and everything else to a bare
+    run_tool. So half the objective could be written by a model with no
+    evidence whatsoever, and on that call it was —
+
+        16:04:03  CALLER: "Uh."
+        16:04:05  NOTE   waitlist = "No waiting list; they're not taking new
+                         patients right now."
+        16:04:06  CALLER: "Yeah, there is a waiting list."
+
+    The note completed the objective, which armed the close; the caller's real
+    answer arrived one second later and the agent was already saying goodbye.
+    The artifact shipped to doctors.json as `verified` holding
+    accepting_new_patients=waitlist AND waitlist_available="No waiting list",
+    which contradict each other.
+
+    THE FIELD'S OWN PROBE IS THE TEST, not a new vocabulary. It is the same
+    pattern the objective, the ask budget and _ungrounded_choice's out-of-
+    window rescue already use, so a template cannot end up with two opinions
+    about what talking-about-this-field looks like. The caller must have said
+    something the probe recognises; "Uh." does not, "Yeah, there is a waiting
+    list." does.
+
+    DELIBERATELY WEAKER THAN THE CHOICE GUARD, and the reason is the shape of
+    the value. A CHOICE field is two bits and has no second gate under it, so
+    _ungrounded_choice has to anchor, assert and classify. These fields hold
+    free text — `states` is empty, so there is no classifier to apply — and
+    the failure being closed is a value invented from nothing. Requiring the
+    subject to have been raised by the CALLER is what "Uh." fails and what a
+    real answer passes, and a stricter rule here would refuse answers nobody
+    has yet seen it get wrong.
+
+    THE ENDING LABEL IS EXEMPT, on purpose. No caller ever says "no_capacity" —
+    call_outcome is our own summary of the call, not something they tell us, so
+    a caller-evidence test would refuse it on every call that ever ran. Its
+    gate is the ordering rule it already has: premature_ending_label refuses
+    the label while any required field is still outstanding.
+    """
+    _f = _note_backs_a_field(sess, key)
+    if _f is None or getattr(_f, "records_the_ending", False):
+        return ""
+    _probe = getattr(_f, "probe", None)
+    if _probe is None:
+        return ""
+    for t in getattr(sess, "turns", None) or []:
+        if getattr(t, "role", "") != "caller":
+            continue
+        _txt = getattr(t, "text", "") or ""
+        if _txt.strip() == "[...]":
+            continue
+        if _probe.search(_txt):
+            return ""
+    return (f"NOT SAVED — {key!r} is a field this call collects and the caller "
+            f"has not raised it | RE-READ: their turns, verbatim "
+            f"| NEED: ask them, and use what they say to THAT")
+
+
+def _guard_note_info(name: str, args: dict, sess: "RealtimeSession") -> dict:
+    """note_info, with the objective-backed keys grounded and the rest not.
+
+    ONLY THE KEYS THAT ARE FIELDS. An informational note — a website, a return
+    date, a phone number — is colour a reader wants and nothing decides on, and
+    putting it behind a guard would refuse exactly the free-text detail the
+    tool exists to capture.
+
+    BOTH SHAPES, because _run_note_batch splits `notes={...}` inside run_tool,
+    below the layer that can see sess.turns. A guard that only understood
+    key/value would be bypassed by every batched write — which is how the
+    -1602 note was actually sent.
+
+    OK IS NOT PARTIAL, and `written` still reports what landed: the same
+    contract _run_note_batch documents, for the same two reasons — the model
+    must see the refusal or it stops working the call, and must not re-ask for
+    the notes that succeeded.
+    """
+    _notes = args.get("notes")
+    if isinstance(_notes, dict) and _notes:
+        _keep, _refused = {}, []
+        for k, v in _notes.items():
+            _why = _note_lacks_evidence(sess, str(k))
+            if _why:
+                _refused.append(f"{k}: {_why}")
+            else:
+                _keep[k] = v
+        if not _refused:
+            return run_tool(name, sess.memory, args, sess.objective)
+        _rest = {**{a: b for a, b in args.items() if a != "notes"},
+                 "notes": _keep}
+        _out = (run_tool(name, sess.memory, _rest, sess.objective)
+                if _keep else {"ok": True, "written": {}})
+        _written = _out.get("written") or {}
+        _err = " | ".join(_refused)
+        if _written:
+            _err += f" | RECORDED, do not repeat: {', '.join(sorted(_written))}"
+        return {"ok": False, "written": _written, "error": _err}
+
+    _why = _note_lacks_evidence(sess, str(args.get("key") or ""))
+    if _why:
+        return {"ok": False, "error": _why}
+    return run_tool(name, sess.memory, args, sess.objective)

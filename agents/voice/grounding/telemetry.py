@@ -32,6 +32,7 @@ from agents.voice.objectives import (
 )
 from agents.voice.grounding.vocabulary import (
     _CHOICE_SAVE_TOOLS,
+    _MAX_REFUSED_REPEAT_NUDGES,
     _MAX_SAVE_REJECTIONS,
     _claims_saved,
 )
@@ -148,7 +149,10 @@ async def _report_tool_result(name: str, args: dict, result: dict,
     # read, which is the one thing that turns an audit into a fix. The deferred
     # path is not double-counted: a hold returns ok=True and records itself in
     # deferred_saves, and its own refusal lands there as "contradicted".
-    if not ok and name.startswith("save_"):
+    # note_info IS INCLUDED because it collects objective fields too —
+    # a guard that acts and leaves no trace is this repo's documented
+    # bug class, and the -1602 note is exactly what needs auditing.
+    if not ok and (name.startswith("save_") or name == "note_info"):
         sess.save_refusals.append({
             "tool": name,
             "args": args,
@@ -158,6 +162,76 @@ async def _report_tool_result(name: str, args: dict, result: dict,
                            and t.text.strip() != "[...]"), ""),
             "at": ts,
         })
+        # ── THE SAME ARGUMENTS, REFUSED AGAIN ───────────────────────────────
+        # The pure-waste case, and the one the counter below cannot see on its
+        # own: the model re-sends a call whose result is already determined.
+        # call-20260902-2005 sent save_doctor_identity with byte-identical
+        # arguments FOUR times. Each one is a full second-inference pass.
+        #
+        # Nothing is short-circuited here, deliberately — refusing the call
+        # without answering it saves no time at all, because the cost is
+        # OpenAI's second inference and that is incurred by the call EXISTING,
+        # not by how long our handler takes (our_work is 0.00s median over 603
+        # turns). The only thing that removes the round trip is the model not
+        # making it, so this says so, once, in the terms the refusal did not:
+        # the answer will not change, go and get a different one.
+        _key = (name, json.dumps(args, sort_keys=True, default=str))
+        _repeat = _key in sess._refused_calls
+        sess._refused_calls.add(_key)
+        # ── AND THE COUNTER, WHICH DID NOT MOVE HERE UNTIL 2026-09-04 ───────
+        # The note above says "the counter below this only ever covered
+        # save_branch" — describing the RECORD being generalised. The counter
+        # itself was left inside the save_branch branch, so the bound that
+        # exists to stop a model retrying a value it cannot get accepted
+        # covered one save tool of three. Measured across every artifact:
+        #
+        #   identical tool+args refused more than once in one call : 10
+        #   of those, save_doctor_identity                         : 5
+        #   worst single case, call-20260902-2005                  : x4
+        #
+        # Four identical save_doctor_identity calls, each costing a full
+        # second-inference pass (~1.23s of the caller's time, measured over 603
+        # turns), and nothing counted them because they were not save_branch.
+        # Fix-one-leave-the-other, in the file whose own comment names the
+        # pattern.
+        #
+        # THE RESCUE STAYS BRANCH-SPECIFIC and this does not change it: handing
+        # the agent _candidate_location for a refused IDENTITY claim would be
+        # answering a question nobody asked. What a non-branch refusal gets at
+        # the limit is the directive below — stop re-asserting, ask them.
+        sess._save_rejections += 1
+        # THE NON-BRANCH HALF OF THE BOUND. save_branch has its own rescue
+        # below, which quotes the caller's location back; there is no
+        # equivalent for an identity or a status claim, because the fault there
+        # is not a wording the model failed to find — it is a claim the
+        # transcript does not support. So the directive says the one useful
+        # thing: the same arguments will be refused again, ask them instead.
+        #
+        # Fires on a REPEAT rather than on every refusal, so a first refusal
+        # still just goes back as the tool result and the model gets to try
+        # once on its own. Recorded either way.
+        # ITS OWN BOUND, NOT THE CADENCE BUDGET. Borrowing may_nudge_cadence
+        # here would let a call that trips four cadence guards starve this
+        # directive, and vice versa, for reasons that have nothing to do with
+        # each other. Same cap, separate purse.
+        if (_repeat and name != "save_branch" and not sess.done
+                and sess._refused_repeat_nudges < _MAX_REFUSED_REPEAT_NUDGES):
+            sess._refused_repeat_nudges += 1
+            print(f"[{ts}] 🔁 SAME {name} ARGUMENTS REFUSED AGAIN — telling "
+                  f"it the answer will not change", flush=True)
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": (
+                             f"(system: you just sent {name} with the same "
+                             f"values that were refused a moment ago, and it "
+                             f"was refused again for the same reason. Sending "
+                             f"it a third time will not change the answer. "
+                             f"The record only accepts what they actually "
+                             f"said, so ask them for it plainly, in one short "
+                             f"question, and wait for their reply before "
+                             f"calling that tool again.)")}]},
+            }))
     if name == "save_branch":
         if ok:
             print(f"\n[{ts}] ✅ BRANCH SAVED   : {args}", flush=True)
@@ -185,7 +259,11 @@ async def _report_tool_result(name: str, args: dict, result: dict,
             # so at the limit the model is handed the answer verbatim rather
             # than asked to try again. If it still cannot save, escalating with
             # a true reason beats a call that never ends.
-            sess._save_rejections += 1
+            #
+            # THE INCREMENT MOVED UP, to the block that records every refused
+            # save_* tool. It cannot also happen here or a branch rejection
+            # would count twice and reach the limit at two attempts instead of
+            # three.
             if sess._save_rejections >= _MAX_SAVE_REJECTIONS and not sess.done:
                 _cand = _candidate_location(sess)
                 print(f"[{ts}] 🧱 {sess._save_rejections} save attempts "

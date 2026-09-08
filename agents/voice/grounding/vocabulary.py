@@ -173,7 +173,8 @@ _ALREADY_THANKED = re.compile(r"\b(thanks|thank you|appreciate|grateful)\b",
                               re.I)
 
 
-def closing_directive(last_agent: str = "") -> str:
+def closing_directive(last_agent: str = "", *,
+                      react_to_news: bool = False) -> str:
     """The item asked for when a goodbye has to be requested.
 
     ONE DEFINITION, TWO CALL SITES. This string was written out twice —
@@ -194,12 +195,370 @@ def closing_directive(last_agent: str = "") -> str:
     alone — a fixed farewell string is the identical-hold-acknowledgement tell
     the prompt already warns about, one turn later.
     """
-    _base = "(say a brief warm goodbye now, then stop. ONE short sentence."
+    # WHEN THE SAVE THAT COMPLETED THE CALL IS THE NEWS ITSELF.
+    # call-20260907-1755 closed on "Okay, thanks for that-let me just note what
+    # you said and then I'll wrap up." followed by "Alright, take care." The
+    # caller had just told them the doctor IS taking new patients -- the whole
+    # reason for the call -- and the agent narrated its own bookkeeping at it.
+    # The default below asks only for a goodbye, so a goodbye is all it got.
+    #
+    # POSITIVE ONLY, AND NO WORDING. It names what to react TO, never how; the
+    # corpus records the model reproducing quoted phrases from directives 67
+    # times in 470 turns, so this hands over none. The no-invention clause is
+    # the one constraint that has to be stated: a patient who has just heard
+    # good news is one turn away from thanking them for an appointment nobody
+    # offered.
+    if react_to_news:
+        _base = ("(react briefly to what they just told you and what it means"
+                 " for you, in your own words, then say goodbye. ONE or two"
+                 " short sentences. Claim no appointment, visit or next step"
+                 " they did not offer.")
+    else:
+        _base = "(say a brief warm goodbye now, then stop. ONE short sentence."
     if _ALREADY_THANKED.search(_norm_quotes(last_agent or "")):
         _base += (" You have ALREADY thanked them in the turn you just spoke"
                   " — do not thank them again.")
     return _base + (" Do not repeat or rephrase anything you just said, and"
                     " do not raise anything new.)")
+
+
+# ── The enquiry-bot cadence, made observable ─────────────────────────────────
+#
+# WHY THIS IS CODE AND NOT A PROMPT RULE. Measured over the 57
+# patient_discovery calls: 290 of 413 non-greeting agent turns (70%) opened
+# with an acknowledgement and 177 of those ran back to back —
+#
+#   "Okay, thanks for that—let me ask one quick thing about where he sees
+#    patients."      "Okay, I just need to check something simple first."
+#   "Got it, thanks for confirming that. Let me check one more thing."
+#   "Okay, thanks for confirming that. Let me ask about availability next."
+#
+# — five of the eleven agent turns on call-20260904-1306, and the receptionist
+# learned nothing from any of them. THE ARTIFACT SCORED THAT CALL CLEAN:
+# piled_turns 0, stapled_questions 0, repeated_sentences 0,
+# shared_opening_clauses 0, tool_call_padding null. Every existing counter
+# measures the STRUCTURE of a turn — sentence counts, repeats, staples — and
+# this defect is in its CONTENT, so nothing saw it. shared_opening_clauses
+# reads 0 here because "Okay, thanks for confirming that" and "Got it, thanks
+# for confirming that" are two different clauses.
+#
+# The prompt has asked for the right thing throughout ("NOT owed every turn",
+# "twice running is a tic", "Vary how turns open") and the standing evidence on
+# this project is ~14 code guards holding on live calls against ~6 prompt rules
+# that did not. So this is the guard.
+
+# Content-free openers, in the order the corpus ranks them: thanks 84, got it
+# 61, okay 58, oh 47, sure 23. YES AND NO ARE DELIBERATELY ABSENT — "Yes, this
+# is an automated call" is an ANSWER, and the one thing this must never
+# discourage is answering a question straight. "yeah" is here because in this
+# corpus it only ever appeared as an acknowledgement, and it is bounded by the
+# comma-or-stop the pattern requires after it.
+_ACK_OPENER = re.compile(
+    r"^\s*(?:so\s+)?"
+    r"(oh|okay|ok|alright|all right|right|got it|gotcha|"
+    r"thanks|thank you|sure|great|perfect|understood|i see|"
+    r"well|mm-?hm+|mm|yeah|yep)"
+    r"\b[\s,.!?—–-]*", re.I)
+
+
+def _ack_opener(text: str) -> str:
+    """The acknowledgement this turn opens with, or "" — never a judgement.
+
+    One of these on its own is ordinary human speech and this says nothing
+    about it. The tic is two in a row; that is the call site's question, not
+    this function's.
+    """
+    m = _ACK_OPENER.match(_norm_quotes(text or ""))
+    return m.group(1).lower() if m else ""
+
+
+# Thanking them for taking part in your own process. Not for HELP — for
+# confirming, checking, waiting, holding on: the steps of the workflow.
+_TAKING_PART = re.compile(
+    r"\bthanks?(?:\s+you)?\s+(?:so\s+much\s+|very\s+much\s+)?for\s+"
+    r"(?:that|this|the\s+\w+\s+)?"
+    r"(?:confirm|check|wait|hang|hold|bear|explain|look|clarif|shar)", re.I)
+
+
+def _housekeeping_turn(text: str) -> bool:
+    """A turn spent thanking them for participating, with nothing in it.
+
+    THE QUESTION MARK IS THE WHOLE DISCRIMINATOR, and it is the prompt's own
+    rule rather than a new one: the ban is on the STANDING form — a thanks that
+    IS the turn, or that fronts an announcement — while the same words with the
+    question folded into the same breath are exactly what the prompt asks for.
+    So "Thanks for checking — is there a waiting list?" is fine and
+    "Thanks for confirming that." is a turn the receptionist waited through for
+    nothing.
+
+    A FAREWELL IS EXEMPT. Thanking them for explaining the wait list on the way
+    out is not housekeeping, it is the close, and flagging it would fire this on
+    the happy path — which is how a metric stops being read.
+
+    Measured on the corpus: 45 turns, every one of them content-free or a
+    thanks fronting an announcement, and none of the allowed joins.
+    """
+    t = _norm_quotes(text or "").strip()
+    if not _TAKING_PART.search(t):
+        return False
+    if "?" in t:
+        return False
+    return not _spoken_farewell(t)
+
+
+# ── Narrating the reply instead of giving it ─────────────────────────────────
+#
+# A DIFFERENT FAMILY FROM _ANNOUNCED_ASK, and it has to stay different. That
+# one is about a promised QUESTION — the caller is left with nothing to answer,
+# and `tool_call_padding` counts it. This is about a promised ANSWER: they asked
+# for a date of birth and got "Mm-hmm, one moment while I answer that." The
+# caller is not waiting for a question, they are waiting for the fact. Folding
+# the two together would make that artifact field stop meaning what it says.
+#
+# FOUND BY RENDERING, NOT BY READING. The 2026-09-04 prompt rebuild deleted
+# every quoted phrase the model had been lifting, and the A/B renders showed
+# the verbatim reproductions gone — no more "Sure, no rush.", no more "Of
+# course, take your time." What survived was this, generated fresh every time:
+#
+#   before: "Sure, one moment while I respond to that."   (and the date never
+#           arrived in either take)
+#   after:  "Okay, let me answer that."
+#           "Let me think for a moment."
+#           "Let me think about the next step here."
+#
+# _announced_an_ask catches NONE of those — it is keyed to ask/check verbs —
+# so nothing in the process disagreed with them. That is the whole argument for
+# a predicate rather than another prompt line: the prompt has banned narration
+# in capitals with an operational test attached since it was written.
+_NARRATED_REPLY = re.compile(
+    r"\b(?:"
+    # First person, about to produce the reply rather than producing it.
+    # `share` and `give you` are in the list, and were left out of the first
+    # cut on a false-positive worry that the closed-loop run then falsified in
+    # the other direction: "Sure, let me share that with you." and "Sure, let
+    # me give you that now." were 2 of 3 takes on the date-of-birth turn, this
+    # did not fire, and the WRONG directive went out in its place. The
+    # first-person about-to prefix is what keeps them safe — "thanks for
+    # sharing that" has no such prefix and is _TAKING_PART's business.
+    r"(?:let me|lemme|i'?ll|i will|i'?m going to|i'?m gonna|gonna)\s+"
+    r"(?:just\s+|quickly\s+|first\s+|then\s+){0,2}"
+    # `listen` ADDED 2026-09-04, and it is the verb both known leaks used:
+    # "Let me listen carefully to what they said and then respond clearly."
+    # (call-20260904-1651, the prompt spoken aloud) and "I'll listen for the
+    # name so we can pin it down." (call-20260904-1734). It belongs to this
+    # family and not to _AGENT_STALL, which exempts any turn containing a "?"
+    # — the second of those asked its question in the same breath, so the
+    # stall predicate is structurally unable to see it.
+    #
+    # Announcing that you are listening is never an act that helps them; it is
+    # the narration of one. Checked over 1,272 corpus turns: +2 hits, both the
+    # turns above, no other turn in any template reaches it.
+    r"(?:think|answer|respond|reply|explain|address|share|listen|"
+    r"give (?:you|it|that)|get (?:you )?(?:that|it) (?:for|to) you)\b"
+    # "one moment while I answer that", "a second while I think"
+    r"|\b(?:one|a|just a)\s+(?:moment|minute|second|sec)\s+"
+    r"(?:while|and|before)\s+i\b"
+    # "give me a second", "let me have a moment"
+    r"|(?:give|gimme)\s+me\s+(?:a|one|just a)\s+"
+    r"(?:moment|minute|second|sec)\b"
+    # "I'm trying to remember", "I'm just thinking"
+    r"|i'?m\s+(?:just\s+)?(?:thinking|trying to remember|working (?:it|that) "
+    r"out)\b"
+    r")", re.I)
+
+
+def _narrated_the_reply(text: str) -> bool:
+    """Said they were about to answer, instead of answering.
+
+    THE CLOSE IS EXEMPT, and it is the one case that matters. This script
+    teaches its goodbye as going away to think about it — "let me think about
+    it and I might call back" is the happy path and appeared 8 times in the
+    corpus. A detector that fires on the close fires on every good call, which
+    is how a number stops being read. _spoken_farewell is the same exemption
+    _housekeeping_turn takes, for the same reason.
+    """
+    t = _norm_quotes(text or "").strip()
+    if not _NARRATED_REPLY.search(t):
+        return False
+    return not _spoken_farewell(t)
+
+
+# ── The instructions arriving in the audio ───────────────────────────────────
+#
+# call-20260904-1651, the first live call after the patient-behaviour rebuild.
+# The caller said "Ah." and the agent said, out loud:
+#
+#     "Let me listen carefully to what they said and then respond clearly."
+#     "Take your time."
+#
+# The second sentence is correct and is what the prompt asks for. The first is
+# the model reading its own instructions back to the receptionist — it is a
+# first-person paraphrase of a rule in templates.py:
+#
+#     "- RESPOND TO WHAT THEY JUST SAID. Their turn decides yours ..."
+#
+# NOT A DIRECTIVE LEAK, which was the obvious suspect and was checked: the
+# re-ask guard whose wording is nearest ("respond to what they actually said")
+# prints a console marker when it fires, and that marker is absent from the
+# call. It came from the cached prompt.
+#
+# ── WHY THIS IS DETECTABLE WITHOUT A PHRASE LIST ────────────────────────────
+# The prompt and every injected directive are written ABOUT the call, so they
+# refer to the caller in the THIRD PERSON — "they", "them", "their question".
+# A patient speaking TO that person says "you". So a third-person reference to
+# the CALLER'S OWN SPEECH ACT is the instruction register arriving in the
+# audio, whatever words carry it, and no list of narration verbs is needed.
+#
+# THE VERB SET IS CLOSED AND THE PRONOUN IS THE TEST. "she"/"they" meaning the
+# DOCTOR or the PRACTICE is how this agent legitimately talks for the whole
+# call — "is she taking new patients", "do they have more than one site" — so
+# a bare pronoun ban would fire on nearly every turn. What cannot happen in
+# natural speech to someone is narrating THAT person's words in the third
+# person while talking to them.
+#
+# Measured over 481 agent turns of patient corpus: ONE hit, the one above, and
+# no false positive on any of the legitimate third-person forms.
+_LEAKED_INSTRUCTIONS = re.compile(
+    r"\b(?:"
+    r"what\s+(?:they|he|she)\s+(?:just\s+)?"
+    r"(?:said|told|asked|mentioned|answered|meant)"
+    r"|(?:they|he|she)\s+(?:just\s+)?"
+    r"(?:said|told|asked|answered|mentioned)\s+(?:me|us)\b"
+    r"|(?:respond|reply|answer|speak|talk)\s+(?:back\s+)?to\s+(?:them|him|her)\b"
+    r"|(?:answer|address)\s+(?:them|their)\b"
+    r"|(?:their|his|her)\s+(?:question|answer|reply|response)\b"
+    # ── THE FIRST-PERSON HALF, ADDED 2026-09-08 ─────────────────────────────
+    # Everything above is the instruction register arriving as a THIRD-PERSON
+    # reference to the caller. call-20260907-1814 arrived as first person about
+    # the agent's own delivery, seven seconds after its own greeting, with no
+    # caller turn in between at all:
+    #
+    #   "Let me speak quietly and sort out whether you've reached the right
+    #    place. Do you know if Dr. Browne..."
+    #
+    # "speak quietly" is _TONE_PATIENT's opening imperative ("SPEAK NOTICEABLY
+    # SLOWLY AND QUIETLY") read back onto the phone. Nothing saw it: this
+    # pattern wants they/him/her and the turn has none, and _NARRATED_REPLY's
+    # verb class is think/answer/listen/explain — promised ANSWERS — with no
+    # verb of speech-manner in it. Two guards, one gap between them.
+    #
+    # THE ADVERB IS THE WHOLE TEST, and it is why this is structural rather
+    # than a phrase list. "Let me speak to my husband about it" is an ordinary
+    # patient sentence; "let me speak QUIETLY" is a statement about how one's
+    # own voice will sound, which is a thing the instructions say and a thing
+    # no caller has ever needed to announce. Requiring a manner word after the
+    # verb keeps every real-world "speak/talk/say" out.
+    #
+    # Measured over 1,349 agent turns of corpus, every template: TWO hits, both
+    # genuine and both invisible to the other two guards — the turn above, and
+    # call-20260806-2029's "Sorry, I'm speaking fast. Let me say that more
+    # clearly.", which is the Pacing & Delivery block narrated the same way.
+    # No false positive on any turn in the corpus.
+    r"|(?:let me|lemme|i'?ll|i will|i'?m going to|i'?m gonna)\s+"
+    r"(?:just\s+|now\s+|first\s+|try to\s+){0,2}"
+    r"(?:speak|talk|sound|say (?:this|that|it))\s+"
+    r"(?:a bit\s+|a little\s+|more\s+){0,2}"
+    r"(?:quiet|quietly|soft|softly|slow|slowly|calm|calmly|clear|clearly|"
+    r"brief|briefly|gently|warmly|naturally|plainly|low|lower)\b"
+    r")", re.I)
+
+
+def _leaked_the_instructions(text: str) -> bool:
+    """Did this turn narrate the exchange in the register of the prompt?"""
+    return bool(_LEAKED_INSTRUCTIONS.search(_norm_quotes(text or "")))
+
+
+def _stapled_own_detail(text: str) -> bool:
+    """Handed over a name or date of birth AND asked something in one breath.
+
+    "A PLAIN FACT IS A PLAIN ANSWER" made checkable. templates.py carries that
+    rule in capitals and call-20260904-1651 did this anyway:
+
+        "April 21, 1984.
+         Any chance you could tell me if Dr. Browne is taking new patients
+         right now?"
+
+    — and the receptionist answered the staple with "Okay.", so the question
+    had to be asked again on the next turn. Three turns in 481 across the
+    corpus, every one of them genuine.
+
+    _gave_own_detail rather than a date regex, so this stays keyed to the same
+    predicate the EHR guards use and cannot drift away from what counts as a
+    detail.
+    """
+    t = _norm_quotes(text or "")
+    return bool(_gave_own_detail(t) and "?" in t)
+
+
+def cadence_directive(kind: str, want: str = "") -> str:
+    """What to tell the model when one of the three cadence guards fires.
+
+    ONE DEFINITION, TWO CALL SITES, for the reason closing_directive gives:
+    turns.py injects these on a live call and scripts/check_cadence_loop.py
+    replays them against the real model, and a hand-copy in the script would
+    be exercising a string that no longer goes out.
+
+    `want` IS THE WHOLE DIFFERENCE BETWEEN THIS WORKING AND NOT. Measured by
+    the loop script, which seeds an exchange, takes the model's real turn,
+    fires the real guard and takes the next turn. The first version of these
+    directives named only the failure — "start on the thing you are actually
+    saying" — and the corrections that came back were "Okay.", "Let me just
+    get the location sorted out with you." and "Thanks for confirming that
+    this is Dr. Okafor's office.": nine tries, none of them good. Passing the
+    outstanding field produced "Which office does Dr. Okafor see people at?"
+    and, on the date-of-birth turn twice over, "January 18, 1977."
+
+    Take `want` from CallObjective.next_spoken(), not missing_spoken(): the
+    labels read as clauses, so the article missing_spoken adds would hand the
+    model "the whether they're taking new patients" to say.
+    """
+    # ONE CLAUSE, USED TWICE, so the two directives cannot drift — and it says
+    # WHAT to say and nothing about how, because each caller adds its own
+    # "start on it" clause afterwards. An earlier cut put "starting on the
+    # question itself" in here as well, and the housekeeping directive then
+    # went out saying it twice in consecutive sentences.
+    _say = (f"Ask them about {want}, in one short sentence." if want else
+            "Say the next thing you actually want to say.")
+    if kind == "ack_run":
+        return (f"(system: you have opened two turns in a row with an "
+                f"acknowledgement, which is the cadence of somebody working "
+                f"through a form. {_say} Start on the thing itself — no "
+                f"opener in front of it, no okay, no thanks, no got it. For "
+                f"the rest of this call an acknowledgement is only for "
+                f"something that genuinely landed as news.)")
+    if kind == "housekeeping":
+        return (f"(system: you just spent a whole turn thanking them for "
+                f"taking part in your own call. They waited through it and "
+                f"learned nothing. {_say} Start on the question itself, with "
+                f"no thanks in front of it. Thank them only for help they "
+                f"went out of their way for, once, and never as a turn of its "
+                f"own.)")
+    if kind == "leaked_instructions":
+        # NO `want` — steering to the next field would answer a question
+        # nobody asked, and the fault is not what they said but that a note to
+        # itself went out over the phone.
+        return ("(system: that last turn was you talking about the "
+                "conversation rather than in it — you described what you were "
+                "going to do before doing it, and the person on the phone "
+                "heard all of it. Everything you say is spoken to them. Say "
+                "the thing itself, and say it to them as 'you', never about "
+                "them as 'they'.)")
+    if kind == "stapled_detail":
+        return ("(system: you gave one of your own details and asked a "
+                "question in the same breath. They answered the question and "
+                "the detail went past them, so you now have to ask again. A "
+                "plain fact is a plain answer: say the fact, and stop. "
+                "Whatever you wanted to ask keeps until they have replied.)")
+    if kind == "reply_narration":
+        # NO `want` HERE, deliberately. They have just asked for something
+        # specific and are waiting on it; steering to the next objective field
+        # would answer a question nobody asked.
+        return ("(system: you just told them you were about to answer instead "
+                "of answering. They are waiting on the thing they asked for. "
+                "Give it now, plainly, and nothing else. A pause before you "
+                "speak is human; a sentence about the pause is you describing "
+                "yourself, which a real caller never does.)")
+    raise ValueError(f"unknown cadence directive {kind!r}")
 
 
 # ── The turn that promises a question and does not ask one ───────────────────
@@ -498,13 +857,52 @@ def _agent_stalled(text: str) -> bool:
 # An imperfect match is safe in one direction only, which is why a heuristic is
 # acceptable here: a false positive delays the give-up by a turn or two, while a
 # false negative just restores the behaviour we already have.
+#
+# WIDENED 2026-09-04, and the measurement is the argument. Across the 57
+# patient_discovery calls, 31 caller turns are a hold to any human reading
+# them and this matched 22 — so nine holds went unrecognised, the 45-second
+# stand-down never armed, and _silence_watchdog asked whether they were still
+# there while they were doing exactly what they had said they would do. That
+# reached the transcript six times as a verbatim "Still with me?", which is
+# the single worst-sounding line in the corpus.
+#
+# The nine split three ways and every one of them is an ordinary front-desk
+# sentence:
+#   "Give me a few seconds while I pull up her schedule"   x7
+#       — `give me a (minute|moment|sec|second)` cannot see "a few seconds",
+#         and `while I pull up` was unreachable because this gate rejects
+#         first, before _CALLER_WILL_ACT ever runs.
+#   "One minute, let me confirm with the doctor"
+#       — "one moment" and "one sec" were listed; bare "one minute" was not.
+#   "let me give one minute to check whether the doctor is available"
+#       — "let me give", with no "me" after the verb.
+#
+# CONFIRM AND VERIFY ARE THE RISKY ADDITION, so they carry their own exclusion
+# below. "I need to confirm one thing from you" is the caller about to ASK
+# something, not about to go and look — and reading it as a hold would buy 45
+# seconds of dead air on a turn that wants an answer, which is the regression
+# _CALLER_WILL_ACT was written to prevent in the first place.
 _HOLD_REQUEST = re.compile(
-    r"\b(?:(?:let me|i'?ll|i will|i need to|i have to|i'?m going to|gonna)\s+"
-    r"(?:just\s+)?(?:check|look|see|find|ask|grab|pull)"
-    r"|(?:give|gimme)\s+me\s+a\s+(?:minute|moment|sec|second)"
+    r"\b(?:(?:let me|lemme|i'?ll|i will|i need to|i have to|i'?m going to|"
+    r"gonna)\s+"
+    r"(?:just\s+)?(?:check|look|see|find|ask|grab|pull|confirm|verify|give)"
+    r"|while\s+(?:i|we)\s+"
+    r"(?:just\s+)?(?:check|look|see|find|ask|grab|pull|confirm|verify)"
+    r"|(?:give|gimme)\s+(?:me\s+)?(?:just\s+)?(?:a|one)?\s*"
+    r"(?:few\s+|couple\s+(?:of\s+)?)?(?:minutes?|moments?|secs?|seconds?)"
     r"|(?:can|could|would)\s+you\s+(?:just\s+|please\s+)*(?:wait|hold|hang on)"
-    r"|(?:hold on|hang on|one moment|just a (?:minute|moment|sec|second)"
-    r"|bear with me|one sec))\b", re.I)
+    r"|(?:hold on|hang on|one (?:moment|minute|sec|second)"
+    r"|just a (?:minute|moment|sec|second)"
+    r"|bear with me))\b", re.I)
+
+
+# They want something FROM the agent, not time away from them. "I need to
+# confirm one thing from you" and "let me check with you" are asks wearing a
+# hold's grammar; a 45-second stand-down on either is dead air on a turn that
+# is waiting for an answer.
+_WANTS_IT_FROM_US = re.compile(
+    r"\b(?:confirm|verify|check|ask|clarify)\b[^.?!]{0,30}?"
+    r"\b(?:from|with|of)\s+you\b", re.I)
 
 
 # The caller announcing that THEY will go and do something. This is what
@@ -544,6 +942,11 @@ def is_hold_request(text: str) -> bool:
     """
     t = _norm_quotes(text or "")
     if not _HOLD_REQUEST.search(t):
+        return False
+    # Asked for BEFORE the cooperative branch below, because "I need to confirm
+    # one thing from you" satisfies _CALLER_WILL_ACT ("I ... confirm") and
+    # would otherwise be settled as a hold by it.
+    if _WANTS_IT_FROM_US.search(t):
         return False
     # The caller saying THEY will go and do something settles it, whatever
     # else is in the turn. "can you please give me a minute? I just need to
@@ -636,6 +1039,15 @@ _SELF_ID_WEAK = re.compile(r"this is\s+(.{3,60}?)(?:[,.!?]|$)", re.I)
 _ORG_WORD = re.compile(
     r"\b(hospital|clinic|medical|health|centre|center|group|practice|"
     r"associates|physicians|institute|system)\b", re.I)
+
+
+# Anything that turns naming a place into denying it. Used by the bare-name
+# clear in hospital_mismatch, where the whole risk is that "we're NOT Northside"
+# contains the name exactly as "this is Northside" does.
+_NAME_NEGATED = re.compile(
+    r"\b(?:not|no|never|nope|wrong|different|another|other|instead|"
+    r"isn'?t|aren'?t|wasn'?t|weren'?t|don'?t|doesn'?t|didn'?t|won'?t|"
+    r"used to|no longer|any ?more)\b|n'?t\b", re.I)
 
 
 # Every closed-set save tool, with the argument carrying its value, the guard
@@ -750,6 +1162,15 @@ def _is_bare_hint_word(value: str, hint: str) -> bool:
 _MAX_SAVE_REJECTIONS = 3
 
 
+# How many times we tell the model that re-sending byte-identical arguments
+# will not change the answer. Two, matching the cadence directives: a
+# correction ignored twice is being ignored, and a third costs transcript
+# without buying anything. Deliberately NOT imported from turns.py, which
+# imports this package — the number is small enough that one definition per
+# side is cheaper than the cycle.
+_MAX_REFUSED_REPEAT_NUDGES = 2
+
+
 __all__ = [
     "_ALREADY_THANKED",
     "_CALLER_WILL_ACT",
@@ -759,25 +1180,38 @@ __all__ = [
     "_FACTUAL_ESCALATIONS",
     "_HOLD_REQUEST",
     "_IDENTITY_ASK",
+    "_MAX_REFUSED_REPEAT_NUDGES",
     "_MAX_SAVE_REJECTIONS",
+    "_NAME_NEGATED",
     "_ORG_WORD",
     "_RETIRED_VOCAB_TEXT",
+    "_ACK_OPENER",
+    "_LEAKED_INSTRUCTIONS",
+    "_NARRATED_REPLY",
     "_SELF_ID",
     "_SELF_ID_WEAK",
     "_SPOKEN_FAREWELL",
+    "_TAKING_PART",
+    "_WANTS_IT_FROM_US",
     "_STREET_ADDRESS",
     "_STREET_SUFFIX",
     "_claims_saved",
     "_hint_vocabulary",
     "_is_bare_hint_word",
     "_NOT_A_PATIENT",
+    "_ack_opener",
     "_agent_stalled",
     "_detail_left_bare",
+    "_housekeeping_turn",
+    "_leaked_the_instructions",
+    "_stapled_own_detail",
+    "_narrated_the_reply",
     "_gave_name_and_dob",
     "_gave_own_detail",
     "_said_not_a_patient",
     "_announced_an_ask",
     "_spoken_farewell",
+    "cadence_directive",
     "closing_directive",
     "is_hold_request",
 ]

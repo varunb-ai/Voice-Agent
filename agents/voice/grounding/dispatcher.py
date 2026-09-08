@@ -27,12 +27,14 @@ if TYPE_CHECKING:                    # pragma: no cover - typing only
 from agents.voice.evidence import (
     _transcript_pending,
 )
+from agents.voice.latency import _restage
 from agents.voice.tools import run_tool
 from agents.voice.grounding.vocabulary import (
     _CHOICE_SAVE_TOOLS,
 )
 from agents.voice.grounding.handlers import (
     _guard_choice_save,
+    _guard_note_info,
     _guard_escalate,
     _guard_save_branch,
 )
@@ -151,6 +153,14 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
         result = _guard_save_branch(name, args, sess)
     elif name in _CHOICE_SAVE_TOOLS:
         result = _guard_choice_save(name, args, sess)
+    elif name == "note_info":
+        # THE SIXTH COLLECTION PATH, and until call-20260907-1602 the only
+        # unguarded one. Three of patient_discovery's six fields are backed by
+        # note keys, so `else: run_tool(...)` let half the objective be written
+        # with no evidence at all — see _note_lacks_evidence. Informational
+        # notes still go straight through; only the keys that ARE fields are
+        # judged.
+        result = _guard_note_info(name, args, sess)
     elif name == "escalate":
         result, _stop = await _guard_escalate(
             name, args, sess, oai_ws, call_id, _pending_tools)
@@ -224,9 +234,14 @@ async def _handle_tool_call(msg: dict, sess: "RealtimeSession", oai_ws,
             sess._stage["tools"] = []
         sess._stage["tools"].append(
             {"tool": name, "ok": bool(result.get("ok"))})
+        # If the turn's row was already written at first audio — the model
+        # spoke before it called this tool — rewrite it now that the tool
+        # marks exist. Without this the row keeps saying `tool: null` on a
+        # turn that plainly had one. See latency._restage.
+        _restage(sess._stage, sess.turn_stages)
 
     _closing_sent, _pending_response_create = await _close_or_continue(
-        sess, oai_ws, _close_deferred, _response_had_audio)
+        sess, oai_ws, _close_deferred, _response_had_audio, name, result)
     return _ToolOutcome(_agent_text_buf, _closing_sent,
                         _pending_response_create, False)
 

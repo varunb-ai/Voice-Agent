@@ -165,6 +165,8 @@ from agents.voice.turns import (
     _BACKCHANNEL_PAUSE_MIN_S as _BACKCHANNEL_PAUSE_MIN_S,
     _BACKCHANNEL_PAUSE_MAX_S as _BACKCHANNEL_PAUSE_MAX_S,
     _BACKCHANNEL_TICK_S as _BACKCHANNEL_TICK_S,
+    _CADENCE_NUDGE_PER_KIND as _CADENCE_NUDGE_PER_KIND,
+    _CADENCE_NUDGE_TOTAL as _CADENCE_NUDGE_TOTAL,
     _WATCHDOG_TICK_S as _WATCHDOG_TICK_S,
     _watchdog_tick_s as _watchdog_tick_s,
     _MIN_REASK_GAP_S as _MIN_REASK_GAP_S,
@@ -192,6 +194,7 @@ from agents.voice.turns import (
     _HOLD_GRACE_S as _HOLD_GRACE_S,
     _MAX_SILENCE_PROMPTS as _MAX_SILENCE_PROMPTS,
     _PADDING_PROMPT_AFTER as _PADDING_PROMPT_AFTER,
+    _PADDING_SETTLE_S as _PADDING_SETTLE_S,
     _MAX_PADDING_NUDGES as _MAX_PADDING_NUDGES,
     _silence_watchdog,
     _suppress_reply_to as _suppress_reply_to,
@@ -1070,7 +1073,11 @@ async def _twilio_to_oai(
                             and not sess.agent_speaking):
                         _clean_rms = _frame_rms(raw_bytes)
                         sess.note_caller_frame_rms(_clean_rms)
-                        sess.note_caller_voice_gap(_clean_rms)
+                        # The frame's REAL length, not the nominal 20ms:
+                        # 8kHz mu-law is one byte per sample, the same
+                        # arithmetic _voiced_run_ms uses a few lines up.
+                        sess.note_caller_voice_gap(
+                            _clean_rms, len(raw_bytes) / 8000.0)
                     # Our own backchannel, coming back off a speakerphone.
                     # Energy, not a hard mute: the caller is BY DEFINITION
                     # mid-utterance here (a clip only fires 2.8s into their
@@ -1248,6 +1255,10 @@ async def _oai_to_twilio(
                 sess._agent_quiet_since = None    # they are talking; stand down
                 _caller_speaking = True
                 sess._caller_speaking_since = time.time()
+                # Reset beside the done flag: both are per-utterance state and
+                # a voiced total carried over from the last turn would let a
+                # one-word answer inherit the explanation before it.
+                sess._utterance_voiced_s = 0.0
                 sess._backchannel_done_this_utterance = False
                 _speech_start_pcm_pos = len(sess._caller_oai_pcm)  # fallback only
                 # OpenAI's own offset into the buffer we feed it. The chunk
@@ -1457,9 +1468,11 @@ async def _oai_to_twilio(
                     # so any energy measure of it reads as silence.
                     #
                     # Working transcription is the evidence that matters.
-                    heard_clearly = any(
-                        t.role == "caller" and t.text.strip() not in ("", "[...]")
-                        for t in sess.turns)
+                    # (the caller-side test that used to live here has moved
+                    # to the firing site in turns.py, where the transcript is
+                    # known — see _caller_spoke_before. Computing it here left
+                    # a variable nothing read, which is the shape
+                    # pyrightconfig.json's whole comment is about.)
                     #
                     # Fourth false fire, and the "wait until something has
                     # transcribed" guard could never have helped: the alarm goes
@@ -1509,7 +1522,27 @@ async def _oai_to_twilio(
                         # LOUDEST part of that audio, not the last fragment of
                         # it.
                         sess.note_utterance_rms(rms)
-                        if not sess._low_audio_warned and not heard_clearly:
+                        # ── AND NEVER FROM OUR OWN PLAYOUT ──────────
+                        # `not heard_clearly` was the arming test and it is
+                        # exactly backwards. It arms ONLY while the caller has
+                        # never transcribed — which is the window in which a
+                        # VAD trip on our own greeting is the likeliest thing
+                        # in the call, and the only window in which the alarm
+                        # has ever fired. Six calls, six false fires.
+                        #
+                        # It also made the legitimate case unreachable: a
+                        # caller who HAS been heard and then goes too faint to
+                        # transcribe could never arm this, because by then
+                        # heard_clearly is True. The guard could only ever be
+                        # wrong.
+                        #
+                        # agent_speaking is the fact that actually disqualifies
+                        # a measurement: audio captured while we are talking is
+                        # our own leg or the room, not them. The caller-side
+                        # test moves to the firing site, where the transcript
+                        # is known — see _caller_spoke_before in turns.py.
+                        if (not sess._low_audio_warned
+                                and not sess.agent_speaking):
                             _acc = sess._pending_utterance_rms or 0.0
                             sess._pending_low_rms = (
                                 _acc if 0.0 < _acc < _LOW_AUDIO_RMS else None)
@@ -1717,6 +1750,21 @@ async def _oai_to_twilio(
                     print("[Realtime] Goodbye retry raced OpenAI's own "
                           "response and lost — the line is not silent, "
                           "nothing to do", flush=True)
+                elif code == "conversation_already_has_active_response":
+                    # THE SAME RACE, MID-CALL, AND IT REACHED NO RECORD. The
+                    # branch above handles it only while sess.done; every other
+                    # occurrence fell through to the generic API ERROR print
+                    # below and left nothing in the artifact, so "inspect every
+                    # active-response case" could not be answered from the
+                    # calls we have. It is not necessarily benign here: unlike
+                    # the goodbye retry, a mid-call response.create that loses
+                    # this race is a turn we meant to produce and did not.
+                    sess.active_response_races.append(
+                        {"at": datetime.now().strftime("%H:%M:%S"),
+                         "responses": sess._responses})
+                    print("[Realtime] response.create raced OpenAI's own VAD "
+                          "and lost — our turn was refused, theirs is in "
+                          "flight", flush=True)
                 elif "input_audio_transcription" in msg_text or "unknown_parameter" in code:
                     print(f"[Realtime] Transcription not supported on this model — caller turns will show as '[...]'", flush=True)
                 else:
@@ -1789,6 +1837,8 @@ __all__ = [    "ACCEPTING_ASK",
     "_BACKCHANNEL_PAUSE_MAX_S",
     "_BACKCHANNEL_PAUSE_MIN_S",
     "_BACKCHANNEL_TICK_S",
+    "_CADENCE_NUDGE_PER_KIND",
+    "_CADENCE_NUDGE_TOTAL",
     "_WATCHDOG_TICK_S",
     "_watchdog_tick_s",
     "_CALLER_WILL_ACT",
@@ -1818,6 +1868,7 @@ __all__ = [    "ACCEPTING_ASK",
     "_MAX_SILENCE_PROMPTS",
     "_MAX_PADDING_NUDGES",
     "_PADDING_PROMPT_AFTER",
+    "_PADDING_SETTLE_S",
     "_MAX_VETTING_REASKS",
     "_MEANING_CLASSES",
     "_MIN_REASK_GAP_S",

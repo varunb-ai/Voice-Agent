@@ -378,6 +378,37 @@ _BARE_AFFIRM_LEAD = re.compile(
     rf"(?:\s*[,.;:!?-]+\s*|\s*$)", re.I)
 
 
+# AND THE SAME TOKEN AT THE OTHER END, which the lead pattern alone cannot
+# reach. `states_in_its_own_right` asks whether the turn asserts the state
+# WITHOUT leaning on a bare affirmative, and a turn may lean on one at either
+# end — call-20260907-1546 leaned on both:
+#
+#   "Yeah, he sees patients at our... yeah."
+#
+# That is a BRANCH answer, cut short by a barge-in. Strip the leading "Yeah,"
+# and "he sees patients at our... yeah." still classifies YES on the trailing
+# token alone, so the never-asked path recorded accepting_new_patients=yes for
+# a question the agent never asked, the objective went COMPLETE, and the call
+# closed on a field nobody had answered.
+#
+# NOT A ONE-CALL FIX. Over 1,161 caller turns in the corpus this moves 11
+# verdicts and every one is True -> False, i.e. a false positive removed. Three
+# are the identical defect — a branch answer ending on "Yeah"/"Yes" read as a
+# new-patient YES — and one is a caller asking a QUESTION ("...date of birth?
+# Yeah.") scored as an answer. No legitimate answer changes verdict: the -0915
+# waitlist, the -1013 NO, "We are accepting new patients, yes." and "No, we're
+# not taking new patients, no." all still pass, because their assertion
+# survives the strip.
+#
+# A DELIMITER IS REQUIRED BEFORE THE TOKEN, mirroring the lead pattern's
+# requirement of one after it, and for the same reason: only a discourse
+# marker may be taken. Without it "no referral needed" would lose a "no" that
+# is a determiner carrying the meaning.
+_BARE_AFFIRM_TAIL = re.compile(
+    r"(?:^|[,.;:!?-])\s*(?:yes|yeah|yep|yup|no|nope|nah)"
+    r"\s*[.!?,;:-]*\s*$", re.I)
+
+
 def states_in_its_own_right(text: str, state_value: str,
                             classifier=None) -> bool:
     """Does this turn assert the state WITHOUT leaning on a leading "yes"?
@@ -394,6 +425,9 @@ def states_in_its_own_right(text: str, state_value: str,
     """
     t = norm_quotes(text or "").strip()
     stripped = _BARE_AFFIRM_LEAD.sub("", t).strip()
+    # BOTH ENDS. See _BARE_AFFIRM_TAIL: a turn can lean on a bare
+    # affirmative at either one, and call-20260907-1546 leaned on two.
+    stripped = _BARE_AFFIRM_TAIL.sub("", stripped).strip()
     if not stripped:
         return False
     # THE FIELD'S OWN VOCABULARY. Defaulting to classify_choice and leaving it
@@ -812,7 +846,10 @@ def is_polar_question(clause: str) -> bool:
 # ── Fields and objectives ────────────────────────────────────────────────────
 
 class _MemoryLike(Protocol):
-    def get(self, field: str, default: Any = None) -> Any: ...
+    # POSITIONAL-ONLY, so a plain dict satisfies this: dict.get names its
+    # parameters positional-only, and every call site here passes them
+    # that way. Naming them excluded the most obvious memory there is.
+    def get(self, field: str, default: Any = None, /) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -1139,6 +1176,27 @@ class CallObjective:
         """The missing fields as something the agent can say out loud."""
         return ", ".join(f"the {f.label}" for f in self.fields
                          if f.is_required(self, memory) and not f.present(memory))
+
+    def next_spoken(self, memory: _MemoryLike) -> str:
+        """The ONE thing to ask about next, bare, with no article in front.
+
+        SEPARATE FROM missing_spoken BECAUSE THE CALLERS WANT DIFFERENT THINGS.
+        That one lists everything still outstanding, which is right for the
+        give-up directive ("say plainly you could not get X, Y and Z today").
+        A cadence directive wants the opposite: one item, phrased so it can be
+        dropped straight into a sentence.
+
+        The "the " prefix is what makes them different in practice. These
+        labels already read as clauses — "which office they're at", "whether
+        they're taking new patients" — so "the whether they're taking new
+        patients" is what a directive would otherwise be handing the model to
+        say, and a directive that reads as broken English is one the model has
+        to repair before it can act on it.
+        """
+        for f in self.fields:
+            if f.is_required(self, memory) and not f.present(memory):
+                return f.label
+        return ""
 
     def outcome(self, memory: _MemoryLike) -> Outcome:
         if not self.collected(memory):

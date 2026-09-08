@@ -15,6 +15,9 @@ import logging
 import re
 
 from agents.voice.evidence import _is_location_ask
+from agents.voice.grounding import (_ack_opener, _housekeeping_turn,
+                                    _leaked_the_instructions,
+                                    _stapled_own_detail)
 from agents.voice.objectives import clauses as _clauses, sentences as _sentences
 from agents.voice.turns import _is_filler_reply, _norm_clause
 
@@ -367,6 +370,23 @@ def conversation_metrics(turns: list, raw: "list | None" = None) -> dict:
         if not asked:
             unsolicited_pii_dumps += 1
 
+    # ── The acknowledgement cadence, off agent[1:] ──────────────────────────
+    # agent[1:] for the same reason piled_turns uses it: the greeting is a
+    # fixed line from the template and would otherwise weight every call the
+    # same way. The run is counted on ADJACENT agent turns, which on the
+    # merged transcript is what the caller actually heard as two openings.
+    ack_openers = ack_opener_runs = housekeeping_turns = 0
+    _prev_ack = ""
+    for t in agent[1:]:
+        _a = _ack_opener(t.text)
+        if _a:
+            ack_openers += 1
+            if _prev_ack:
+                ack_opener_runs += 1
+        _prev_ack = _a
+        if _housekeeping_turn(t.text):
+            housekeeping_turns += 1
+
     return {
         # How many times it asked where the doctor practises. On the call that
         # exposed this it was six, with no location offered between any of
@@ -408,6 +428,36 @@ def conversation_metrics(turns: list, raw: "list | None" = None) -> dict:
         # agent reaching for the same stock phrase twice running — audible as
         # a loop even when every existing repeat pass scores the call clean.
         "shared_opening_clauses": shared_opening_clauses,
+        # ── The enquiry-bot cadence ──────────────────────────────────────────
+        # THESE EXIST BECAUSE EVERY COUNTER ABOVE READ ZERO ON THE CALLS THAT
+        # HAD IT WORST. call-20260904-1306: five of eleven agent turns were
+        # "Okay, thanks for confirming that. Let me ask about availability
+        # next.", and piled_turns, stapled_questions, repeated_sentences and
+        # shared_opening_clauses were all 0. The counters above measure the
+        # STRUCTURE of a turn; this defect is in its content, and
+        # shared_opening_clauses in particular reads 0 because "Okay, thanks
+        # for confirming that" and "Got it, thanks for confirming that" are
+        # unequal clauses.
+        #
+        # ack_openers is a RATE, not a fault — some acknowledgement is human,
+        # and the corpus baseline this rebuild has to move is 70%. The fault is
+        # the pair, which is why the run counter sits beside it.
+        # The greeting is excluded from both: it is a fixed line.
+        "ack_openers": ack_openers,
+        "ack_opener_runs": ack_opener_runs,
+        "housekeeping_turns": housekeeping_turns,
+        # The prompt's own register reaching the callee — a turn narrating the
+        # exchange in the third person, which is how the instructions are
+        # written and not how anyone speaks to the person they are describing.
+        # Counted over ALL agent turns including the greeting: the greeting is
+        # a fixed line and cannot produce one, so excluding it would only hide
+        # a defect if the fixed line ever changed.
+        "leaked_instructions": sum(1 for t in agent
+                                   if _leaked_the_instructions(t.text)),
+        # A name or date of birth with a question stapled on. The receptionist
+        # answers the question, the fact goes past them, and it is asked again.
+        "stapled_details": sum(1 for t in agent
+                               if _stapled_own_detail(t.text)),
         # Agent turns spoken straight onto another agent turn. Non-zero is the
         # agent talking to itself: the caller had no gap to speak into and
         # whatever the second turn says arrives as an afterthought on the

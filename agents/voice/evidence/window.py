@@ -248,11 +248,41 @@ def _asserted_caller_text(sess: "RealtimeSession") -> str:
     Extracted so the grounding check and the rode-along report read the same
     evidence. Two copies of "what did the caller actually tell us" is two
     answers to that question the first time one of them is edited.
+
+    ASSERTION IS SENTENCE-LEVEL; THIS USED TO FILTER BY THE TURN. A turn that
+    mixes a statement with a question was discarded WHOLE, statement included.
+    call-20260908-1249, the receptionist's opening turn:
+
+        "Yeah, good afternoon. Dr. Abel is one of our pediatricians here.
+         How can I help you?"
+
+    — `_turn_asserts` False on the whole thing, True on the middle sentence.
+    The blob was left holding only their next turn, the word "Yeah.", and the
+    detail guard then judged every real word against it: 'abel' and
+    'pediatricians' came back ungrounded and the trimmer stored
+    "They Dr. is one". The words were in the transcript the whole time.
+
+    NOTE WHAT THE "no evidence, cannot judge" VALVE DOES NOT COVER. Every
+    consumer bails when this returns "" — but one trivial "Yeah." is enough to
+    make it non-empty, so the valve was open exactly when the evidence was
+    worthless. Filtering per sentence is what closes that, not a wider valve.
+
+    THIS CANNOT ADMIT ANYTHING THE CALLER DID NOT ASSERT. The fallback runs
+    `_turn_asserts` again, per sentence, with the same session and the same
+    rules; a single non-asserting sentence ("She's in San Francisco, right?")
+    has no other sentence to be rescued by and stays out, which is the case
+    this predicate was written for.
     """
-    return " ".join(
-        t.text.lower() for t in sess.turns
-        if t.role == "caller" and t.text.strip() != "[...]"
-        and _turn_asserts(t.text, sess))
+    out: list = []
+    for t in sess.turns:
+        if t.role != "caller" or t.text.strip() == "[...]":
+            continue
+        if _turn_asserts(t.text, sess):
+            out.append(t.text.lower())
+            continue
+        out.extend(s.lower() for s in sentences(t.text)
+                   if _turn_asserts(s, sess))
+    return " ".join(out)
 
 
 

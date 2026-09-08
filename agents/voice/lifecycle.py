@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple, Optional
 
 from core.config import settings
+from agents.voice.latency import _restage
 from agents.voice.audio import (
     _agent_wire_sample_rate,
     _drop_held_items,
@@ -125,6 +126,10 @@ async def _handle_response_done(
     if (sess._stage is not None and "t3" in sess._stage
             and "t4" not in sess._stage):
         sess._stage["t4"] = time.monotonic()
+        # Rewrite the row if it was already written at first audio. Harmless
+        # on the tool-first path, where nothing has been appended yet and
+        # _restage returns immediately.
+        _restage(sess._stage, sess.turn_stages)
     # `_response_spoke = _response_had_audio` stood here, assigned
     # and never read. It came in with c443356 (the 8.2s dead-air
     # fix) and was orphaned when that check moved to the model's

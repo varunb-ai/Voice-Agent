@@ -66,7 +66,7 @@ def _say(text: str, speak: bool, save_to: Optional[str] = None) -> None:
     console.print(f"\n[bold cyan]  Agent:[/bold cyan] {text}\n")
     if not speak:
         return
-    from agents.voice import tts_local
+    from agents.experiment import tts_local
     if save_to:
         tts_local.speak_and_save(text, save_to)
     else:
@@ -77,7 +77,8 @@ def _say(text: str, speak: bool, save_to: Optional[str] = None) -> None:
 
 def _listen() -> tuple[str, Optional[str]]:
     """Record mic until Enter, transcribe. Returns (text, wav_path)."""
-    from agents.voice import mic, stt_whisper
+    from agents.experiment import stt_whisper
+    from archive.experiment_telephony import mic
     console.print("[bold yellow]  >> Speak now — press  Enter  when you finish <<[/bold yellow]")
     wav = mic.record_until_enter()
     console.print("[dim]  (transcribing…)[/dim]")

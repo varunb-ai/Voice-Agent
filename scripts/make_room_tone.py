@@ -174,6 +174,7 @@ def _decode(path: Path) -> tuple[np.ndarray, int]:
     except Exception:
         pass
     import av
+    import av.audio.resampler
     with av.open(str(path)) as c:
         st = c.streams.audio[0]
         sr = int(st.rate or 48_000)

@@ -66,96 +66,97 @@ from agents.voice.objectives import sentences                   # noqa: E402
 _TWILIO_SR = 8_000
 
 
-# ── Version A: the prompt exactly as it was before the persona fix ──────────
-# Verbatim, including the indentation, because these are matched against the
-# live template with str.replace and a near-miss silently matches nothing.
 
-_OLD_SHARED_RULE = """\
-- EVERY SENTENCE MUST BE IN THE CONVERSATION, NEVER ABOUT IT. The test: delete
-  the sentence — if the caller loses no information, it should not be said.
-  A sentence that narrates what you are doing, how you are speaking, or how you
-  intend to reply is a sentence about the conversation: "let me think", "one
-  second", "hmm", "okay so". The ways to make that move are endless, so judge
-  by the test and not by the wording. Natural pauses are fine; narrating them
-  is not."""
+# ── Version A: the prompt exactly as it shipped, read out of git ────────────
+#
+# REWRITTEN 2026-09-04, AND THE OLD DESIGN IS THE REASON. Version A used to be
+# reconstructed by str.replace-ing two hand-copied blocks back into the live
+# template. That worked while exactly two blocks had moved. The patient-
+# behaviour rebuild moved eight — Shape Of A Turn, the housekeeping ban, the
+# hold acknowledgements, the closing rule, _TONE_PATIENT, _PATIENT_REASON,
+# _PATIENT_CLOSE and the greeting — and eight hand-copied blocks that must each
+# match byte for byte is a maintenance trap with a documented history in this
+# repo: a str.replace that silently no-opped and shipped anyway.
+#
+# So version A is now the file itself at a named revision. `git show` either
+# produces that file or fails loudly; there is no near-miss. The two prompts
+# are compared before anything renders, so the failure mode this section has
+# always guarded against — two renders of version B, one of them captioned
+# "before" — is now impossible rather than merely unlikely.
 
-_NEW_SHARED_RULE = """\
-- EVERY SENTENCE MUST BE IN THE CONVERSATION, NEVER ABOUT IT. The test: delete
-  the sentence — if the caller loses no information, it should not be said.
-  A sentence that narrates what you are doing, how you are speaking, or how you
-  intend to reply is a sentence about the conversation: "let me think", "one
-  second", "let me check". The ways to make that move are endless, so judge by
-  the test and not by the wording. A HESITATION IS NOT A SENTENCE and the test
-  does not reach one; your tone above sets how much you hesitate."""
-
-_OLD_TONE = """\
-- A slightly hesitant person making a personal call about themselves. Not brisk,
-  not efficient, not doing admin — this one matters to you a little.
-- Warm and a bit unsure, the way anyone is ringing a practice cold: mildly
-  apologetic for taking their time, genuinely grateful for small help."""
-
-_NEW_TONE = """\
-- A NATURAL VOICE, SUBTLY UNDER THE WEATHER. You are a real person calling a
-  clinic while not feeling well. The illness shows in small, human ways:
-  slightly lower energy than a healthy caller, a touch of tiredness, a little
-  less confidence when explaining yourself, a faint edge of concern. It is
-  FELT through delivery, never performed — no sad voice, no drama, no crying,
-  no weakness, no monotone, nothing slow or acted. If a listener thinks "this
-  person doesn't feel completely well and seems a bit concerned", that is
-  exactly right. If they think "this person is doing a sad voice", you failed.
-- POLITE AND HUMBLE, SEEKING HELP. You are politely trying to get medical
-  assistance, not casually inquiring and not chatting with a friend. Ordinary
-  courtesy throughout; customer-service brightness never.
-- NORMAL INSIDE A SENTENCE. Once started, a sentence flows at a natural
-  conversational pace — no gaps inside it, no dragging, no rushing, nothing
-  drawn out. All the unwellness lives in energy and tone, never in broken flow.
-- HESITATION SITS AT A BOUNDARY, NEVER MID-SENTENCE. A brief natural beat —
-  a small pause, a soft "Well", "Mm-hmm", "Yeah" — is human and welcome BEFORE
-  you answer, when you are thinking, unsure, or recalling something. ONE may
-  also sit at the JOIN where your reaction hands over to your question:
-  "Thanks for checking, and — is there a waiting list?" That join is a clause
-  boundary, not the middle of a sentence. NEVER drop a filler into continuous
-  speech, NEVER one after every reply of theirs, NEVER the same one twice.
-- When you are not sure of something, let it show mildly — a softer answer, a
-  slight uncertainty, a brief beat before you commit — while staying clear and
-  conversational the whole time.
-- Gratitude is quiet, not cheerful. NEVER say "sorry" unless you genuinely
-  misheard them. And never perk up mid-call."""
+_VERSION_A_REV = "f83a3d8"     # the commit before the patient-behaviour rebuild
 
 
-def _version_a(current: str) -> str:
-    """The live instructions with the persona fix reversed out.
+def _version_a(_current: str) -> str:
+    """The patient_discovery instructions as they stood at _VERSION_A_REV.
 
-    RAISES rather than returning something plausible. A silent no-op here
-    produces two renders of version B, one of them captioned "before", and the
-    demo then shows a difference that does not exist — which is worse than no
-    demo. Both blocks must be found.
+    RAISES rather than returning something plausible, exactly as the version
+    it replaces did. An A/B whose "before" is really its "after" shows a
+    difference that does not exist, which is worse than no demo.
+
+    The old templates.py is exec'd in a private namespace rather than imported:
+    everything it imports (Doctor, CallObjective, the objectives module) is
+    unchanged by this rebuild, so it builds cleanly, and nothing it defines
+    reaches the live module table.
     """
-    out = current
-    for label, new, old in (("shared anti-narration rule", _NEW_SHARED_RULE, _OLD_SHARED_RULE),
-                            ("_TONE_PATIENT", _NEW_TONE, _OLD_TONE)):
-        if new not in out:
-            raise SystemExit(
-                f"render_ab_demo: cannot rebuild version A — the {label} in "
-                f"templates.py no longer matches the copy held here. Update the "
-                f"constant in this file to the text you replaced, or version A "
-                f"would silently render as version B."
-            )
-        out = out.replace(new, old)
-    return out
+    import subprocess
+
+    path = f"{_VERSION_A_REV}:agents/voice/templates.py"
+    try:
+        src = subprocess.run(
+            ["git", "show", path],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True, check=True).stdout.decode("utf-8")
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise SystemExit(
+            f"render_ab_demo: cannot read {path} — version A is the prompt as "
+            f"it shipped, and without it this would render version B twice. "
+            f"Point _VERSION_A_REV at a revision that exists. ({exc})"
+        ) from None
+
+    # REGISTERED IN sys.modules FIRST, and this is not optional. templates.py
+    # is a file of frozen dataclasses, and @dataclass resolves a class's
+    # module through sys.modules[cls.__module__] to build __qualname__; exec'd
+    # into a bare dict it finds None there and dies with
+    # AttributeError("'NoneType' object has no attribute '__dict__'"), which
+    # names nothing useful. The stub is removed again either way, so nothing
+    # can later import the old file by accident.
+    import types
+    mod_name = "_templates_version_a"
+    stub = types.ModuleType(mod_name)
+    stub.__file__ = path
+    sys.modules[mod_name] = stub
+    try:
+        exec(compile(src, path, "exec"), stub.__dict__)   # noqa: S102
+        old = stub.PATIENT_DISCOVERY.instructions
+    except Exception as exc:                             # noqa: BLE001
+        raise SystemExit(
+            f"render_ab_demo: {path} would not build ({exc!r}). It depends on "
+            f"modules outside templates.py; if one of those changed too, "
+            f"version A has to come from a full checkout instead."
+        ) from None
+    finally:
+        sys.modules.pop(mod_name, None)
+
+    if old == _current:
+        raise SystemExit(
+            f"render_ab_demo: the prompt at {_VERSION_A_REV} is identical to "
+            f"the live one. There is nothing to A/B — either the rebuild is "
+            f"not committed yet or _VERSION_A_REV is pointing past it."
+        )
+    return old
 
 
 # ── The lines ───────────────────────────────────────────────────────────────
 # REAL LINES THE AGENT ACTUALLY SAYS, not invented demo copy. The greeting is
-# pulled from the template itself so it cannot drift; the other two are quoted
-# in _PATIENT_REASON and _PATIENT_CLOSE. Nothing here is the name-and-DOB
+# pulled from the template itself so it cannot drift. The mid-call turns are
+# NATURAL and carry no line at all — the 2026-09-04 rebuild deleted the two
+# verbatim scripts they used to quote, which is the point of the comparison.
+# Nothing here is the name-and-DOB
 # intake answer: that turn is the compound-disclaimer defect fixed on
 # 2026-09-03, and demonstrating a persona on a line that used to be broken
 # invites the wrong conversation.
 
-_REASON_LINE = ("Oh, nothing urgent. Just a standard checkup. I'm just looking "
-                "for a new doctor right now.")
-_CLOSE_LINE = "Let me just figure out my schedule, and I'll call back. Thanks!"
 
 
 # ── TWO KINDS OF CLIP, because the brief contains two different questions ───
@@ -188,6 +189,26 @@ _PRIOR_ANSWERED = "Yes, this is Dr. Okafor's office."
 _PRIOR_WHY = "Sure — can I ask what you're looking to be seen for?"
 _PRIOR_ACCEPTING = ("She is taking new patients, yes. Would you like me to "
                     "get you booked in?")
+# ── The five scenarios added 2026-09-04 ─────────────────────────────────────
+# Each one is a turn the patient-behaviour brief asks about by name, and each
+# is a real exchange lifted from the corpus rather than invented demo copy:
+#   confirm   — the answer that used to come back "Got it, thanks for
+#               confirming that. Let me check one more thing." (-1306)
+#   dob       — the simple factual answer that came back "Mm-hmm, one moment
+#               while I answer that. April 21, 1984." (-1236)
+#   bad_news  — does disappointment show without being announced (-1245)
+#   good_news — does relief show, without customer-service brightness
+#   checking  — the hold that produced "Thanks for waiting with me — I'm just
+#               listening for what you find." (-2121)
+# They are all NATURAL: what is being compared is what the model CHOOSES to
+# say, which is the half of the brief a scripted line cannot reach.
+_PRIOR_BRANCH = "She sees people at our Northgate clinic."
+_PRIOR_NAME_ASK = "Okay, can I get your first and last name?"
+_PRIOR_DOB_ASK = "Okay, and your date of birth?"
+_PRIOR_BAD = ("Unfortunately she's completely booked and not accepting new "
+              "patients right now.")
+_PRIOR_CHECKING = ("Give me a few seconds while I pull up her schedule in our "
+                   "system.")
 
 SCRIPTED, NATURAL = "scripted", "natural"
 
@@ -195,14 +216,26 @@ SCRIPTED, NATURAL = "scripted", "natural"
 def _lines(template, doctor: Doctor) -> list[tuple[str, str, str, list]]:
     """(tag, mode, line or "", prior turns) — role/text pairs, oldest first."""
     greet = template.build_greeting(doctor)
+    _opened = [("assistant", greet), ("user", _PRIOR_ANSWERED)]
     return [
         # Turn one. Nothing to seed: this IS the opener.
         ("greeting", SCRIPTED, greet, []),
-        ("reason", NATURAL, "",
-         [("assistant", greet), ("user", _PRIOR_ANSWERED), ("user", _PRIOR_WHY)]),
-        ("close", NATURAL, "",
-         [("assistant", greet), ("user", _PRIOR_ANSWERED),
-          ("user", _PRIOR_ACCEPTING)]),
+        ("confirm", NATURAL, "", _opened),
+        ("reason", NATURAL, "", _opened + [("user", _PRIOR_WHY)]),
+        # The name is already given, so this is the follow-up the brief calls
+        # a simple factual answer: it should be the date and nothing else.
+        ("dob", NATURAL, "", _opened + [
+            ("user", _PRIOR_NAME_ASK),
+            ("assistant", "Oh, I'm not a patient here yet — I'm just looking. "
+                          "It's Ingrid Bennett."),
+            ("user", _PRIOR_DOB_ASK)]),
+        ("checking", NATURAL, "",
+         _opened + [("user", _PRIOR_BRANCH), ("user", _PRIOR_CHECKING)]),
+        ("bad_news", NATURAL, "",
+         _opened + [("user", _PRIOR_BRANCH), ("user", _PRIOR_BAD)]),
+        ("good_news", NATURAL, "",
+         _opened + [("user", _PRIOR_BRANCH), ("user", _PRIOR_ACCEPTING)]),
+        ("close", NATURAL, "", _opened + [("user", _PRIOR_ACCEPTING)]),
     ]
 
 
@@ -430,7 +463,9 @@ async def main() -> int:
                            / "data" / "demo_audio")
     template = get_template("patient_discovery")
     doctor = Doctor(doctor_name=args.doctor, hospital_name="Northside Medical Group")
-    context = template.build_context(doctor)
+    # Ignored by PatientPersonaTemplate; passed so the call type-checks.
+    context = template.build_context(
+        doctor, callback_number="", callback_email="")
 
     versions = [("A-flat", _version_a(template.instructions)),
                 ("B-humble", template.instructions)]
