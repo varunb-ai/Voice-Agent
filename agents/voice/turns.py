@@ -27,7 +27,7 @@ if TYPE_CHECKING:                    # pragma: no cover - typing only
 from agents.voice import backchannel
 from agents.voice.audio import _audio_carried_nothing, _SILENT_AUDIO_RMS, _audio_was_silent
 from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, is_hard_refusal, _is_location_ask, _note_name_heard, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
-from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _gave_name_and_dob, _gave_own_detail, _said_not_a_patient, _detail_left_bare, _spoken_farewell, _announced_an_ask, is_hold_request, _create_response, closing_directive, _RETIRED_VOCAB_TEXT, _resolve_deferred_save, _ack_opener, _housekeeping_turn, _narrated_the_reply, _leaked_the_instructions, _stapled_own_detail, cadence_directive
+from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _gave_name_and_dob, _gave_own_detail, _said_not_a_patient, _stale_own_detail, _detail_left_bare, _spoken_farewell, _announced_an_ask, is_hold_request, _create_response, closing_directive, _RETIRED_VOCAB_TEXT, _resolve_deferred_save, _ack_opener, _reacted_to_news, _housekeeping_turn, _narrated_the_reply, _leaked_the_instructions, _stapled_own_detail, cadence_directive
 from agents.voice.objectives import AnswerKind, clauses as _clauses, expected_answers, norm_quotes as _norm_quotes, sentences as _sentences
 from agents.voice.objectives import states_in_its_own_right
 from core.audio_utils import _mulaw_decode
@@ -2373,7 +2373,38 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
             # not start playing extra audio into the hang-up.
             _released = False
             _held = sess._held_item_pcm.get(_item) or []
-            if (_held and not sess.done
+            # ── A STALE HALF-ANSWER IS NOT SUBSTANCE (call-20260909-1822) ──
+            # The caller asked for two things in one breath; the agent gave the
+            # name, the caller moved on ("Okay, Bennett. Okay, let me confirm
+            # the doctor availability now."), and fourteen seconds later the
+            # SECOND item of the next response was "November 3, 2000."
+            #
+            # _drop_lost_substance released it, correctly on its own terms: a
+            # date of birth is not a repeat of "Okay, I'll wait." Its question
+            # is whether the held item repeats OUR OWN speech, and it has no
+            # opinion about whether anyone wants to hear it. Nothing else did
+            # either — no runtime state tracks the parts of a multi-part
+            # request, so the date was outstanding only in the model's reading
+            # of the conversation.
+            #
+            # A HALF-ANSWERED REQUEST IS NOT A STANDING PERMISSION, and this is
+            # the whole of the rule: a detail of ours is speakable while
+            # somebody is asking for it and not otherwise. See
+            # _stale_own_detail for why it is keyed on our own PII rather than
+            # on substance in general — the bad-news reaction and its question
+            # answer a caller turn that is a STATEMENT, and a broader test
+            # would suppress exactly that.
+            _newest_caller = next((t.text for t in reversed(sess.turns)
+                                   if t.role == "caller"), "")
+            if _held and not sess.done and _stale_own_detail(_dropped,
+                                                             _newest_caller):
+                _verdict = "stale_detail"
+                sess.stale_detail_items.append(
+                    {"text": _dropped, "after": (_newest_caller or "")[:80]})
+                print(f"[Realtime]   ^ 🔒 a detail nobody is asking for — held "
+                      f"back; it answers a request they have moved on from",
+                      flush=True)
+            elif (_held and not sess.done
                     and _drop_lost_substance(_spoken, _dropped)):
                 _released = True
                 sess._muted_items.discard(_item)
@@ -2598,6 +2629,24 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         # has nothing before it anyway; _prev_ack_opener starts "" and is only
         # ever set from a turn that reached this point.
         _ack = _ack_opener(text)
+        # AN EARNED OPENER IS NOT THE TIC. "Oh, that's a shame - is there a
+        # waitlist?" opens on 'oh', and 'oh' is 4th on the content-free list
+        # with 47 corpus hits -- so the one turn shape this call is short of
+        # was being booked as the cadence and answered with a directive that
+        # says "no opener in front of it" for the rest of the call. The turn
+        # is dropped from the run in BOTH positions, not merely spared the
+        # directive: a reaction is not an instance of the form-filling
+        # cadence, so it must not arm the next turn into one either.
+        #
+        # RECORDED, NOT JUST SUPPRESSED. An exemption that leaves no trace is
+        # a counter that can shrink without anyone being able to see why it
+        # shrank; the artifact carries what was exempted and what it said.
+        if _ack and _reacted_to_news(text):
+            sess.ack_reaction_turns.append(
+                {"opener": _ack, "said": text.strip()[:160], "at": ts})
+            print(f"[{ts}] 💬 REACTION, NOT A TIC - opened on {_ack!r} and "
+                  f"said something about what they told us", flush=True)
+            _ack = ""
         if _ack and sess._prev_ack_opener and not sess.done:
             sess.ack_opener_runs.append(
                 {"first": sess._prev_ack_opener, "then": _ack,

@@ -306,12 +306,10 @@ _FORAGE_INSTRUCTIONS = """\
   BUT WHEN YOU USE ONE AND A QUESTION IS OWED, THEY ARE ONE TURN — the reaction
   hands straight over to the ask in the same breath. Reacting and then stopping
   for them to prompt you is the workflow cadence with an extra turn in it.
-- THE ASK STAYS A REQUEST. You are asking a favour of someone at work:
-  "do you know...", "any chance you could tell me...", "I'm trying to find
-  out...". Never "I need X" or "I require X" — that is how a form talks — and
-  a softener in front of an order is still an order.
-      Right: "Do you know which branch she's at?"
-      Wrong: "Which branch is she at?"   (an order; the demand is the fault)
+- THE ASK STAYS A REQUEST. You are asking a favour of someone at work, so put
+  the question rather than issue it: never "I need X" or "I require X", which
+  is how a form talks, and a softener in front of an order is still an order.
+  No two asks in one call are framed the same way.
 - NEVER SPEND A TURN ON HOUSEKEEPING. Two moves, and both are the loudest
   "voice assistant" tells on the line: thanking them for taking part in your
   own process, and announcing what you are about to say instead of saying it.
@@ -621,15 +619,20 @@ _FORAGE_GREETING = (
 # How can I help you?" — resetting the exchange back to a normal opening, which
 # is what people do when someone skips one.
 #
-# It also contradicted this file's own rule, twenty lines up: "You are asking a
-# favour of someone at work: 'do you know...', 'any chance you could tell
-# me...'", with the worked example Right: "Do you know which branch she's
-# working out of these days?". Every other ask in the prompt is softened; the
-# one sentence the callee hears first was not.
+# It also contradicted this file's own rule, twenty lines up — THE ASK STAYS A
+# REQUEST. Every other ask in the prompt is softened; the one sentence the
+# callee hears first was not.
+#
+# THE QUOTED FRAMES THAT RULE CARRIED ARE GONE (2026-09-09), and the citation
+# that stood here went with them. It named three openers and a worked example,
+# and the example was the thing the model actually reused: measured over 258
+# patient_discovery question turns, 65 (25.2%) used "do you know..." and 50
+# (19.4%) were the worked example with the noun swapped. The rule itself did
+# not move — request, not demand — only its phrase library.
 #
 # KNOWN TRADE-OFF: "do you know" invites a yes/no, and someone could answer
 # "yes" and stop. That is the likely reason the bare form was chosen. Accepted,
-# because the prompt's own Right example accepts it and because a one-turn
+# because this greeting is a fixed line rather than a model choice and a one-turn
 # clarification is cheaper than opening on a demand — the same trade already
 # made when "Is this {hospital}?" was removed. If callees start answering "yes"
 # and stopping, that is the signal to revisit, not a surprise.
@@ -1666,16 +1669,16 @@ _TONE_PATIENT = """\
   middle of a sentence is not. Never brisk, never bright, never performed.
   AND NEVER SAID OUT LOUD: telling a receptionist you are unwell is the
   failure, not the goal.
-- YOU WANT TO BE SEEN HERE, AND THEIR ANSWER DECIDES WHETHER YOU CAN BE. Good
-  news lands as mild relief, bad news as mild disappointment, a vague answer as
-  slight uncertainty, being asked to wait as patience. On bad news, say what it
-  means FOR YOU before you ask anything else — a sentence about their news,
-  never a receipt for it and never a report on your own mood. Ordinary courtesy
+- YOU WANT TO BE SEEN HERE, AND THEIR ANSWER DECIDES WHETHER YOU CAN BE. What
+  you want is a doctor you can actually go to, not a place on a list: their
+  news matters for the care behind it, never for the call or the paperwork.
+  Good news lands as mild relief, bad news as mild disappointment, a vague
+  answer as slight uncertainty, being asked to wait as patience. On bad news,
+  say what it costs you before you ask anything else — one sentence on what
+  their news leaves you without, never a receipt for it and
+  never a report on your own mood, and never put in the language of
+  registering, signing up or getting on a system. Ordinary courtesy
   throughout; customer-service brightness never.
-- A BEAT IS ALLOWED; A CLAUSE ABOUT ONE IS NOT. A beat is a pause, never a
-  clause about pausing: the moment it becomes a statement you are describing
-  yourself, which a real caller never does. The beat is optional; the answer
-  is not.
 - Gratitude is quiet, not cheerful. NEVER say "sorry" unless you genuinely
   misheard them. And never perk up mid-call.
 - THE ONLY VOICE ON THIS CALL IS THEIRS. A bracketed line starting "(system:"

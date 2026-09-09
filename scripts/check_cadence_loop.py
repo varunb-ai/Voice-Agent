@@ -69,7 +69,8 @@ from agents.voice.realtime_worker import (                    # noqa: E402
 )
 from agents.voice.templates import get_template               # noqa: E402
 from agents.voice.grounding import (                          # noqa: E402
-    _ack_opener, _housekeeping_turn, _narrated_the_reply, cadence_directive,
+    _ack_opener, _reacted_to_news, _housekeeping_turn,
+    _narrated_the_reply, cadence_directive,
 )
 
 
@@ -86,7 +87,11 @@ def _verdict(objective, text: str, prev_ack: str, memory: dict):
     want = objective.next_spoken(memory)
     if _housekeeping_turn(text):
         return "housekeeping", cadence_directive("housekeeping", want)
-    if _ack_opener(text) and prev_ack:
+    # THE EXEMPTION LIVES WITH THE GUARD, for the reason the directive wording
+    # does: this script replays the real predicates against the real model, and
+    # a copy that had not grown the exemption would be measuring a guard that
+    # no longer ships.
+    if _ack_opener(text) and prev_ack and not _reacted_to_news(text):
         return "ack_run", cadence_directive("ack_run", want)
     return "", ""
 

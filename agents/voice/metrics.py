@@ -15,7 +15,8 @@ import logging
 import re
 
 from agents.voice.evidence import _is_location_ask
-from agents.voice.grounding import (_ack_opener, _housekeeping_turn,
+from agents.voice.grounding import (_ack_opener, _reacted_to_news,
+                                    _housekeeping_turn,
                                     _leaked_the_instructions,
                                     _stapled_own_detail)
 from agents.voice.objectives import clauses as _clauses, sentences as _sentences
@@ -375,14 +376,27 @@ def conversation_metrics(turns: list, raw: "list | None" = None) -> dict:
     # fixed line from the template and would otherwise weight every call the
     # same way. The run is counted on ADJACENT agent turns, which on the
     # merged transcript is what the caller actually heard as two openings.
-    ack_openers = ack_opener_runs = housekeeping_turns = 0
+    ack_openers = ack_opener_runs = housekeeping_turns = ack_reactions = 0
     _prev_ack = ""
     for t in agent[1:]:
         _a = _ack_opener(t.text)
         if _a:
             ack_openers += 1
-            if _prev_ack:
-                ack_opener_runs += 1
+        # THE SAME EXEMPTION THE LIVE GUARD APPLIES, and it has to be the same
+        # or the artifact and the console disagree about the same call. A turn
+        # that said something about what they were told earns its opener and
+        # is no instance of the cadence -- so it is dropped from the run in
+        # both positions, exactly as turns.py drops it.
+        #
+        # ack_openers IS DELIBERATELY NOT EXEMPTED. It is a rate, not a fault
+        # -- how often the agent opened on an acknowledgement at all -- and
+        # narrowing it here would silently restate what every earlier call in
+        # the corpus measured.
+        if _a and _reacted_to_news(t.text):
+            ack_reactions += 1
+            _a = ""
+        if _a and _prev_ack:
+            ack_opener_runs += 1
         _prev_ack = _a
         if _housekeeping_turn(t.text):
             housekeeping_turns += 1
@@ -445,6 +459,10 @@ def conversation_metrics(turns: list, raw: "list | None" = None) -> dict:
         # The greeting is excluded from both: it is a fixed line.
         "ack_openers": ack_openers,
         "ack_opener_runs": ack_opener_runs,
+        # Openers that were earned. ack_openers - ack_reactions is the count
+        # the run detector actually walked, so a reader can tell a quiet call
+        # from a call where the exemption did the quieting.
+        "ack_reactions": ack_reactions,
         "housekeeping_turns": housekeeping_turns,
         # The prompt's own register reaching the callee — a turn narrating the
         # exchange in the third person, which is how the instructions are

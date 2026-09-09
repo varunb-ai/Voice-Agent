@@ -749,6 +749,19 @@ class RealtimeSession:
         # themselves after one firing while the defect ran for the rest of
         # the call.
         self.ack_opener_runs: list[dict] = []
+        # Turns that opened on an acknowledgement and EARNED it -- they said
+        # something about what the caller told them rather than that they had
+        # told them. Held out of ack_opener_runs in both positions. Recorded
+        # rather than merely suppressed: an exemption with no trace is a
+        # counter that can shrink invisibly, which is how the cadence went
+        # 70% unseen in the first place.
+        self.ack_reaction_turns: list[dict] = []
+        # A personal detail the model offered on a turn where nobody
+        # was asking for one -- the unanswered half of an earlier
+        # multi-part request, surfacing after the caller moved on.
+        # Recorded rather than only suppressed: the caller never hears
+        # it, so the artifact is the only place it can be seen.
+        self.stale_detail_items: list[dict] = []
         self.housekeeping_turns: list[dict] = []
         # Announcing the answer instead of giving it — a different
         # failure from tool_call_padding, which is a promised QUESTION.
@@ -1618,6 +1631,8 @@ class RealtimeSession:
             # scored clean on the calls that had it worst — they measure the
             # shape of a turn and this is its content.
             "ack_opener_runs": self.ack_opener_runs or None,
+            "ack_reaction_turns": self.ack_reaction_turns or None,
+            "stale_detail_items": self.stale_detail_items or None,
             "housekeeping_turns": self.housekeeping_turns or None,
             # Said the answer was coming instead of saying it.
             "reply_narration": self.reply_narration or None,

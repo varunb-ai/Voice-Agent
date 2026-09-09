@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import json
+import re
 import time
 from datetime import datetime
 from typing import Optional, TYPE_CHECKING
@@ -37,6 +38,7 @@ from agents.voice.tools import run_tool
 from agents.voice.grounding.vocabulary import (
     _CHOICE_SAVE_TOOLS,
     _agent_stalled,
+    _only_acknowledged,
     _spoken_farewell,
     closing_directive,
 )
@@ -45,6 +47,103 @@ from agents.voice.grounding.telemetry import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# ── A question of theirs that we have not answered ───────────────────────────
+#
+# ONE DEFINITION, TWO CALL SITES, and it became one the moment the second
+# needed it. _decide_close has asked this since call-20260902-1842 in order to
+# refuse to hang up on an offer; _next_move_item now asks it in order to refuse
+# to steer past one. A hand-copied walk in the second would be the bug class
+# this repo keeps hitting — _spoken_farewell fixed in one of two places, twice.
+#
+# NEWEST REAL TURN ONLY. If any agent turn has followed their question we have
+# said something back and nothing is owed; a "[...]" placeholder is a
+# transcript still in flight, not a reply. A STALL IS NOT A REPLY:
+# call-20260903-1126 answered "Would you like me to add you to the list?" with
+# "Okay, let me just think about how I want to handle the waitlist" and that
+# discharged the obligation, so the close ran on a question still on the table.
+def _their_open_question(sess: "RealtimeSession") -> str:
+    """The caller's last question that no agent turn has answered, or ""."""
+    for _t in reversed(getattr(sess, "turns", []) or []):
+        _txt = (_t.text or "").strip()
+        if _txt == "[...]":
+            continue
+        if _t.role == "agent":
+            # A STALL IS NOT A REPLY (call-20260903-1126) and NEITHER IS A BARE
+            # ACKNOWLEDGEMENT (call-20260909-1628). On that second call the
+            # caller asked "Would you like me to go ahead and add you to the
+            # list?", the agent said "Thanks for explaining that." — which the
+            # runtime flagged as a housekeeping turn in the same second — and
+            # this walk took it as the answer. The objective completed, the
+            # deferral chose "spoken" (silent by design), and the caller's next
+            # sound was "Alright, take care."
+            #
+            # _only_acknowledged, NOT _housekeeping_turn: the latter is also
+            # true of turns that plainly do answer, and 6 of the 11 corpus
+            # housekeeping turns following a caller question are answers —
+            # "Got it — I'd rather not be added today, but thanks for
+            # explaining the wait list." declines the offer outright. Using it
+            # here would re-ask a question already answered.
+            if _agent_stalled(_txt) or _only_acknowledged(_txt):
+                continue
+            return ""                 # we have spoken since; nothing owed
+        if _t.role == "caller":
+            return _txt if _txt.endswith("?") else ""
+    return ""
+
+
+# ── "What can I help you with?" is not a question you stop and answer ────────
+#
+# THE TWO FAMILIES, MEASURED. Of 187 saves in the corpus that are grounded in a
+# caller turn, 21 land on one ending in "?" — and they split cleanly in two,
+# wanting opposite things:
+#
+#   15  identity                "What can I help you with?"  "What do you
+#                               want?"  "How can I help you today?"
+#                               An INVITATION to state your business. The
+#                               objective ask IS the answer: the agent replies
+#                               "do you know which office Dr. Abel sees people
+#                               at?" and that is correct and wanted.
+#    6  accepting_new_patients  "Would you like me to go ahead and add you to
+#                               the list?"  "Is it okay for you to add me
+#                               there?"
+#                               A DECISION asked of the patient, orthogonal to
+#                               every field. Steering past it is the defect.
+#
+# So the discriminator is not "did they ask something" — that fires on both —
+# but whether their question is answered BY the next ask or INSTEAD OF it.
+# A wh-question opening the last sentence is the invitation; anything else is a
+# question the patient has to answer in its own right.
+#
+# A CLOSED FUNCTION-WORD CLASS, not a phrase list: English marks this with nine
+# interrogatives and no more. Checked on all 21 corpus cases, 0 misclassified.
+#
+# THE LAST SENTENCE, not the turn, because the invitation always arrives behind
+# an answer — "Yes, this is Dr. Abel's office. What can I help you with?"
+_WH_INVITE = re.compile(
+    r"^\s*(?:and\s+|so\s+|okay\s+|ok\s+|but\s+)*"
+    r"(?:what|how|which|why|who|whom|whose|when|where)\b", re.I)
+
+
+def _invites_our_business(text: str) -> bool:
+    """Is their question an invitation to say what you are calling about?"""
+    t = (text or "").strip()
+    if not t.endswith("?"):
+        return False
+    _last = re.split(r"(?<=[.!?])\s+", t)[-1].strip()
+    return bool(_WH_INVITE.match(_last))
+
+
+# ONE MOVE, NOT TWO, and the wording is not new — it is what the "theirs"
+# deferral has said since call-20260908-1249, lifted here so the two sites
+# cannot drift. That call is also why it names a single move: "answer briefly,
+# then close warmly" came back as "let me give you a quick answer, then I'll be
+# on my way", a first-person paraphrase of the sequence.
+_ANSWER_THEM = ("(they asked you something. Answer it, in your own words — "
+                "ONE short sentence, spoken to them. Do not describe what you "
+                "are about to say and do not announce anything about the "
+                "call.)")
 
 
 async def _create_response(oai_ws, sess: "RealtimeSession", *, why: str,
@@ -279,28 +378,11 @@ def _decide_close(name: str, result: dict,
         # NEWEST REAL TURN ONLY. If any agent turn has followed their question
         # we have said something back and this does not fire; a "[...]"
         # placeholder is a transcript still in flight, not a reply.
-        _their_question = ""
-        for _t in reversed(sess.turns):
-            _txt = (_t.text or "").strip()
-            if _txt == "[...]":
-                continue
-            if _t.role == "agent":
-                # SPEAKING IS NOT ANSWERING, and this walk could not tell them
-                # apart. call-20260903-1126: the caller asked "Would you like
-                # me to add you to the list?" and the agent said "Okay, let me
-                # just think about how I want to handle the waitlist" in the
-                # same response as its tool calls. That turn discharged the
-                # obligation here — "we have spoken since" — so the deferral
-                # never armed and the close ran on a question still on the
-                # table. A stall advances nothing on the line and must not
-                # count as a reply to them.
-                if _agent_stalled(_txt):
-                    continue
-                break                   # we have spoken since; nothing owed
-            if _t.role == "caller":
-                if _txt.endswith("?"):
-                    _their_question = _txt
-                break
+        # MOVED OUT, NOT CHANGED. The walk (and the reasoning about stalls and
+        # "[...]" placeholders) now lives at _their_open_question, because
+        # _next_move_item needs the identical question and a second hand-copy
+        # is how _spoken_farewell came to be fixed in one of its two places.
+        _their_question = _their_open_question(sess)
 
         _unanswered = ""
         for _t in reversed(sess.turns):
@@ -460,6 +542,37 @@ def _next_move_item(sess: "RealtimeSession", name: str,
     # different one.
     if time.time() < float(getattr(sess, "_hold_until", 0.0) or 0.0):
         return ""
+    # ── THEY ASKED US SOMETHING AND THIS WAS STEERING PAST IT ───────────────
+    # call-20260909-1534. The caller said "Yeah, we do have a waitlist. You
+    # would be number 15. And would you like me to go ahead and add you to the
+    # list?" and this function — reached from save_new_patient_status, with the
+    # objective still one field short — injected
+    #
+    #   "(system: ask about whether there's a waiting list now, in your own
+    #    words, in this turn. ...)"
+    #
+    # verbatim. It named the field they had just answered and said nothing
+    # about the question they had just asked. The agent then spent three
+    # consecutive tool-only responses on bookkeeping and the caller said
+    # "Hello, are you there?" into 9 seconds of silence.
+    #
+    # THIS IS THE FIRST LAYER, and everything downstream was already right:
+    # once note_info completed the objective, _decide_close returned "theirs"
+    # and _close_or_continue asked for the answer — twice. The obligation was
+    # only invisible HERE, one response earlier, where the steer still pointed
+    # at the objective.
+    #
+    # NOT EVERY QUESTION, and _invites_our_business carries the measurement.
+    # "What can I help you with?" is answered BY the next ask, and 15 of the 21
+    # affected corpus saves are that. Replacing the steer there would break the
+    # greeting exchange to fix the offer.
+    #
+    # SAME RETURN SHAPE, so nothing downstream changes: this is still one
+    # conversation item injected before the same _pending_response_create the
+    # ordinary path uses. No new response, no new timer, no earlier create.
+    _asked = _their_open_question(sess)
+    if _asked and not _invites_our_business(_asked):
+        return _ANSWER_THEM
     objective = getattr(sess, "objective", None)
     if objective is None:
         return ""
@@ -526,10 +639,91 @@ def _next_move_item(sess: "RealtimeSession", name: str,
              and not f.present(sess.memory)]
     _look = ""
     if len(_rest) > 1 and _rest[1] and _rest[1] != nxt:
-        _look = (f" Not this turn, but next: {_rest[1]}. Do not ask that or "
-                 f"mention it now.")
+        # ── THE PROHIBITION WAS THE ANNOUNCEMENT (call-20260909-1628) ───────
+        # This clause used to read "Not this turn, but next: {X}. Do not ask
+        # that or mention it now." — and the comment above named itself as the
+        # first suspect if a live call ever said "then I'll ask about X". One
+        # did, three calls running, in the same position every time: the turn
+        # right after the caller answers the FIRST field.
+        #
+        #   16:28:25  agent   "Do you know which office Dr. Abel sees people
+        #                      at?"                        <- consumed the steer
+        #   16:28:35  caller  "Yeah, he sees patients at our Northgate clinic."
+        #   16:28:36  agent   "Got it, thanks for that—now I just need to ask
+        #                      about new patients."        <- announced it
+        #   16:28:44  agent   "Any chance Dr. Abel is taking new patients right
+        #                      now?"                       <- a turn too late
+        #
+        # WHY, MECHANICALLY. That second turn is SPEAK-FIRST: the words exist
+        # before save_branch runs, so before this function can inject anything
+        # for it. The only steer standing is the one from the previous save —
+        # which named field 1 AND forbade asking or mentioning it. Field 0 was
+        # answered, so it could not be re-asked; field 1 was named, so the model
+        # had the noun phrase; and the one thing left to do with a phrase you
+        # may not ask is mention it. The ban supplied the words and removed the
+        # only legitimate use for them.
+        #
+        # SO IT AUTHORISES INSTEAD OF FORBIDDING, and the timing is the whole
+        # content: the turn their answer arrives IS the turn to ask on. "The
+        # same goes for" inherits the ask-now clause above rather than restating
+        # it, because a directive naming two moves comes back narrated —
+        # call-20260908-1249 turned "answer briefly, then close warmly" into
+        # "let me give you a quick answer, then I'll be on my way".
+        #
+        # `ask` IS DELIBERATELY NOT ATTACHED TO {_rest[1]} here. The recorded
+        # leak was "Ask about {nxt}" surfacing as "then I'll ask about new
+        # patients"; the field is a subject in this clause, not the object of a
+        # verb the model can lift.
+        #
+        # WHAT THIS TRADES. The old wording guarded against asking both fields
+        # in one turn, and "Once they answer it" is now the only thing holding
+        # that line. That is the risk to watch: if a live call asks two fields
+        # at once, this clause is the first suspect and the conjunct to restore
+        # is the timing one, not the ban.
+        _look = (f" Once they answer it, the same goes for {_rest[1]} — in the"
+                 f" turn their answer arrives, not a turn later.")
     return (f"(system: ask about {nxt} now, in your own words, in this "
             f"turn. Any reaction rides in the same breath as the question."
+            # ── THEIRS COMES FIRST, AND UNCONDITIONALLY (call-20260909-1822) ─
+            # 18:23:13 the caller broke into the flow: "And by that way, can
+            # you give your full name and your date of birth?" The agent said
+            #
+            #   "Let me answer that and then I'll get back to the new-patient
+            #    question."
+            #
+            # and only then gave the name. The narration was ITEM 1, so it is
+            # what the caller actually heard first.
+            #
+            # NOTHING RAN FOR THAT TURN. It carried no tool, so this function
+            # was not reached; the objective was PARTIAL, so _decide_close's
+            # "theirs" branch was not reached either. Neither answer-the-caller
+            # path existed, and the newest standing instruction was still this
+            # steer from the save four turns earlier — "ask about whether
+            # they're taking new patients NOW, IN THIS TURN". The model
+            # reconciled that standing imperative against their question by
+            # narrating the orchestration of both.
+            #
+            # SO THE CLAUSE IS UNCONDITIONAL, and that is the whole design.
+            # A steer injected after a save cannot know that four turns later
+            # the receptionist will ask for a date of birth, and there is no
+            # window to inject once they have (median +0.000s between their
+            # speech ending and the response existing). The only instruction
+            # that can reach that turn is one already standing on it.
+            #
+            # IT SAYS NOTHING ABOUT COMING BACK, deliberately. "and then I'll
+            # get back to the new-patient question" is the defect itself; a
+            # clause promising the objective keeps would hand the model that
+            # sentence. The objective is retained by the runtime, not by
+            # anything said here — next_spoken still returns the field, the
+            # next save re-injects this steer, and the ask budget still counts
+            # it — so it needs no words at all.
+            #
+            # FIRST WORDS, not "answer briefly": the failure is an item-1
+            # problem. Naming the first words is the one instruction that
+            # targets what the caller actually hears.
+            f" If they put a question to you first, answer that one straight"
+            f" — your first words are the answer itself, never what you are"
+            f" about to do about it."
             f"{_look})")
 
 
@@ -699,10 +893,11 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
                     # The added clauses are the ones its sibling already
                     # carries — own words, a length bound, no narration — and
                     # no wording is supplied. See closing_directive.
-                    "text": "(they asked you something. Answer it, in your "
-                            "own words — ONE short sentence, spoken to them. "
-                            "Do not describe what you are about to say and "
-                            "do not announce anything about the call.)",
+                    #
+                    # THE STRING MOVED TO _ANSWER_THEM so _next_move_item can
+                    # say the same thing one response earlier. Two sites now
+                    # ask for this and they must not drift.
+                    "text": _ANSWER_THEM,
                 }],
             },
         }))

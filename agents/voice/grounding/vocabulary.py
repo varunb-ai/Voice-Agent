@@ -272,6 +272,109 @@ def _ack_opener(text: str) -> str:
     return m.group(1).lower() if m else ""
 
 
+# ── The reaction that happens to open on an acknowledgement ──────────────────
+#
+# WHY THIS EXISTS. _ack_opener is lexical on purpose and must stay that way —
+# it reads what a turn opens with and judges nothing. The judgement lives at
+# its call sites, and there it was wrong in one specific way: the two words
+# this model reaches for when it is handed bad news are "oh" and "i see", and
+# both sit on the content-free opener list. So
+#
+#     _ack_opener("Oh, that's a shame — is there a waitlist?")  ->  'oh'
+#
+# and two of those running fired cadence_directive("ack_run"), which tells the
+# model "no opener in front of it, no okay, no thanks, no got it" for the rest
+# of the call. The one behaviour the call is short of — reacting to what they
+# said before asking the next thing — was being scored as the tic it is the
+# cure for, and steered away from. The counter was the bug, not the prompt.
+#
+# THE AXIS IS RECEIPT vs REACTION, and it is not "does the turn contain a
+# question". Most of the enquiry-bot cadence contains one — "Got it — are they
+# taking new patients?" is the canonical form — so the question mark that
+# discriminates for _housekeeping_turn would gut this. What separates them is
+# WHAT THE TURN IS ABOUT:
+#
+#   receipt   the object is the speech act.  "thanks for letting me know",
+#             "thanks for confirming that" — they are being thanked for having
+#             spoken. Nothing is said about what they said.
+#   reaction  the object is the news.  "that's a shame", "that's good to know",
+#             "I'm sorry to hear that" — a stance on the thing itself.
+#
+# The frame is structural (demonstrative or expletive subject, copula,
+# evaluative complement). The complement set is lexical because English marks
+# appraisal lexically and there is no structure-only test for it; it is kept
+# CLOSED and BOTH-VALENCE so it cannot quietly become a disappointment
+# detector — "that's good to know" and "that's a shame" are the same move.
+#
+# MEASURED ON THE CORPUS, 200 calls / 1,184 non-greeting agent turns: this
+# exempts 10 turns and suppresses 5 of 425 ack runs (1.2%). Every one of the
+# ten is a stance on what the caller said; no form-filling turn is exempted.
+# The population matters more than the rate — a predicate that fired on a
+# tenth of the corpus would be dismantling the guard, not correcting it.
+_REACTED_TO_NEWS = re.compile(
+    r"(?:"
+    # A stance on what they just said. `they` is in the subject list because
+    # "they're not taking anyone" comes back as "oh, they're full then".
+    r"\b(?:that|this|it|they)"
+    r"(?:'s|s'|\s+(?:is|was|are|were|sounds?|seems?|must\s+be))\s+"
+    r"(?:really\s+|so\s+|such\s+|quite\s+|very\s+|a\s+bit\s+|a\s+little\s+|"
+    r"pretty\s+|kind\s+of\s+|too\s+|not\s+)*"
+    r"(?:a\s+|an\s+)?"
+    # BOTH VALENCES, deliberately. Bad news is the case that prompted this and
+    # good news takes the identical shape; a list with only the sad half would
+    # book "Oh, that's good to know" as the tic and leave the asymmetry that
+    # made this wrong in the first place.
+    r"(?:disappoint\w*|shame|pity|bummer|too\s+bad|unfortunate\w*|frustrat\w*|"
+    r"annoying|sad|hard|tough|rough|awkward|worrying|concerning|"
+    r"good|great|helpful|perfect|wonderful|lovely|brilliant|reassuring|relief|"
+    r"encouraging|useful)\b"
+    # First person, about the news rather than about the telling. "sorry to
+    # hear" is the one the model actually reached for on the corpus.
+    r"|\bi(?:'m|\s+am)?\s+(?:so\s+|really\s+|very\s+)?sorry\s+to\s+hear\b"
+    r"|\bsorry\s+to\s+hear\b"
+    r"|\bi\s+(?:was|had\s+been)\s+(?:really\s+)?hoping\b"
+    r"|\bi'?d\s+been\s+hoping\b"
+    r"|\bthat'?s\s+not\s+what\s+i\s+was\s+hoping\b"
+    r")", re.I)
+
+# Uptake that IS the whole turn: an opener, "I see", and nothing else.
+#
+# ANCHORED AT BOTH ENDS, AND THAT IS THE POINT. "Oh, I see." is this model's
+# disappointment marker and reads as one. "Oh, I see — do you know which
+# branch she sees people at?" is the enquiry-bot cadence with the same two
+# words in front of it, and if the exemption were a prefix test it would be a
+# free hiding place for exactly the turn this guard exists to catch. The `$`
+# is what stops that, so it is tested in both directions.
+_BARE_UPTAKE = re.compile(
+    r"^[\s,.!?—–-]*"
+    r"(?:i\s+see|i\s+understand|understood|that\s+makes\s+sense|"
+    r"i\s+get\s+(?:it|that)|i\s+hear\s+you)"
+    r"[\s,.!?—–-]*$", re.I)
+
+
+def _reacted_to_news(text: str) -> bool:
+    """This turn says something about what they told you, not that they told you.
+
+    A turn this is true of is not an instance of the acknowledgement cadence,
+    whatever token it opens on — see the call sites, which drop it from the run
+    in BOTH positions rather than only refusing to close a pair on it.
+
+    NOT A JUDGEMENT OF THE TURN. It says the opener is earned, nothing more. A
+    reaction stapled to an announced ask is still an announced ask, and
+    _announced_an_ask / _narrated_the_reply are untouched by this and still see
+    it — a turn can be exempt here and caught there, which is the same
+    two-faults-one-turn shape _housekeeping_turn already has with this one.
+    """
+    t = _norm_quotes(text or "").strip()
+    if _REACTED_TO_NEWS.search(t):
+        return True
+    # Bare uptake only counts when an acknowledgement is what opened the turn;
+    # this is the ack guard's exemption and has no business judging turns the
+    # ack guard was never going to look at.
+    m = _ACK_OPENER.match(t)
+    return bool(m) and bool(_BARE_UPTAKE.match(t[m.end():]))
+
+
 # Thanking them for taking part in your own process. Not for HELP — for
 # confirming, checking, waiting, holding on: the steps of the workflow.
 _TAKING_PART = re.compile(
@@ -304,6 +407,91 @@ def _housekeeping_turn(text: str) -> bool:
     if "?" in t:
         return False
     return not _spoken_farewell(t)
+
+
+# ── A turn that is acknowledgement and NOTHING else ──────────────────────────
+#
+# WHY THIS IS NOT _housekeeping_turn, and the difference is six live turns.
+# call-20260909-1628: the caller asked "Would you like me to go ahead and add
+# you to the list?", the agent said "Thanks for explaining that." and the close
+# walk counted that as the answer, so the objective completed, the deferral
+# chose "spoken" (which says nothing by design) and the next thing the caller
+# heard was "Alright, take care." The question was never answered.
+#
+# _housekeeping_turn IS true of that turn — the runtime logged it — but it is
+# ALSO true of turns that plainly do answer, because it allows a thanks in
+# front of real content. Measured over the corpus on the 11 housekeeping turns
+# that follow a caller question, 6 of them answer:
+#
+#   answers      "Got it — I'd rather not be added today, but thanks for
+#                 explaining the wait list."           <- declines the offer
+#                "Thanks for checking that — I haven't registered with you
+#                 yet, but my name is Simone Hallam."  <- gives the name
+#   answers not  "Thanks for explaining that."
+#                "Got it—thanks for confirming that."
+#
+# So the test is not "is there a thanks in it" but "is the thanks ALL there
+# is": strip every taking-part clause and every acknowledgement token, and see
+# whether a content word survives. Over 1,402 corpus agent turns this is true
+# of 17 (1.2%), and exactly ONE of those follows a caller question — which is
+# the blast radius of using it below.
+#
+# READ-ONLY REUSE. _ACK_OPENER and _TAKING_PART are not touched; this composes
+# them, so _ack_opener and _housekeeping_turn keep meaning exactly what they
+# meant. _TAKING_PART stops at the verb STEM (explain, confirm, clarif), so the
+# inflection survives its own removal and "ing" read as a content word — hence
+# the \w* here rather than an edit there.
+_THANKS_CLAUSE = re.compile(_TAKING_PART.pattern + r"\w*", re.I)
+
+# What can be left over after an acknowledgement and still carry no answer.
+# Deliberately short: anything not on it counts as content, so the predicate
+# errs towards "this turn DID answer them", which is the safe direction — a
+# false negative leaves today's behaviour, a false positive asks the model to
+# answer something it already answered.
+_ONLY_ACK_LEFTOVER = re.compile(
+    r"^(?:that|this|it|so|much|then|again|for|now|though|anyway|"
+    r"the|a|an|and|but|okay|ok|alright|all right|too|well|"
+    r"appreciate|really|very|thanks|thank|you)$", re.I)
+
+
+def _only_acknowledged(text: str) -> bool:
+    """Was this agent turn purely an acknowledgement, answering nothing?
+
+    NOT A JUDGEMENT OF THE TURN — _housekeeping_turn already counts it as a
+    fault. This answers the narrower question the close walk needs: may this
+    turn be taken as our reply to something they asked? A bare thanks may not.
+
+    A QUESTION IS NEVER THIS, and the guard is load-bearing rather than tidy:
+    "Okay?", "Sure?", "Right?" and "Okay, thanks?" all strip to nothing, so
+    without it a turn that asked them to repeat themselves would count as an
+    empty acknowledgement and the walk would demand an answer the agent was
+    itself waiting for. Checked in both directions.
+
+    THE FAREWELL GUARD IS UNREACHABLE TODAY, and saying so is better than
+    implying it earns its place. Every string _spoken_farewell matches carries
+    farewell content that survives the stripping below — "take care" leaves
+    ["take", "care"], "thanks for your time" leaves ["your", "time"] — so the
+    return above already fires for all of them and no test can distinguish this
+    line's presence from its absence. It is kept as one branch of insurance
+    against _spoken_farewell widening to a bare "Thanks!", which WOULD strip to
+    nothing; if that ever happens this is what stops a goodbye being read as an
+    unanswered turn. Do not write a check for it: there is nothing to check.
+    """
+    t = _norm_quotes(text or "").strip()
+    if not t or "?" in t:
+        return False
+    if _spoken_farewell(t):          # unreachable today - see the docstring
+        return False
+    t = _THANKS_CLAUSE.sub(" ", t)
+    _prev = None
+    while _prev != t:
+        _prev = t
+        t = _ACK_OPENER.sub(" ", t.strip(), count=1)
+    # UNICODE-AWARE, and a Tamil turn in the corpus is why: [a-z]+ matched no
+    # words in it at all, so a turn in another script read as "empty" and this
+    # called it a bare acknowledgement.
+    return not [w for w in re.findall(r"[^\W\d_]+", t, re.UNICODE)
+                if not _ONLY_ACK_LEFTOVER.match(w)]
 
 
 # ── Narrating the reply instead of giving it ─────────────────────────────────
@@ -582,6 +770,28 @@ def cadence_directive(kind: str, want: str = "") -> str:
 # weight - and the standing evidence on this project is ~14 code guards holding
 # on live calls against ~6 prompt rules that did not. The shape of a turn is
 # exactly what a guard can read.
+# The named-but-not-asked object, factored out because TWO patterns now need
+# it and they must not drift: _ANNOUNCED_ASK below, and _PERMISSION_TO_ASK,
+# which decides whether a question mark in the turn is a real question or the
+# announcement wearing one. A copy in the second would be a copy that stopped
+# agreeing with the first the next time an adjective was added.
+#
+# THE ADJECTIVE IS STILL REQUIRED. A bare "a question" matches "that's a good
+# question", which is an answer to them rather than a promise to them, and
+# `good` is deliberately absent from the modifier list.
+#
+# {1,2} RATHER THAN ONE, and that is the second half of this fix.
+# "Could I ask one more quick thing?" stacks two modifiers and so matched
+# nothing at all — not the frame, not the object — while "one more thing" and
+# "one quick thing" both matched. The model is told to vary its wording; a
+# count of exactly one took it at its word, which is the fifth time that shape
+# has been a defect on this project.
+_PLACEHOLDER_ASK = (
+    r"(?:(?:one|a|another)\s+"
+    r"(?:(?:more|last|final|quick|other|small)\s+){1,2}"
+    r"(?:thing|question|detail|point)\b"
+    r"|quick question\b)")
+
 _ANNOUNCED_ASK = re.compile(
     r"\b(?:"
     # First person, about to ask. The slack in the middle is deliberate: the
@@ -598,12 +808,10 @@ _ANNOUNCED_ASK = re.compile(
     # the rest were added on no evidence, and one of them collided with the one
     # sentence the prompt asks the model to say at the end of every call.
     r"(?:ask|check|confirm|clarify|clear up|double[- ]check)\b"
-    # The question named and not asked. THE ADJECTIVE IS REQUIRED: a bare "a
-    # question" matches "that's a good question", which is an answer to them
-    # rather than a promise to them.
-    r"|(?:one|a|another)\s+(?:more|last|final|quick|other|small)\s+"
-    r"(?:thing|question|detail|point)\b"
-    r"|quick question\b"
+    # The question named and not asked. One definition, shared with
+    # _PERMISSION_TO_ASK — see _PLACEHOLDER_ASK for why the adjective is
+    # required and why the count is {1,2}.
+    r"|" + _PLACEHOLDER_ASK +
     # The wrap-up preamble, which is the same failure with a closing flavour -
     # and the more expensive one, because a caller who hears it starts saying
     # goodbye.
@@ -624,6 +832,61 @@ _PADDING_SUBSTANCE = re.compile(r"\d|\b[A-Za-z](?:[-\s][A-Za-z]){2,}\b")
 # nothing simply does not reach the pattern above.
 _PADDING_MAX_WORDS = 30
 
+# ── The announcement that wears a question mark ──────────────────────────────
+#
+# THE HOLE THIS CLOSES. `if "?" in t: return False` sat in front of the whole
+# predicate, so a promise shaped as a question was invisible to it. On
+# call-20260908-1628 the turn was
+#
+#     "Thanks for checking that - can I ask one more thing so I know what to
+#      expect?"
+#
+# and _ANNOUNCED_ASK matched it on its own terms: the object, "one more thing",
+# was already in the pattern. The early return threw the match away before it
+# was consulted. So this is a guard-clause defect, not a vocabulary gap, and
+# the fix belongs in the guard clause.
+#
+# WHY THE OLD GUARD WAS RIGHT ANYWAY, and must survive. In "Let me just ask one
+# more thing - which office is she at?" the question mark belongs to a real
+# question; the announcement is a preamble to an ask that is right there, the
+# caller has something to answer, and nothing is owed. That turn must stay
+# False, so the exemption cannot simply be deleted.
+#
+# THE DISCRIMINATOR IS WHAT THE QUESTION ASKS FOR, and it is the same
+# receipt-vs-substance axis the rest of this module runs on:
+#
+#   permission   "can I ask one more thing?"        the object is a
+#                "could I ask one more quick thing?"  PLACEHOLDER. Answering it
+#                                                    yes still leaves the
+#                                                    caller nothing to say.
+#   a question   "can I get your first and last name?"  the object is the thing
+#                "can I check your availability?"       itself. Answering it
+#                "does Dr. Abel see patients there?"     advances the call.
+#
+# So a modal permission request is only an announcement when its object is
+# _PLACEHOLDER_ASK - the identical test _ANNOUNCED_ASK already applies to the
+# "let me ask one more thing" form. "Can I check your availability?" reaches
+# `check` in the verb list and stops at the object, which is a real one.
+#
+# BOUNDED BY [^?] ON BOTH SIDES, which is load-bearing rather than tidy. It
+# stops one match spanning two questions: "Can I ask one more thing? Which
+# office is she at?" must leave the second question mark standing, or a turn
+# that announced AND asked would read as padding.
+#
+# THE MODAL CLASS, NOT A PHRASE LIST. can/could/may/might is a closed English
+# class and the observed turns used two of them. The circumlocutions - "do you
+# mind if I ask", "would it be okay if I asked" - are the same move and are
+# deliberately NOT here: nothing in 200 calls has said one, and `sort out`
+# entered the verb list above on exactly that kind of reasoning and broke the
+# taught goodbye on the next live call.
+_PERMISSION_TO_ASK = re.compile(
+    r"\b(?:can|could|may|might)\s+(?:i|we)\s+"
+    r"(?:just\s+|quickly\s+|also\s+|maybe\s+|possibly\s+|please\s+){0,2}"
+    r"(?:ask|check|clarify|confirm|double[- ]check)\b"
+    # "you", "with you", "about that" - whatever sits between the verb and the
+    # object, as long as it does not cross into another question.
+    r"[^?]*?" + _PLACEHOLDER_ASK + r"[^?]*\?", re.I)
+
 
 def _announced_an_ask(text: str) -> bool:
     """Did this agent turn promise a question without asking one?
@@ -635,12 +898,20 @@ def _announced_an_ask(text: str) -> bool:
     in the next breath trips this predicate and nothing happens, which is the
     correct outcome and the reason this can afford to be generous.
 
-    A QUESTION MARK ANSWERS IT OUTRIGHT. "Let me just ask one more thing -
-    which office is she at?" is a well-formed turn; the announcement is the
-    preamble to an ask that is right there.
+    A QUESTION MARK ANSWERS IT OUTRIGHT — UNLESS THE QUESTION IS THE
+    ANNOUNCEMENT. "Let me just ask one more thing - which office is she at?" is
+    a well-formed turn and stays False; the announcement is the preamble to an
+    ask that is right there. "Can I ask one more thing?" is the promise itself
+    with a question mark on the end, and answering it yes leaves the caller
+    with nothing to say. See _PERMISSION_TO_ASK for the discriminator.
     """
     t = _norm_quotes(text or "").strip()
-    if not t or "?" in t:
+    if not t:
+        return False
+    # Blank out the permission requests that name no subject of their own, then
+    # ask whether a question mark is still standing. One that is belongs to a
+    # real question and the turn owes nothing.
+    if "?" in _PERMISSION_TO_ASK.sub(" ", t):
         return False
     if len(t.split()) > _PADDING_MAX_WORDS:
         return False
@@ -788,6 +1059,59 @@ def _gave_own_detail(text: str) -> bool:
     """
     t = _norm_quotes(text or "")
     return bool(_GAVE_NAME.search(t) or _GAVE_DOB.search(t))
+
+
+# ── A detail that answers nothing anybody is asking ──────────────────────────
+#
+# call-20260909-1822. The caller asked for two things at once:
+#
+#   18:23:13  caller  "And by that way, can you give your full name and your
+#                      date of birth?"
+#   18:23:16  agent   "... my name is Ingrid Bennett."      <- name only
+#   18:23:30  caller  "Okay, Bennett. Okay, let me confirm the doctor
+#                      availability now."                   <- moved on
+#   18:23:31  agent   "Okay, I'll wait."  +  "November 3, 2000."
+#
+# The date of birth arrived as the SECOND item of a two-item response, on a
+# turn where nobody had asked for anything, fourteen seconds after the request
+# it belonged to. The release gate let it through because its only question is
+# "is this a repeat of what we just said?" — and a date of birth is not a
+# repeat of "Okay, I'll wait."
+#
+# A HALF-ANSWERED REQUEST IS NOT A STANDING PERMISSION. Nothing in the runtime
+# tracks the parts of a multi-part request, and nothing needs to: the rule is
+# not "remember which half is owed" but "a detail is speakable only while
+# somebody is asking for it". That is decidable from the newest caller turn
+# alone and needs no new state.
+#
+# WHY unsolicited_pii_dumps DID NOT SEE IT. That metric asks whether PII was
+# given with no prior ask ANYWHERE in the call — one request licenses every
+# later turn — so a stale answer is invisible to it by construction. It read
+# null on this call.
+_CALLER_ASKED_US = re.compile(
+    r"\?"                                              # any question at all
+    r"|\b(?:give|tell|spell|repeat)\s+(?:me|us)\b"     # imperative request
+    r"|\bi(?:'ll|\s+will)?\s+need\s+your\b", re.I)
+
+
+def _stale_own_detail(dropped: str, newest_caller: str) -> bool:
+    """A personal detail offered on a turn where nobody asked for one.
+
+    SCOPED TO OUR OWN PII, and deliberately not to substance in general. The
+    release path exists so the caller HEARS what the model split across two
+    items, and the bad-news shape depends on it: "That leaves me without
+    anyone I can see there" + "is there a waiting list?" answers a caller turn
+    that is a statement, not a question. A rule keyed on "did they just ask
+    something" would suppress that. Keyed on _gave_own_detail it cannot: a
+    waiting-list question is not a name or a date of birth.
+
+    FIELD-AGNOSTIC. _gave_own_detail is keyed on the name frame and on
+    synthetic_identity's own year range, not on any persona's actual values,
+    so this names nothing about Template 4.
+    """
+    if not _gave_own_detail(dropped or ""):
+        return False
+    return not _CALLER_ASKED_US.search(_norm_quotes(newest_caller or ""))
 
 
 def _detail_left_bare(text: str, prev_agent: str,
@@ -1188,10 +1512,13 @@ __all__ = [
     "_ACK_OPENER",
     "_LEAKED_INSTRUCTIONS",
     "_NARRATED_REPLY",
+    "_REACTED_TO_NEWS",
+    "_BARE_UPTAKE",
     "_SELF_ID",
     "_SELF_ID_WEAK",
     "_SPOKEN_FAREWELL",
     "_TAKING_PART",
+    "_THANKS_CLAUSE",
     "_WANTS_IT_FROM_US",
     "_STREET_ADDRESS",
     "_STREET_SUFFIX",
@@ -1200,14 +1527,17 @@ __all__ = [
     "_is_bare_hint_word",
     "_NOT_A_PATIENT",
     "_ack_opener",
+    "_reacted_to_news",
     "_agent_stalled",
     "_detail_left_bare",
     "_housekeeping_turn",
+    "_only_acknowledged",
     "_leaked_the_instructions",
     "_stapled_own_detail",
     "_narrated_the_reply",
     "_gave_name_and_dob",
     "_gave_own_detail",
+    "_stale_own_detail",
     "_said_not_a_patient",
     "_announced_an_ask",
     "_spoken_farewell",
