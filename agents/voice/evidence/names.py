@@ -141,6 +141,83 @@ def _spelled_out(text: str, surname: str) -> bool:
 
 
 
+# ── The natural confirmation, as proof the repair was performed ──────────────
+#
+# WHY THIS EXISTS. `_name_spelled_at` is a SCAN BARRIER and the letters were
+# only ever its evidence: a request the model ignored must not advance a safety
+# barrier, and `_spelled_out` is trivially detectable. Measured over 100
+# patient_discovery calls, that cost 29 spelling turns in 28% of calls -- and
+# the receptionist never used the letters once. Of 28 replies to a spelt name,
+# 25 were a plain yes/no and 0 engaged with the spelling. The letters were
+# proof for US; the patient paid for them by sounding like a data-entry clerk.
+#
+# So the proof widens and the property does not: a natural confirmation of OUR
+# surname is performance too. Spelling stays valid -- a model that still spells
+# is not broken by this.
+#
+# TWO CONDITIONS, BOTH REQUIRED, and the surname alone is never enough. This
+# script's own greeting is "any chance this is Dr. <surname>'s office?" and its
+# identity question is "have I reached Dr. <surname>?" -- a bare
+# "Dr. <surname>?" tag matched four of those in the corpus on the first draft
+# and would have advanced the barrier on the opening line.
+_CONFIRM_MISHEARD = (
+    r"did i hear|did you say|i may have heard|i might have heard|"
+    r"heard (?:that|it) wrong|heard you right|make sure i heard|"
+    r"i didn'?t catch|didn'?t quite catch|misheard")
+# An ASSERTION of the name plus a question about the assertion. Generic
+# certainty-seeking is not one: "just to be sure I've got the right place, have
+# I reached Dr. Abel" is a greeting and was in the first draft's positives.
+_CONFIRM_TAG = (
+    r"is that (?:dr\.?|doctor)?\s*{s}\b|"
+    r"is it (?:dr\.?|doctor)?\s*{s}\b|"
+    r"{s}\b[^.?!]{{0,20}}(?:is that right|is that correct|"
+    r"have i got that right|right\?|correct\?)")
+# The mention family, checked FIRST: about the practice, not about the name.
+_CONFIRM_PRACTICE = (
+    r"{s}'?s? (?:office|practice|clinic|surgery)|"
+    r"any chance this is|have i reached|is this (?:dr\.?|doctor)|"
+    r"do you have (?:dr\.?|doctor)?\s*{s}|"
+    r"calling about|asking about|looking for|"
+    r"which (?:office|site|location)|see (?:people|patients)")
+
+
+def _confirmed_ours(text: str, ours: str) -> bool:
+    """Did this agent turn confirm OUR surname as a mishearing repair?"""
+    if not ours:
+        return False
+    t = _norm_quotes(text or "").lower()
+    s = re.escape(ours.lower())
+    if not re.search(r"\b" + s + r"\b", t):
+        return False
+    if re.search(_CONFIRM_PRACTICE.format(s=s), t):
+        return False
+    if re.search(_CONFIRM_MISHEARD, t):
+        return True
+    return bool(re.search(_CONFIRM_TAG.format(s=s), t))
+
+
+def _performed_name_repair(text: str, sess: "RealtimeSession") -> bool:
+    """Proof the mismatch repair was actually performed, spelt or spoken.
+
+    GATED ON THE ACTIVE MISMATCH STATE, and that is an intentional behaviour
+    change rather than a refactor. `wrong_doctor_named` is written ONLY by
+    `_name_mismatch` -- the path that refuses a save and asks for the repair.
+    The passive `_note_name_heard` does not set it (it runs after identity is
+    settled and asks nothing), and a near-miss never reaches either, because
+    `_wrong_doctor_named` returns "" and no mismatch is recorded.
+    So neither proof can move the barrier before a repair was asked for.
+
+    WHAT IT COSTS, measured rather than assumed: 2 spelling turns in 100 calls
+    happened with no mismatch on the call at all -- both the prompt's example
+    line recited verbatim -- and on neither did anything depend on the barrier
+    moving. No real repair is stranded by this gate.
+    """
+    if not sess.memory.get("wrong_doctor_named"):
+        return False
+    ours = _our_surname(sess)
+    return _spelled_out(text, ours) or _confirmed_ours(text, ours)
+
+
 def _wrong_doctor_named(text: str, sess: "RealtimeSession") -> str:
     """A surname in this turn that is NOT the doctor on record. "" if fine.
 
@@ -305,7 +382,9 @@ def _note_name_heard(sess: "RealtimeSession", said: str) -> str:
 
 
 __all__ = [
+    "_confirmed_ours",
     "_name_mismatch",
+    "_performed_name_repair",
     "_near_miss",
     "_note_name_heard",
     "_our_surname",

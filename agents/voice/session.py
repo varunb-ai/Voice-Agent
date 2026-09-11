@@ -263,6 +263,23 @@ class RealtimeSession:
         # response.done handler, acted on by the watchdog — the handler must not
         # sleep, because sleeping there stops the event pump.
         self._goodbye_retry_at: Optional[float] = None
+        # ── A CLOSING DIRECTIVE HAS BEEN ASKED FOR ──────────────────────
+        # NOT the same fact as `done`. `done` is set by the save that ends
+        # the objective, BEFORE any goodbye is requested, and every close
+        # site fires *because* it is True — so it cannot also mean 'the
+        # goodbye is handled'. Nothing recorded that second fact, and
+        # `_close_or_continue` is re-entered on every tool call, so a
+        # second tool call after a terminal save injected a SECOND closing
+        # directive and created a second response. call-20260911-1712:
+        # "Got it, thanks for telling me." -> "Alright, I understand-let
+        # me respond to that." -> "Okay, I'll try another number.", three
+        # response ids for one wrong-number hangup.
+        #
+        # THE BARGE-IN RETRY DOES NOT TOUCH THIS, and that is why it needs
+        # no reset: turns.py's retry injects no item at all. The directive
+        # is already in the conversation and the retry only asks for
+        # another response against it.
+        self._close_requested: bool = False
         # Interruption repair. When the agent was last truncated, and how much
         # of its turn the caller actually heard. The next caller turn is read
         # against these rather than classified on its words alone — "Hello"
@@ -354,6 +371,25 @@ class RealtimeSession:
         self._release_item: str = ""
         # Second items that were held, judged NEW SUBSTANCE, and played.
         self.released_second_items: list[dict] = []
+        # EVERY spoken item the model produced, in order, with what became of
+        # it: spoken | cancelled | held:duplicate | held:stale_detail |
+        # held:released | held:owed | held:abandoned.
+        #
+        # THE RAW OUTPUT, WHICH NOTHING ELSE KEEPS. `transcript` holds the
+        # turns the caller heard; the two lists above hold fragments of the
+        # ones they did not. Neither can answer "what did the model generate
+        # for this response, before we decided what to do with it" — and that
+        # is the question a narration investigation has to start from, because
+        # without it "the runtime introduced this" can only ever be inferred.
+        self.raw_items: list[dict] = []
+        # The field the standing post-save steer named. Read by
+        # _steer_went_stale, which anchors on `_field_ask_at` for the position
+        # and is the only thing that clears this.
+        self._steer_field: str = ""
+        # One row each time a steer was overtaken by the caller answering it.
+        # Non-empty here is the population the narration investigation could
+        # only estimate: turns where the model held a satisfied imperative.
+        self.stale_steers: list[dict] = []
         # When the caller stopped speaking (monotonic), cleared by the first
         # audio delta of the reply. See note_reply_latency.
         self._caller_stopped_at: Optional[float] = None
@@ -558,6 +594,14 @@ class RealtimeSession:
         # and re-injecting it every half-second tells the model the same thing
         # five times.
         self._padding_directive_sent: bool = False
+        # WHICH predicate armed the debt. Both shapes leave the caller with
+        # nothing to answer and both are chased the same way, but they are
+        # different findings and `tool_call_padding` is read to tell them
+        # apart: "announced" is the model promising a question and firing a
+        # tool instead, "housekeeping" is a turn spent thanking them. One list
+        # with no reason on the rows would say the first happened when the
+        # second did.
+        self._padding_reason: str = "announced"
         # Every announcement that had to be chased, with what was said and how
         # long the line was silent first. Non-empty is dead air the caller sat
         # through — the measurement the padding fix is judged on, and the
@@ -617,6 +661,15 @@ class RealtimeSession:
         # heard it. False at response.created, True at the first delta.
         self._response_audio_started: bool = False
         self._response_created_at: float = 0.0
+        # THE JOIN KEY, and it is the whole of Task 3. raw_items records what
+        # the model produced; acks_left_alone / rejection_cancels /
+        # empty_turn_cancels record what we cancelled. Until now neither
+        # carried anything the other could be matched on, so "Pass A cancelled
+        # an item containing the name and DOB" and "the response generated for
+        # the name/DOB request was cancelled" were two statements that could
+        # not be shown to be about the same response. Stamped at
+        # response.created, read by both.
+        self._response_id: str = ""
         # Set when a response was cancelled because the transcript that
         # caused it was rejected. Read by _handle_agent_transcript, which
         # must skip that response's transcript exactly as it skips a
@@ -627,6 +680,24 @@ class RealtimeSession:
         # whether cancelling is enough or response creation has to be
         # taken off OpenAI's VAD entirely.
         self.rejection_cancels: list = []
+        # Turns where the caller only acknowledged and the reply OpenAI's VAD
+        # had already opened was cancelled, leaving them the floor. A SEPARATE
+        # LIST from rejection_cancels even though both run through
+        # _suppress_reply_to: that one means the transcript was thrown away,
+        # and these turns are KEPT - the words were real, they simply were not
+        # an answer. Filing them together would tell whoever reads the artifact
+        # that the caller had not been heard, which is the opposite of what
+        # happened. `outcome` carries the same race verdict either way.
+        self.acks_left_alone: list[dict] = []
+        # Turns where OpenAI's VAD opened a reply and transcription returned
+        # nothing at all, so the reply was cancelled. A THIRD list rather than
+        # a flag on either of the others: rejection_cancels means the words
+        # were thrown away, acks_left_alone means the words were kept and were
+        # not an answer, and this means there were no words. Non-empty here
+        # against a caller who was plainly talking is a transcription problem,
+        # not a conversation one, and filing it apart is what keeps that
+        # readable.
+        self.empty_turn_cancels: list[dict] = []
         # Why responses failed. Seven failed on call-20260819-2216 and the
         # reason was in every event, unread — so the dead air they caused was
         # diagnosed by guesswork twice before anyone read the field.
@@ -1566,6 +1637,34 @@ class RealtimeSession:
             # is the measurement that decides whether cancelling is
             # enough or response creation has to come off OpenAI's VAD.
             "rejection_cancels": self.rejection_cancels or None,
+            # Bare acknowledgements the agent declined to answer, so the
+            # question it had already asked stayed the caller's to answer.
+            # Read `outcome`: "cancelled before any audio" is the guard
+            # working, "TOO LATE" is the caller hearing the question twice.
+            "acks_left_alone": self.acks_left_alone or None,
+            # WHAT THE BED ACTUALLY DID, as against what it was set to above.
+            # `resyncs` is the one that matters: a resync ABANDONS the frames
+            # the pump fell behind by, so it is the only mechanism in the mixer
+            # that can put a real hole in the bed — and it used to live in a
+            # local and be thrown away. None when ambience was off, so the key
+            # says "there was no bed" rather than "the bed did nothing".
+            "ambience": ({
+                "frames_sent":    self.ambience.frames_sent,
+                "seconds":        round(self.ambience.frames_sent * 0.020, 1),
+                "voice_frames":   self.ambience.voice_frames,
+                # The share of the call the bed spent ducked. Measured from the
+                # ducker's own block counter rather than from the audio, so it
+                # is the decision rather than an inference about it.
+                "ducked_share":   (round(self.ambience.ducker.ducked_blocks
+                                         / max(self.ambience.frames_sent * 10, 1), 3)),
+                "resyncs":        self.ambience.resyncs,
+                "resync_worst_s": round(self.ambience.resync_worst_s, 2),
+            } if self.ambience is not None else None),
+            # Replies cancelled because nothing was transcribed for the turn
+            # that provoked them. Read `outcome`: "cancelled before any audio"
+            # is the guard working, "TOO LATE" is the caller hearing the model
+            # answer a turn that did not exist.
+            "empty_turn_cancels": self.empty_turn_cancels or None,
             # Second-spoken-item audio withheld before it reached the caller.
             # Non-null here means the model tried to talk over itself. Read the
             # `verdict` on each, not the count: "duplicate" is the guard
@@ -1576,6 +1675,14 @@ class RealtimeSession:
             # they carried substance the spoken half did not. Non-empty here is
             # the mute declining to delete an answer.
             "released_second_items": self.released_second_items or None,
+            # Raw per-item model output with its fate. Read the `verdict`
+            # column: a narrated item marked "spoken" was the model's own
+            # choice, one marked "held:released" was ours to let through.
+            "raw_items": self.raw_items or None,
+            # Steers the caller overtook before the model could act on them.
+            # `still` names what was unknown at that moment; null means the
+            # objective was finished and the close owned the turn instead.
+            "stale_steers": self.stale_steers or None,
             "volunteered_answers": self.volunteered_answers or None,
             # Substance the caller was owed and the recovery gave up on, with
             # the cap that stopped it. Non-null is always a defect on the call.
@@ -1746,6 +1853,17 @@ class RealtimeSession:
                 "voice":          settings.realtime_voice,
                 "noise_reduction": settings.realtime_noise_reduction,
                 "input_format":   settings.realtime_audio_format,
+                # THE BED, WHICH THIS BLOCK NEVER NAMED. Reading a call record
+                # could not tell you whether ambience was on, let alone at what
+                # level — so a report that the bed sounded wrong had nothing to
+                # check it against and every question started from the source.
+                # Recorded beside the other things the call ran with.
+                "ambience":          settings.realtime_ambience,
+                "ambience_db":       settings.realtime_ambience_db,
+                "ambience_duck_db":  settings.realtime_ambience_duck_db,
+                "ambience_hold_ms":  settings.realtime_ambience_hold_ms,
+                "ambience_attack_ms": settings.realtime_ambience_attack_ms,
+                "ambience_release_ms": settings.realtime_ambience_release_ms,
                 # THE EFFECTIVE OUTPUT FORMAT, NOT THE CONFIGURED ONE. The whole
                 # case for the pcm leg is that it is falsifiable by reverting one
                 # value and comparing two calls — and that comparison reads this

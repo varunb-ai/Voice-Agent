@@ -117,7 +117,10 @@ def _warmup() -> None:
 
     if settings.use_realtime:
         # Realtime API handles STT+LLM+TTS in one WebSocket — nothing to pre-load locally.
-        print("  Mode     : OpenAI Realtime API (gpt-realtime-2)")
+        # READ, NOT HARDCODED. This banner said "gpt-realtime-2" literally,
+        # so a model A/B would print the wrong model on every run of the arm
+        # being tested — and the banner is what ends up in a screenshot.
+        print(f"  Mode     : OpenAI Realtime API ({settings.realtime_model})")
         # Measured, not aspirational. Agent response latency across live
         # calls: 3.43s, 2.83s, 1.93s, 2.15s. The banner used to claim
         # "~300-500ms | ~$0.06/min", which our own measurements contradict —

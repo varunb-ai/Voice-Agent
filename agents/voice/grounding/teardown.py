@@ -33,6 +33,7 @@ from agents.voice.evidence import (
 from agents.voice.objectives import (
     Outcome,
     describe as _describe_objective,
+    sentences,
 )
 from agents.voice.tools import run_tool
 from agents.voice.grounding.vocabulary import (
@@ -89,7 +90,46 @@ def _their_open_question(sess: "RealtimeSession") -> str:
                 continue
             return ""                 # we have spoken since; nothing owed
         if _t.role == "caller":
-            return _txt if _txt.endswith("?") else ""
+            # ── THE LAST SUBSTANTIVE SENTENCE, NOT THE TURN ────────────────
+            # This read `_txt.endswith("?")`, so a real question with anything
+            # after it was invisible. call-20260910-2155 at 21:58:42:
+            #
+            #   "Okay, and your queue number will be 21st, okay?
+            #    Can I add you in the queue? Yeah."
+            #
+            # — a direct question to the patient with a trailing "Yeah." The
+            # walk returned "", so no deferral fired, and the objective-complete
+            # close asked for a goodbye 3 seconds later with the offer still on
+            # the table. Measured: 18 of the 202 caller turns in the corpus
+            # that contain a question mark do not END on one (8.9%), and they
+            # are disproportionately the two shapes that matter here — the
+            # waitlist offer and the intake request.
+            #
+            # SENTENCES BECAUSE THE OTHER HALF OF THIS DECISION ALREADY USES
+            # THEM. _invites_our_business splits to the last sentence before
+            # applying _WH_INVITE, and its own comment says why ("the
+            # invitation always arrives behind an answer"). One decision was
+            # being made in two different units, and the turn-level half is the
+            # one that failed.
+            #
+            # _only_acknowledged IS THE SAME PREDICATE THIS FUNCTION ALREADY
+            # USES on the agent side four lines up, for the same reason there:
+            # a bare "Yeah." is a continuation, not a subject change. Anything
+            # substantive that is NOT a question still stops the walk and
+            # returns "" — a caller who asks and then answers is not owed a
+            # reply to the question they moved past.
+            #
+            # RETURNS THE SENTENCE, NOT THE TURN, and that is what PRESERVES
+            # the _invites_our_business gate rather than bypassing it: that
+            # predicate early-returns False on anything not ending in "?", so
+            # handing it the whole turn would have made every trailing-token
+            # question look like a non-invitation and routed "What can I help
+            # you with? Yeah." to the answer path.
+            for _s in reversed(sentences(_txt)):
+                if _only_acknowledged(_s):
+                    continue
+                return _s if _s.endswith("?") else ""
+            return ""
     return ""
 
 
@@ -140,10 +180,30 @@ def _invites_our_business(text: str) -> bool:
 # cannot drift. That call is also why it names a single move: "answer briefly,
 # then close warmly" came back as "let me give you a quick answer, then I'll be
 # on my way", a first-person paraphrase of the sequence.
+# N1, 2026-09-10. THE PROHIBITION WAS THE NARRATION. This carried
+# "Do not describe what you are about to say and do not announce anything
+# about the call." — and on call-20260910-2155 at 21:57:22 the turn this
+# directive produced was
+#
+#     "Let me answer that for you now."
+#
+# which is a description of what it was about to say, in the words the ban
+# supplied. The path is confirmed, not inferred: _their_open_question returned
+# the caller's DOB request and _invites_our_business was False, so this string
+# is what the model was holding.
+#
+# ITS TWIN ALREADY DELETED THE SAME CLAUSE. _next_move_item dropped "never what
+# you are about to do about it" earlier the same day, and the reasoning is
+# recorded there — "A ban on describing what you are about to do hands over the
+# words 'what you are about to do'". The deletion was applied to one of the two
+# directives and not the other; this is the other one.
+#
+# NOTHING REPLACES IT. Six prohibitions against this class have measured null
+# on this project, and the corpus records directive wording being spoken back
+# 67 times in 470 turns. What is left is the speech act and its length, which
+# is what the model has to perform rather than report.
 _ANSWER_THEM = ("(they asked you something. Answer it, in your own words — "
-                "ONE short sentence, spoken to them. Do not describe what you "
-                "are about to say and do not announce anything about the "
-                "call.)")
+                "ONE short sentence, spoken to them.)")
 
 
 async def _create_response(oai_ws, sess: "RealtimeSession", *, why: str,
@@ -572,6 +632,8 @@ def _next_move_item(sess: "RealtimeSession", name: str,
     # ordinary path uses. No new response, no new timer, no earlier create.
     _asked = _their_open_question(sess)
     if _asked and not _invites_our_business(_asked):
+        # Not a field steer, so nothing is left standing about a field.
+        sess._steer_field = ""
         return _ANSWER_THEM
     objective = getattr(sess, "objective", None)
     if objective is None:
@@ -634,6 +696,15 @@ def _next_move_item(sess: "RealtimeSession", name: str,
     # fragment, not a sentence, explicitly marked as not-for-this-turn. If a
     # live call reproduces "then I'll ask about X", this clause is the first
     # suspect and reverting it is one line.
+    # WHICH FIELD THIS STEER IS ABOUT, recorded so the caller-side handler can
+    # tell when it has been overtaken. This directive is injected at turn N's
+    # save and read at turn N+1, and in between the caller may simply answer
+    # it — after which it is a standing imperative the model must NOT obey and
+    # has no replacement for. See _steer_went_stale.
+    _named = next((f for f in objective.fields
+                   if f.is_required(objective, sess.memory)
+                   and not f.present(sess.memory)), None)
+    sess._steer_field = _named.name if _named is not None else ""
     _rest = [f.label for f in objective.fields
              if f.is_required(objective, sess.memory)
              and not f.present(sess.memory)]
@@ -682,8 +753,60 @@ def _next_move_item(sess: "RealtimeSession", name: str,
         # is the timing one, not the ban.
         _look = (f" Once they answer it, the same goes for {_rest[1]} — in the"
                  f" turn their answer arrives, not a turn later.")
-    return (f"(system: ask about {nxt} now, in your own words, in this "
-            f"turn. Any reaction rides in the same breath as the question."
+    # ── THE VERB WAS THE LEAK (call-20260910-1108) ──────────────────────────
+    # This read "ask about {nxt} now, in your own words, in this turn." Three
+    # live turns came back narrating the instruction instead of following it:
+    #
+    #   "Alright, I'll answer that and then ask about the office."
+    #   "Thanks for confirming that. Let me ask the next thing so I can tell
+    #    if this will actually work for me."
+    #   "Okay, thanks - let me think this through so I can ask just what
+    #    matters next."
+    #
+    # Every one contains `ask`, and the first is this directive's two clauses
+    # recombined in this directive's own order - answer theirs, then ask about
+    # {nxt}. That is the fourth recorded time this function's wording has been
+    # spoken aloud (-1854 "then I'll ask about new patients"; -1628 three calls
+    # running; -1249 "answer briefly, then close warmly" -> "let me give you a
+    # quick answer, then I'll be on my way").
+    #
+    # WHY THE VERB AND NOT THE FIELD. "ask about X" names the SPEECH ACT, and a
+    # speech act named in an instruction is a thing the model can either
+    # perform or report - reporting is what a plan-shaped sentence invites, and
+    # it is the cheaper of the two. The field name is not the hazard: {nxt}
+    # appears in the good turns too ("Which office does Dr. Browne see patients
+    # at?"). What has to go is the description of the act.
+    #
+    # SO THE FRAME THAT ALREADY WORKS IS EXTENDED RATHER THAN A RULE ADDED.
+    # "your first words are the answer itself" has been on the answer half
+    # since call-20260909-1822 and has never been reported spoken; it names a
+    # SLOT - what the caller hears first - rather than an act. The ask half now
+    # uses the same frame. Nothing new is forbidden and no phrase is supplied:
+    # this is a deletion of the two clauses the corpus records being lifted,
+    # not a seventh prohibition against a class where six have measured null.
+    #
+    # "never what you are about to do about it" IS GONE FOR THE SAME REASON THE
+    # LOOKAHEAD'S BAN WENT. That clause named the failure, and the paragraph
+    # above the lookahead already records what naming it costs: "THE
+    # PROHIBITION WAS THE ANNOUNCEMENT". A ban on describing what you are about
+    # to do hands over the words "what you are about to do", which is precisely
+    # the shape of all three turns above.
+    #
+    # THE LOOKAHEAD MOVES AHEAD OF THE PRECEDENCE CLAUSE, and only its position
+    # changes. "Once they answer it" needs {nxt} as the antecedent of "it";
+    # with the precedence clause in between, "it" would reach for their
+    # question instead. Its own text is untouched, and it now inherits the
+    # first-words frame rather than an ask imperative.
+    # OPENS ON WORDS, NOT ON {nxt}, and that is not a style choice. The
+    # directive audit derives its population with r'"\(system: ([a-z][a-z ]{9,})'
+    # — a directive whose first character after the opening marker is an
+    # interpolation
+    # is counted as declared and never found, and the check that exists to
+    # catch a new directive the day it lands reports 40 against 41 instead.
+    return (f"(system: what is still missing is {nxt}, and this is the turn "
+            f"it lands in. Your first words are the question itself, in your "
+            f"own words "
+            f"- a reaction can ride in front of them in the same breath."
             # ── THEIRS COMES FIRST, AND UNCONDITIONALLY (call-20260909-1822) ─
             # 18:23:13 the caller broke into the flow: "And by that way, can
             # you give your full name and your date of birth?" The agent said
@@ -721,10 +844,9 @@ def _next_move_item(sess: "RealtimeSession", name: str,
             # FIRST WORDS, not "answer briefly": the failure is an item-1
             # problem. Naming the first words is the one instruction that
             # targets what the caller actually hears.
-            f" If they put a question to you first, answer that one straight"
-            f" — your first words are the answer itself, never what you are"
-            f" about to do about it."
-            f"{_look})")
+            f"{_look}"
+            f" If they have just put a question to you, your first words are"
+            f" the answer to that instead.)")
 
 
 async def _close_or_continue(sess: "RealtimeSession", oai_ws,
@@ -766,6 +888,15 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
     # by an earlier response, which is the bug that shape exists to stop.
     _closing_sent: Optional[bool] = None
     _pending_response_create: Optional[bool] = None
+    if sess.done and sess._close_requested:
+        # ── ALREADY CLOSING. The tool is still answered by the caller of
+        # this function; what is refused here is a SECOND goodbye. Both
+        # returns stay None so the event loop keeps the closing flag the
+        # first close set -- False would clobber it, which is the shape
+        # the None default below exists to prevent.
+        log.info("[Realtime] close already requested - %s files its "
+                 "result and asks for nothing", name or "tool")
+        return None, None
     if sess.done:
         # "_response_had_audio" was being read as "the agent said
         # goodbye", so the call hung up on whatever it happened to
@@ -839,6 +970,7 @@ async def _close_or_continue(sess: "RealtimeSession", oai_ws,
             await _create_response(oai_ws, sess, why="closing goodbye",
                                    allow_when_done=True,
                                    allow_when_active=True)
+            sess._close_requested = True
             _closing_sent = True  # skip tool-call response.done, close on closing's
     elif _close_deferred == "theirs":
         # THEY ASKED US SOMETHING AND WE OWE THEM AN ANSWER, so this is the one
@@ -1060,9 +1192,12 @@ async def _resolve_deferred_save(sess: "RealtimeSession", oai_ws) -> None:
 
 
 __all__ = [
+    "_ANSWER_THEM",
     "_close_or_continue",
     "_create_response",
     "_decide_close",
+    "_invites_our_business",
     "_resolve_deferred_save",
+    "_their_open_question",
     "log",
 ]

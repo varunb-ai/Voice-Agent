@@ -26,8 +26,8 @@ if TYPE_CHECKING:                    # pragma: no cover - typing only
 
 from agents.voice import backchannel
 from agents.voice.audio import _audio_carried_nothing, _SILENT_AUDIO_RMS, _audio_was_silent
-from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, is_hard_refusal, _is_location_ask, _note_name_heard, _our_surname, _owed_key, _owed_refusal, _spell_out, _spelled_out
-from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _gave_name_and_dob, _gave_own_detail, _said_not_a_patient, _stale_own_detail, _detail_left_bare, _spoken_farewell, _announced_an_ask, is_hold_request, _create_response, closing_directive, _RETIRED_VOCAB_TEXT, _resolve_deferred_save, _ack_opener, _reacted_to_news, _housekeeping_turn, _narrated_the_reply, _leaked_the_instructions, _stapled_own_detail, cadence_directive
+from agents.voice.evidence import _UNGROUNDED_STOPWORDS, _invites_continuation, _caller_ends_call, _caller_is_vetting, _caller_speech_level, _drop_lost_substance, _is_ask_for, is_hard_refusal, _is_location_ask, _note_name_heard, _our_surname, _performed_name_repair, _owed_key, _owed_refusal, _spell_out, _spelled_out
+from agents.voice.grounding import _objective_of, _IDENTITY_ASK, _claims_saved, _gave_name_and_dob, _gave_own_detail, _only_acknowledged, _said_not_a_patient, _stale_own_detail, _detail_left_bare, _spoken_farewell, _announced_an_ask, is_hold_request, _create_response, closing_directive, _RETIRED_VOCAB_TEXT, _resolve_deferred_save, _ack_opener, _reacted_to_news, _housekeeping_turn, _narrated_the_reply, workflow_narration, _leaked_the_instructions, _stapled_own_detail, cadence_directive
 from agents.voice.objectives import AnswerKind, clauses as _clauses, expected_answers, norm_quotes as _norm_quotes, sentences as _sentences
 from agents.voice.objectives import states_in_its_own_right
 from core.audio_utils import _mulaw_decode
@@ -59,10 +59,36 @@ log = logging.getLogger(__name__)
 # a yes/no field, and no template can change it because the judgement is made
 # here, on the words alone. It now depends on what was ASKED — see
 # objectives.expected_answers.
-_ACK_WORDS = (r"hello|hullo|hi|hey|ok|okay|sure|right|alright|"
-              r"mm+|hm+|uh+|um+|er+|ah+|oh+|go ahead|that'?s fine|i see|fine|"
-              r"sorry|pardon|come again|say again|what|huh|"
-              r"are you there|still there|can you hear me")
+# SPLIT AGAIN 2026-09-10, and this one is about SPEAKING, not about
+# answering. The list above is judged as one thing because one question is
+# being asked of it — did this turn carry an answer — and for that the three
+# shapes below are interchangeable. For the question `_only_marked_time` asks,
+# they are opposites: one of them means the caller is waiting on us.
+#
+# The caller marking that they heard, and nothing more. Nobody is owed a
+# reply to these; the turn is still theirs.
+_ACK_MARKERS = (r"ok|okay|sure|right|alright|"
+                r"mm+|hm+|uh+|um+|er+|ah+|oh+|that'?s fine|i see|fine")
+
+# ...and the rest of the old list, which is NOT the same thing. A greeting
+# arriving mid-call is the caller checking the line is alive; "sorry",
+# "pardon", "say again", "what" are requests to repeat; "go ahead" is an
+# invitation to speak. Every one of them OWES the caller speech, and the only
+# thing they share with the markers above is carrying no answer. Measured over
+# 211 call artifacts: of the 51 caller turns that follow an objective ask
+# carrying no answer, 11 are these — 9 greetings, one "hello sorry?", one
+# "sure, sure. go ahead." Going quiet on any of them is the failure this split
+# exists to prevent.
+_ACK_REPAIRS = (r"hello|hullo|hi|hey|go ahead|"
+                r"sorry|pardon|come again|say again|what|huh|"
+                r"are you there|still there|can you hear me")
+
+# THE UNION IS UNCHANGED, and the suite proves it rather than asserting it:
+# every caller turn in the corpus is re-judged through both spellings and the
+# verdicts must match. Alternation order does not change the language matched
+# by an anchored `(?:...)+$`, but this repo has been bitten by a "behaviour
+# preserving" refactor before, so it is checked, not reasoned about.
+_ACK_WORDS = rf"{_ACK_MARKERS}|{_ACK_REPAIRS}"
 
 # ACKNOWLEDGEMENT ONLY, and these stay filler even when a yes/no answer is
 # what we asked for. "Mm-hm" to "are you accepting new patients?" is an
@@ -147,6 +173,65 @@ def _caller_answered_since(sess: "RealtimeSession", since_idx: int) -> bool:
                 and not _is_filler_reply(t.text, sess.agent_name, expects)):
             return True
     return False
+
+# The repair/greeting/invitation half of _ACK_WORDS, searched rather than
+# matched: _only_marked_time is only ever asked about a turn `_is_filler_reply`
+# has already judged to be nothing but acknowledgement tokens, so finding one
+# of these anywhere in it means the turn IS one.
+_ACK_REPAIR_REPLY = re.compile(rf"\b(?:{_ACK_REPAIRS})\b", re.I)
+
+
+def _only_marked_time(text: str, agent_name: str = "",
+                      expects: Optional[frozenset] = None) -> bool:
+    """They acknowledged and said nothing else — so say nothing back.
+
+    A STRICT SUBSET of `_is_filler_reply`, and the subset is the whole point.
+    That predicate answers "did this turn carry an answer", which is the right
+    question for the ask budget and the wrong one for deciding whether to
+    SPEAK. It returns True for "Sorry?" and "Are you there?" — turns that carry
+    no answer and are exactly the ones that must draw one.
+
+    So this is composed ON it rather than replacing it: whatever it decides
+    about substance stands, including the `expects` rule that makes a bare
+    "Yeah." an ANSWER to a yes/no field and filler to a location ask. This adds
+    one condition — that the acknowledgement is not also a request for speech.
+    """
+    if not _is_filler_reply(text, agent_name, expects):
+        return False
+    return not _ACK_REPAIR_REPLY.search(_norm_quotes(text or ""))
+
+
+def _marking_time_on_an_open_ask(sess: "RealtimeSession", text: str) -> bool:
+    """They acknowledged, and the question is still theirs to answer.
+
+    THE TURN-TAKING DEFECT, not a retry defect. On call-20260910-1042 the
+    caller said "Okay." at rec 43.96-44.43 — acknowledging a narration — and
+    the agent's question began at 44.76, 0.33s LATER. They had not heard it
+    when they spoke. OpenAI's server VAD opened a response on that "Okay."
+    anyway (`create_response` is unset in build_audio_config, so it runs on the
+    API default), the model had an unanswered ask in view, and it put the
+    question again 1.00s after the first copy finished playing.
+
+    Nothing re-asked. No threshold was crossed: `_MIN_REASK_GAP_S` is read by
+    one detector and gates nothing, and the ask budget only counts. What was
+    missing is any answer to "does this turn deserve the floor".
+
+    The three conditions are all necessary. Without the open-ask test this
+    would go quiet on an acknowledgement that closes an exchange; without
+    `missing()` it would go quiet on a call with nothing left to ask; and
+    without `_caller_answered_since` it would ignore the 2026-08-24 rule that
+    a bare "Yeah." ANSWERS a closed-set question — which would undo the split
+    that stopped every "Yes." reading as silence.
+    """
+    if sess._last_ask_turn_idx < 0:
+        return False
+    if not _objective_of(sess).missing(sess.memory):
+        return False
+    expects = _pending_expectation(sess, sess._last_ask_turn_idx)
+    if not _only_marked_time(text, sess.agent_name, expects):
+        return False
+    return not _caller_answered_since(sess, sess._last_ask_turn_idx)
+
 
 # _MAX_UNANSWERED_REASKS is GONE, and its disappearance is the shape of the
 # 2026-08-24 budget change rather than a deletion.
@@ -627,6 +712,61 @@ def _volunteered_fields(sess: "RealtimeSession", text: str) -> list:
     return out
 
 
+def _uptake_only(text: str, sess: "RealtimeSession") -> bool:
+    """Strip the bare affirmative — is everything left a question?
+
+    THE DISCRIMINATOR FOR "Yes, before that, can you confirm your full name and
+    your date of birth?". `classify_choice` takes the leading "Yes" and calls
+    it an answer; every word after it is a REQUEST, and the field it was asked
+    about is left exactly as unknown as before the caller spoke.
+
+    `_caller_is_vetting` was the first thing tried here and it is too blunt:
+    it is True for any turn ending in a question, and the corpus's single most
+    common identity confirmation is
+
+        "Yes, this is Dr. Brown's office. How can I help you?"
+
+    — an answer with a courtesy question stapled on. Using it would have
+    discarded ~40 of those. `states_in_its_own_right` does not rescue them
+    either: the identity classifier returns None for "this is Dr. Brown's
+    office" standing alone, so that test is structurally False for EVERY
+    identity confirmation, however explicit.
+
+    ASSERTION IS SENTENCE-LEVEL — the same conclusion _asserted_caller_text
+    reached, for the same reason, one layer down. A turn is uptake only when NO
+    sentence in it asserts anything once the affirmative is gone.
+
+    A HOLD IS SENTENCE-LEVEL FOR THE SAME REASON. "Let me check" asserts, but
+    what it asserts is that the answer is still coming, so it is dropped here
+    with the questions. Testing the whole turn for a hold instead — which is
+    what the first cut did — discarded
+
+        "Yeah, she works out for Northgate Clinic. Let me pull up that file.
+         What is your full name?"
+
+    whole, identity confirmation and all, because a LATER sentence held. Per
+    sentence, the first one survives and the turn is an answer.
+
+    Returns False for a bare "Yeah.": nothing survives the strip, and that case
+    belongs to the 2026-08-24 rule that made a bare affirmative in direct reply
+    an answer. This predicate does not reopen it.
+
+    NEEDS A SESSION `_caller_is_vetting` CAN READ — `sess.doctor`,
+    `sess.org_name` and `sess.agent_name`, via _turn_asserts. That is a
+    stricter requirement than the rest of
+    _field_already_answered, which reads its namespaces through getattr, so a
+    test double handed to that guard must now carry a doctor or the guard
+    raises instead of judging.
+    """
+    from agents.voice.evidence.window import _turn_asserts
+    from agents.voice.objectives import without_bare_affirmative
+    stripped = without_bare_affirmative(text)
+    if not stripped:
+        return False
+    return not any(_turn_asserts(s, sess) and not is_hold_request(s)
+                   for s in _sentences(stripped))
+
+
 def _field_already_answered(sess: "RealtimeSession", field,
                             since_idx: int) -> str:
     """A caller turn since `since_idx` that reads as an answer to `field`.
@@ -746,8 +886,44 @@ def _field_already_answered(sess: "RealtimeSession", field,
         # never-asked path — deliberately STRICTER, in the direction this
         # docstring already argues for: a missed re-ask costs one clumsy turn,
         # a false one puts words in the caller's mouth.
-        if not replying and not states_in_its_own_right(text, got.value,
-                                                        classify):
+        # ── UPTAKE IS NOT AN ANSWER, EVEN WHEN IT IS A DIRECT REPLY ─────
+        # `not replying` was the whole condition, and call-20260910-2032 is
+        # what it misses. The agent asked "are you taking new patients right
+        # now?"; the receptionist replied
+        #
+        #     "Yes, before that, can you confirm your full name and your
+        #      date of birth?"
+        #
+        # — a direct reply, so `replying` was True and the gate below was
+        # skipped. classify_choice took the leading "Yes" and this handed the
+        # counter-request back as the availability answer. Two things then
+        # acted on it: the re-ask nudge told the model `they already answered
+        # it, they said "Yes, before that, can you confirm your full name"`,
+        # and _steer_went_stale withdrew the steer with `still: null`, removing
+        # the only instruction pointing at the field nobody had answered.
+        #
+        # A REPLY THAT IS ONLY UPTAKE ANSWERS NOTHING — see _uptake_only for
+        # why this is asserted per sentence and not `_caller_is_vetting`, which
+        # would have taken ~40 real identity confirmations with it.
+        #
+        # STILL SUBORDINATE TO states_in_its_own_right, so a turn that states
+        # the answer in its own words survives however it is wrapped. The bare
+        # "Yeah." is untouched: nothing survives the affirmative strip, so
+        # _uptake_only is False and the 2026-08-24 rule still owns that case.
+        # A HOLD IS UPTAKE TOO — folded into _uptake_only, per sentence.
+        # Task 1 taught _HOLD_REQUEST the present
+        # continuous and vetoed "Yeah, I'm, I'm checking wait, yeah." at the
+        # SAVE guard — but the save guard is one of three paths that ask
+        # whether the caller answered, and this one had no hold test at all.
+        # Left alone it would tell the model `they already answered it, they
+        # said "Yeah, I'm, I'm checking"` about someone still mid-lookup, which
+        # is how call-20260907-1602 began: a nudge and a guard contradicting
+        # each other, three refused saves, four silent responses.
+        #
+        # Same subordination as above — "Let me check... yes, we are taking
+        # them" states the answer on its own and is kept on content.
+        if ((not replying or _uptake_only(text, sess))
+                and not states_in_its_own_right(text, got.value, classify)):
             # A BARE AFFIRMATIVE THAT IS NOT A REPLY TO OUR ASK. On
             # call-20260907-1602 the agent asked the accepting question, the
             # receptionist asked for a name, the agent GAVE the name, and they
@@ -770,6 +946,87 @@ def _field_already_answered(sess: "RealtimeSession", field,
         replying = False
         return text.strip()
     return ""
+
+def _steer_went_stale(sess: "RealtimeSession") -> tuple:
+    """The standing steer named a field the caller has since answered.
+
+    THE DEFECT THIS EXISTS FOR, traced end to end on call-20260910-1534. At
+    15:34:38 a save injected "what is still missing is which office they're
+    at". At 15:34:40 the agent asked it. At 15:34:50 the caller said "He works
+    at our Northgate location." At 15:34:51 the agent said:
+
+        "Alright, let me think about what to ask next so I can be sure about
+         availability."
+
+    The steer was satisfied and still standing, and its replacement is
+    manufactured by the save INSIDE the response being generated — so at the
+    moment of generation the model held one imperative it must not obey and
+    nothing else. An instruction to act can be performed or reported; when
+    performing is unavailable, reporting is the only move left. Measured over
+    664 non-greeting turns, 21.4% carry some form of that report.
+
+    ASKED OF THE TRANSCRIPT, NOT OF MEMORY. The save that would put this in
+    memory has not run yet — it runs inside the response this is trying to get
+    ahead of. What matters is that the CALLER did their part.
+
+    ANCHORED ON `_field_ask_at`, AND ANSWERED BY `_caller_answered_since`, and
+    the first cut of this used `_field_already_answered` instead and could not
+    see the case it was written for. That predicate reads a field with its OWN
+    vocabulary, keyed on `field.states` — so a CHOICE field is visible to it
+    and a PLACE field, which declares no states, returns "silence, not a
+    guess". The branch is a PLACE field, and the branch is exactly what
+    call-20260910-1534 answered. The pair used here is the ask budget's own,
+    and it is kind-agnostic: it asks whether the caller said anything
+    substantive against the expectation the ask set up, which is True for "He
+    works at our Northgate location." and False for "Okay."
+
+    NOT ASKED YET -> NOT STALE. A steer whose field nobody has put to them is
+    still an instruction the model can obey, and withdrawing it would remove
+    the only thing telling it what the turn is for.
+
+    Returns (field_they_answered, what_is_still_unknown). The second is "" when
+    nothing is left, and the caller site does not speak then: a finished
+    objective belongs to the close, not to a state note.
+    """
+    _name = getattr(sess, "_steer_field", "")
+    if not _name:
+        return None, ""
+    _obj = _objective_of(sess)
+    _fld = next((f for f in _obj.fields if f.name == _name), None)
+    if _fld is None:
+        return None, ""
+    _asked_at = sess._field_ask_at.get(_name)
+    if _asked_at is None:
+        return None, ""
+    # ── FIELD-AWARE FIRST, AND THE BUDGET'S PREDICATE ONLY AS A FALLBACK ────
+    # This used `_caller_answered_since` alone, and on call-20260910-2032 that
+    # cost the field the only instruction pointing at it. That predicate is the
+    # ASK BUDGET's, and the budget's question is "are they still engaging" —
+    # deliberately loose, because a caller who answers with a question is
+    # engaging. Borrowed here it answered a different question, "did they
+    # answer THIS", and a counter-request came back as yes.
+    #
+    # So: where the field declares a vocabulary, ask the field-aware predicate,
+    # which now rejects a vetting turn that states nothing on its own. Where it
+    # does not — a PLACE field declares no states, which is why the first cut
+    # of this reached for the budget at all — keep the budget's predicate but
+    # apply the SAME uptake exclusion, per caller turn. `_caller_vetted_since`
+    # was the obvious reach here and is the wrong tool for the same reason it
+    # is wrong above: "Yes, this is Dr. Brown's office. How can I help you?"
+    # vets, and it is an answer. One turn that asserts something is enough.
+    if _field_vocabulary(_fld) is not None:
+        if not _field_already_answered(sess, _fld, _asked_at):
+            return None, ""
+    elif not _caller_answered_since(sess, _asked_at) or not any(
+            t.role == "caller" and (t.text or "").strip() != "[...]"
+            and not _uptake_only(t.text or "", sess)
+            for t in sess.turns[max(0, _asked_at):]):
+        return None, ""
+    _still = next((f.label for f in _obj.fields
+                   if f.name != _name and f.is_required(_obj, sess.memory)
+                   and not f.present(sess.memory)), "")
+    return _fld, _still
+
 
 def give_up_directive(sess: "RealtimeSession", trigger: str) -> str:
     """The mid-call directive that ends a call the budget has run out on.
@@ -1489,6 +1746,15 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
         # into a call that was closing correctly, which is the same error the
         # sign-off nudge was given these two flags for.
         _padding = sess._padding_owed
+        # READ WITH THE DEBT, NOT AT THE APPEND. Both branches below clear the
+        # debt (and reset this to "announced") BEFORE they file their row, so
+        # reading it at the append recorded "announced" every time -- the
+        # metric tidying away the distinction it exists to keep.
+        # getattr, FOR THE REASON _objective_of GIVES: the watchdog is driven
+        # in the suite with a namespace carrying only the attributes it reads,
+        # and a guard that raises on a test double is a guard that stops being
+        # tested. It raised on the first check of the run.
+        _armed_by = getattr(sess, "_padding_reason", "announced")
         if (_padding and not sess._response_active
                 and not sess._close_after_response
                 and not sess._close_when_answered
@@ -1499,9 +1765,11 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
             # retried on every tick for the rest of the call.
             if sess._padding_nudges >= _MAX_PADDING_NUDGES:
                 sess._padding_owed = ""
+                sess._padding_reason = "announced"
                 sess._padding_directive_sent = False
                 sess.tool_call_padding.append(
                     {"said": _padding[:160], "silent_s": _silent_for,
+                     "armed_by": _armed_by,
                      "outcome": "abandoned"})
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"⚠️  ANNOUNCED QUESTION ABANDONED "
@@ -1530,10 +1798,12 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
             if await _create_response(oai_ws, sess, why="announced ask, none made",
                                       allow_when_vad_pending=True):
                 sess._padding_owed = ""
+                sess._padding_reason = "announced"
                 sess._padding_directive_sent = False
                 sess._padding_nudges += 1
                 sess.tool_call_padding.append(
                     {"said": _padding[:160], "silent_s": _silent_for,
+                     "armed_by": _armed_by,
                      "outcome": "chased"})
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"❓ PROMISED A QUESTION, ASKED NONE ({_silent_for:.1f}s "
@@ -1582,6 +1852,7 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
                                           "text": closing_directive(
                                               _last_agent)}]},
                 }))
+                sess._close_requested = True
                 await _create_response(oai_ws, sess, why="deferred close",
                                        allow_when_done=True,
                                        allow_when_vad_pending=True)
@@ -1670,8 +1941,20 @@ async def _silence_watchdog(oai_ws, sess: "RealtimeSession",
         except Exception:
             return
 
-async def _suppress_reply_to(sess: "RealtimeSession", oai_ws, text: str) -> str:
-    """Stop the agent answering a transcript we have just rejected.
+async def _suppress_reply_to(sess: "RealtimeSession", oai_ws, text: str,
+                             record_to: str = "rejection_cancels") -> str:
+    """Stop the agent answering a turn that should draw no reply.
+
+    `record_to` NAMES THE LIST, and it defaults to the one this was written
+    for. The mechanism — cancel while no audio has gone out, report honestly
+    when it has — turned out to serve two different findings, and they must not
+    be filed together. A REJECTED transcript means the caller was not heard; a
+    bare acknowledgement means they were heard perfectly and said nothing that
+    needed answering, and the turn is kept. Both produce a cancel and both want
+    the same race margin; only one of them is a fault on the line. Putting them
+    in one list would tell whoever reads the artifact that a caller who was
+    heard was not, which is the reporting error `_discarded_location` exists to
+    prevent one layer over.
 
     REJECTING A TRANSCRIPT AND PREVENTING A REPLY TO IT ARE DIFFERENT THINGS,
     and until 2026-08-20 this file only did the first. `create_response` is not
@@ -1696,6 +1979,13 @@ async def _suppress_reply_to(sess: "RealtimeSession", oai_ws, text: str) -> str:
     """
     _since_stop = (time.monotonic() - sess._caller_stopped_at
                    if sess._caller_stopped_at else None)
+    # CAPTURED BEFORE THE BRANCHES, because the cancelling branch clears
+    # _response_active three lines later and would leave every cancelled row —
+    # the only rows anyone wants to join — recording no response at all.
+    # Null when nothing is in flight: there is then no response for this to be
+    # about, and a stale id would read as one.
+    _resp = (sess._response_id[-8:]
+             if sess._response_id and sess._response_active else None)
     if not sess._response_active:
         outcome = "no reply in flight"
     elif sess._response_audio_started:
@@ -1710,7 +2000,13 @@ async def _suppress_reply_to(sess: "RealtimeSession", oai_ws, text: str) -> str:
         # No Twilio `clear` here on purpose: this branch is only reached when
         # nothing from THIS response was ever forwarded, and a clear would
         # flush audio still legitimately playing from the previous one.
-    sess.rejection_cancels.append({
+    getattr(sess, record_to).append({
+        # MILLISECONDS, not the transcript's whole seconds. Three of these can
+        # land inside one second on a fast turn, and "which of them" is the
+        # question the field exists to answer.
+        "t": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+        "turn": len(sess.turns),
+        "response": _resp,
         "text": text[:60],
         "outcome": outcome,
         "since_speech_stopped_s": (round(_since_stop, 3)
@@ -1941,9 +2237,17 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
     _caller_spoke_before = any(
         _t.role == "caller" and _t.text.strip() not in ("", "[...]")
         for _t in sess.turns)
+    # DID THE ALARM ASK FOR SPEECH ON *THIS* TURN. The empty-transcript gate at
+    # the foot of this handler cancels the reply to a turn that carried nothing
+    # — and this branch is the one case where a turn carrying nothing is owed
+    # one anyway, because the directive it sends says "ask them to repeat it".
+    # Cancelling on top of that would send the instruction and then remove the
+    # turn that was supposed to act on it.
+    _asked_to_repeat = False
     if (_low is not None and not text and not sess._low_audio_warned
             and _caller_spoke_before):
         sess._low_audio_warned = True
+        _asked_to_repeat = True
         print(f"[Realtime] Caller audio faint AND nothing "
               f"transcribed (RMS {_low:.4f}) — asking them to "
               f"speak up", flush=True)
@@ -1984,11 +2288,18 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
     # Restate, do NOT re-ask: they did not decline to answer, they
     # never heard the question. Re-asking spends an ask on a turn
     # that was never delivered.
+    # DID IT FIRE FOR *THIS* TURN. `sess._repair_nudged` is a one-shot for the
+    # whole call and cannot answer that, and the acknowledgement gate at the
+    # foot of this handler needs the per-turn answer: "Hello." from someone we
+    # cut off is owed a restatement, and going quiet on it would rebuild the
+    # exact failure the repair branch was written for.
+    _repaired_now = False
     if (text and sess._truncated_at is not None
             and time.time() - sess._truncated_at <= _REPAIR_WINDOW_S
             and sess._truncated_heard_ms < _CUT_SHORT_MS
             and not sess._repair_nudged):
         sess._repair_nudged = True
+        _repaired_now = True
         sess._truncated_at = None
         print(f"[{datetime.now().strftime('%H:%M:%S')}] "
               f"🔁 REPAIR — they were cut off mid-sentence; "
@@ -2006,6 +2317,59 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
                          "not treat this as them declining. Say the "
                          "same thing again, shorter and simpler.)")}]},
         }))
+
+    # ── VAD FIRED AND NOTHING CAME BACK ────────────────────────────────────
+    # call-20260910-1618. Three responses, two caller turns: `reply_latency`
+    # recorded a third reply with `detector=0.412s`, so speech_stopped genuinely
+    # fired, but transcription returned nothing and no caller turn was created.
+    # The response OpenAI's VAD had already opened went ahead regardless, and
+    # the model — handed a turn with no new input — filled it with a reaction to
+    # nothing, a narration, and the question it had asked four seconds earlier:
+    #
+    #   16:18:57  agent   "Which office does Dr. Browne see people at?"
+    #   16:19:01  agent   "Got it, let me just note that and then I'll ask about
+    #                      availability. Which site should I come to for Dr.
+    #                      Browne?"
+    #
+    # The caller heard the same question twice in four seconds and hung up at
+    # 38s. Measured across the corpus: 8 of 89 calls (9%) carry one more
+    # response than they have caller turns, and half of those died inside 46
+    # seconds with nothing collected.
+    #
+    # THE GUARDS ABOVE ALL REQUIRE TEXT. `_audio_was_silent` and
+    # `_reads_as_hint_vocabulary` judge WORDS that arrived on a line that
+    # carried none, and the repair branch judges a turn that was cut off. None
+    # of them can see the case where nothing arrives at all, because every one
+    # of them is behind `if (text and ...)`.
+    #
+    # SAME MECHANISM AS THE ACKNOWLEDGEMENT GATE, one step further out: that
+    # one says a turn carrying only a receipt earns no reply, and this says a
+    # turn carrying nothing earns none either. Cancel before any audio, record
+    # it, and let the silence watchdog own what happens next — the cancelled
+    # response still produces a response.done with no audio, so
+    # `_agent_quiet_since` is set from a playback remainder of zero and the
+    # existing budget takes over on its own clock.
+    if (not text and not sess.done
+            and not _asked_to_repeat
+            and not sess._close_after_response
+            and not sess._close_when_answered
+            and not sess._give_up_sent
+            and not sess._padding_owed
+            # WE CUT OURSELVES OFF AND THEY MADE A SOUND. The repair branch
+            # above cannot speak for this case — it is behind `if (text and
+            # ...)`, so `_repaired_now` is dead on an empty turn and testing it
+            # here would be a conjunct that can never fire. The condition it
+            # was reaching for is the truncation window itself: if we truncated
+            # our own audio a moment ago, the caller heard a fragment, and
+            # going silent on top of that leaves them with half a sentence and
+            # no one talking. Owed a restatement, not more silence.
+            and not (sess._truncated_at is not None
+                     and time.time() - sess._truncated_at <= _REPAIR_WINDOW_S)):
+        _sup = await _suppress_reply_to(sess, oai_ws, "[nothing transcribed]",
+                                        record_to="empty_turn_cancels")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🕳️  VAD FIRED AND "
+              f"NOTHING CAME BACK — no reply to a turn that carried no words "
+              f"({_sup})", flush=True)
 
     if text:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -2196,6 +2560,44 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
         # THEY ANSWERED THE QUESTION THE CLOSE WAS DEFERRED FOR.
         _rearm_close_if_answered(sess, ts)
 
+        # ── THE STANDING STEER HAS BEEN OVERTAKEN ───────────────────────────
+        # STATE, NOT A PLAN, and that is the whole of the design. The steer it
+        # replaces names a move and a moment ("this is the turn it lands in");
+        # this names only what is true and what is not. There is no verb for
+        # the model to lift, no ordering to recite and no condition to evaluate
+        # aloud — the three shapes every traced narration turned out to be.
+        #
+        # IT CANNOT RETRACT THE OLD ONE. An injected conversation item is
+        # permanent, so the only lever is to stop the spent instruction being
+        # the NEWEST thing in context when the next response is generated.
+        # That is why this fires here, on their words, rather than waiting for
+        # the save: the save runs inside the response this is getting ahead of.
+        _spent, _still = _steer_went_stale(sess)
+        if _spent is not None and not sess.done:
+            sess._steer_field = ""
+            sess.stale_steers.append(
+                {"field": _spent.name, "still": _still or None, "at": ts})
+            if _still:
+                print(f"[{ts}] 🧭 THE STEER WAS OVERTAKEN — they answered "
+                      f"{_spent.name!r}; replacing it with what is still "
+                      f"unknown: {_still!r}", flush=True)
+                await oai_ws.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {"type": "message", "role": "user",
+                             # OPENS ON WORDS, NOT ON THE LABEL. The directive
+                             # audit derives its population with
+                             # r'"\(system: ([a-z][a-z ]{9,})' — a directive
+                             # whose first character after the opening marker
+                             # is an interpolation is counted as declared and
+                             # never found, and the check that exists to catch
+                             # a new directive the day it lands reports 41
+                             # against 42 instead. It caught this one.
+                             "content": [{"type": "input_text", "text": (
+                                 f"(system: they have just told you "
+                                 f"{_spent.label} — that is known now. "
+                                 f"Still unknown: {_still}.)")}]},
+                }))
+
         # ── THEY ANSWERED SOMETHING NOBODY ASKED ────────────────────────────
         # A front desk volunteers. "She's at Riverside, and she's not taking
         # new patients right now" answers two fields while we asked about one,
@@ -2282,6 +2684,42 @@ async def _handle_caller_transcript(msg: dict, sess: "RealtimeSession", oai_ws) 
             print("[Realtime]   ^ closing after the reply already in flight",
                   flush=True)
 
+        # -- THEY ONLY ACKNOWLEDGED; THE QUESTION IS STILL THEIRS ------------
+        # LAST IN THIS HANDLER, deliberately. Every flag this reads is written
+        # by a branch above it - a deferred save can arm a close, a refusal
+        # sets _give_up_sent - and a gate that read them before they are set
+        # would cancel the goodbye those branches had just decided to send.
+        # What the position costs is microseconds, against the 1.9s measured on
+        # call-20260910-1042 between the transcript arriving and the first
+        # audio delta of the reply it had already provoked.
+        #
+        # CANCEL, DO NOT REDIRECT, and there is no directive here on purpose.
+        # Silence IS the correct turn: they acknowledged, the question is on
+        # the table, and the next voice should be theirs. Injecting "wait for
+        # them" would be a seventh prompt rule against a class where six have
+        # already measured null.
+        #
+        # NOTHING NEW WAITS ON A CLOCK. The cancelled response still produces a
+        # response.done carrying no audio, so `_agent_quiet_since` is set from
+        # a playback remainder of zero and the silence watchdog takes it from
+        # there on its existing budget - _SILENCE_PROMPT_AFTER of real quiet,
+        # then "put your question again more simply, never the same words".
+        # That was already the policy for a caller who says nothing; this is
+        # what makes a caller who says only "Okay." reach it.
+        if (not sess.done
+                and not sess._close_after_response
+                and not sess._close_when_answered
+                and not sess._give_up_sent
+                and not sess._padding_owed
+                and not _repaired_now
+                and time.time() >= sess._hold_until
+                and _marking_time_on_an_open_ask(sess, text)):
+            _sup = await _suppress_reply_to(sess, oai_ws, text,
+                                            record_to="acks_left_alone")
+            print(f"[{ts}] 🤫 THEY ONLY ACKNOWLEDGED - leaving them the "
+                  f"floor rather than putting the question again: "
+                  f"{text[:40]!r} ({_sup})", flush=True)
+
 
 async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                                    _agent_text_buf: str,
@@ -2295,6 +2733,59 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
     write into a 1,200-line function was not visible to anything, including the
     type checker.
     """
+    # ── WHAT THE MODEL ACTUALLY PRODUCED, BEFORE THIS FUNCTION TOUCHES IT ──
+    # OBSERVABILITY ONLY. Nothing here changes a verdict; it records the one
+    # thing the artifact could never show. Asked to prove that narration was
+    # not INTRODUCED by response post-processing, the honest answer was an
+    # inference — 87.6% of narrated turns are single-item and no code rewrites
+    # text — because the raw per-item output was never kept. Three of the four
+    # branches below end without the item ever reaching `sess.turns`, so a turn
+    # the caller heard and a turn nobody heard are indistinguishable afterwards.
+    #
+    # AT INGRESS, and that placement is the point: every branch below is
+    # reachable from here, so no path can drop an item without it having been
+    # written down first. The verdict is stamped where each path decides.
+    _raw_item = msg.get("item_id") or ""
+    _raw_text = (msg.get("transcript") or _agent_text_buf).strip()
+    _was_muted = bool(_raw_item and _raw_item in sess._muted_items)
+    _raw_row = None
+    if _raw_text:
+        # THE FOUR FIELDS THAT MAKE A ROW ADDRESSABLE. Without them a row says
+        # what the model produced and nothing about when, in reply to what, or
+        # as part of which response — so an item that was cancelled could not
+        # be shown to BE the response a given caller turn provoked, which is
+        # the one thing the PII question turns on.
+        #
+        #   t        wall clock to the millisecond, joining to the cancel rows
+        #   turn     len(sess.turns) at ingress, so sess.turns[turn - 1] is the
+        #            caller turn this response was generated for
+        #   response the response this item belongs to; `response_id` off the
+        #            event is authoritative for THIS item, and the session's
+        #            in-flight value is the fallback for transports that omit it
+        #   idx      output_index — which item of the response this is, the
+        #            fact the whole second-item muting path turns on
+        _raw_row = {"t": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                    "turn": len(sess.turns),
+                    "response": ((msg.get("response_id")
+                                  or sess._response_id or "")[-8:] or None),
+                    "item": _raw_item[-8:] or "?",
+                    "idx": msg.get("output_index"),
+                    "text": _raw_text[:200],
+                    #   narration  MEASUREMENT ONLY. Nothing branches on this.
+                    #            `_narrated_the_reply` keeps driving the
+                    #            directive and `reply_narration`; this records
+                    #            what the guard's narrow pattern cannot see —
+                    #            it read 0 of 126 offline generations and 6 of
+                    #            13 known live narrated turns. A metric that
+                    #            misses half the population is why the
+                    #            narration question needed three experiments
+                    #            to ask. Recorded per item and BEFORE any
+                    #            verdict, so a narrated item that was later
+                    #            cancelled still counts as model output.
+                    "narration": workflow_narration(_raw_text) or None,
+                    "verdict": "spoken"}
+        sess.raw_items.append(_raw_row)
+
     if _barge_in_pending or sess._suppressed_response:
         # This transcript was cancelled — never fully heard, skip it.
         # _suppressed_response is the same situation reached from the
@@ -2302,6 +2793,8 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         # this response was rejected. No audio was sent either way, so
         # letting it become a turn would put words in the transcript the
         # caller never heard and hand them to the guards as evidence.
+        if _raw_row is not None:
+            _raw_row["verdict"] = "cancelled"
         _barge_in_pending = False
         sess._suppressed_response = False
         _agent_text_buf = ""
@@ -2394,13 +2887,60 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
             # on substance in general — the bad-news reaction and its question
             # answer a caller turn that is a STATEMENT, and a broader test
             # would suppress exactly that.
-            _newest_caller = next((t.text for t in reversed(sess.turns)
-                                   if t.role == "caller"), "")
+            # ── THE LAST THING THEY SAID THAT CHANGED THE SUBJECT ────────
+            # THIS WAS `next(... if t.role == "caller")` — the newest caller
+            # turn, whatever it was — and on call-20260910-1726 that cost the
+            # EHR guard its disclaimer. The caller asked "can I know what's
+            # your full name and your date of birth?", the model correctly
+            # produced "I'm not a patient here yet, just looking, and my name
+            # is Devon Keswick." as its second item, and 0.8s later the caller
+            # added a trailing "Yeah." The held item is judged at TRANSCRIPT
+            # time, not at generation time, so by then "Yeah." was the newest
+            # caller turn; it carries no request, the item was dropped, and
+            # "October 6, 1974." then went out with no not-a-patient line in
+            # front of it. `bare_pii_details` recorded exactly that. The
+            # disclaimer was finally spoken ten seconds AFTER the date of
+            # birth — the order the EHR rule exists to forbid.
+            #
+            # RECENCY IN A CONVERSATION IS NOT "THE LAST THING SAID". It is
+            # the last thing said that CHANGED THE SUBJECT, and an
+            # acknowledgement is definitionally the absence of one. So the walk
+            # steps over acknowledgement-only turns to the substantive one
+            # behind them. `_only_acknowledged` is already that predicate and
+            # already returns True for "Yeah.", "Okay.", "Right.", "Sure." and
+            # — usefully — for the "[...]" placeholder, which is an utterance
+            # we have detected and cannot yet read. Treating "we do not know
+            # what they said" as "they are not asking" was a third way to lose
+            # the disclaimer.
+            #
+            # THE AGENT-TURN BOUND IS THE OTHER HALF, and without it this
+            # over-corrects into the opposite defect. Once WE have spoken, the
+            # exchange those words belonged to is over: a request answered two
+            # turns ago must not keep a disclaimer alive into a new one, or the
+            # caller hears it twice. So the walk skips only the agent items of
+            # THIS response — the run at the end of the list — and stops at the
+            # first agent turn it meets after crossing into caller territory.
+            # This mirrors the `_heard` walk twelve lines above, whose own
+            # comment says it is "scoped to the current exchange and needs no
+            # new state to clear". That was true there and stays true here: no
+            # session state is added.
+            _asking = ""
+            _left_agent_run = False
+            for _t in reversed(sess.turns):
+                if _t.role == "agent":
+                    if _left_agent_run:
+                        break          # a previous exchange, not this one
+                    continue           # this response's own item(s)
+                _left_agent_run = True
+                if _only_acknowledged(_t.text or ""):
+                    continue           # a continuation, not a subject change
+                _asking = _t.text or ""
+                break
             if _held and not sess.done and _stale_own_detail(_dropped,
-                                                             _newest_caller):
+                                                             _asking):
                 _verdict = "stale_detail"
                 sess.stale_detail_items.append(
-                    {"text": _dropped, "after": (_newest_caller or "")[:80]})
+                    {"text": _dropped, "after": (_asking or "")[:80]})
                 print(f"[Realtime]   ^ 🔒 a detail nobody is asking for — held "
                       f"back; it answers a request they have moved on from",
                       flush=True)
@@ -2410,6 +2950,8 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                 sess._muted_items.discard(_item)
                 sess._release_item = _item
                 sess.released_second_items.append({"text": _dropped})
+                if _raw_row is not None:
+                    _raw_row["verdict"] = "held:released"
                 print(f"[Realtime]   ^ ✅ that is new substance, not a repeat "
                       f"— releasing the audio we held, so they DO hear it",
                       flush=True)
@@ -2446,6 +2988,8 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                 # the sentence they did hear.
                 sess.dropped_second_items.append(
                     {"text": _dropped, "verdict": _verdict})
+                if _raw_row is not None:
+                    _raw_row["verdict"] = "held:" + _verdict
         if _item in sess._muted_items:
             sess._held_item_pcm.pop(_item, None)
             return "", _barge_in_pending
@@ -2676,12 +3220,15 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         # THE FIVE PHRASES; the model then said those exact phrases in 67 of
         # 470 turns, which is what a ban written as a phrase library buys. The
         # quotes are gone from templates.py and this is what replaces them.
-        if _housekeeping_turn(text) and not sess.done:
+        if (_housekeeping_turn(text, asks=_is_objective_ask(text, sess))
+                and not sess.done):
             sess.housekeeping_turns.append(
                 {"said": text.strip()[:160], "at": ts})
             print(f"[{ts}] 🧹 HOUSEKEEPING TURN — thanked them for taking "
                   f"part and asked nothing", flush=True)
+            _hk_nudged = False
             if sess.may_nudge_cadence("housekeeping"):
+                _hk_nudged = True
                 await oai_ws.send(json.dumps({
                     "type": "conversation.item.create",
                     "item": {"type": "message", "role": "user",
@@ -2691,6 +3238,37 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
                                               _objective_of(sess)
                                               .next_spoken(sess.memory))}]},
                 }))
+            # ── AND THE TURN IS STILL OWED A QUESTION ───────────────────────
+            # call-20260910-1618: "Okay, thanks for confirming that." at
+            # 16:18:50, the caller waited, said "Okay." at 16:18:56, and the
+            # office question came at 16:18:57 — a whole exchange spent on a
+            # turn with nothing in it, on a call that died at 38 seconds.
+            #
+            # THE DIRECTIVE ABOVE ALREADY FIXED THE NEXT TURN; what nothing
+            # did was bring the next turn forward. That is exactly what the
+            # padding debt is for — the caller has been given nothing to answer
+            # — so it is armed here rather than a second recovery being
+            # invented. The watchdog chases at _PADDING_SETTLE_S instead of the
+            # caller filling the gap six seconds later.
+            #
+            # _padding_directive_sent IS SET FROM `_hk_nudged`, and that is the
+            # load-bearing line. The chase's own directive opens "you told them
+            # you were about to ask something" — false of a turn that announced
+            # nothing, and a directive with a wrong premise is one this project
+            # has watched get narrated. When the housekeeping directive went
+            # out, this suppresses the chase's; when the cadence budget was
+            # spent and none went, the chase sends its own rather than creating
+            # a response with no steering at all.
+            if (not sess._padding_owed
+                    and _objective_of(sess).missing(sess.memory)
+                    and not sess._close_after_response
+                    and not sess._close_when_answered
+                    and not sess._give_up_sent):
+                sess._padding_owed = text
+                sess._padding_directive_sent = _hk_nudged
+                sess._padding_reason = "housekeeping"
+                print(f"[{ts}] ⏳ NOTHING IN THAT TURN TO ANSWER — chasing "
+                      f"the question rather than waiting for them", flush=True)
 
         # ── NARRATING THE REPLY INSTEAD OF GIVING IT ─────────────────────────
         # "Okay, let me answer that." to a caller who asked for a date of
@@ -2904,7 +3482,13 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         # this were set where the rejection is written, the scan would advance
         # on a request the model ignored and any later "yes" would confirm.
         _ours = _our_surname(sess)
-        if _ours and not sess._name_spelled_at and _spelled_out(text, _ours):
+        # GATED, AND EITHER PROOF COUNTS. Spelling still advances the
+        # barrier; so does a natural confirmation of our surname. Both
+        # now require an ACTIVE mismatch to exist first, so a recited
+        # example line cannot move a safety barrier on a call where
+        # nothing was ever mismatched.
+        if _ours and not sess._name_spelled_at and _performed_name_repair(
+                text, sess):
             sess._name_spelled_at = len(sess.turns)
             print(f"[{ts}] 🔤 SPELLED THE NAME — {_spell_out(_ours)}; what "
                   f"they say next is evidence about our doctor", flush=True)
@@ -2954,6 +3538,7 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
         # is a question about the silence after it, and the watchdog is the
         # only thing that can see silence.
         sess._padding_owed = ""
+        sess._padding_reason = "announced"
         if (not sess.done and _announced_an_ask(text)
                 and not _is_objective_ask(text, sess)):
             # NOT AN ASK BY CONTENT, checked with the same predicate the ask
@@ -3221,6 +3806,9 @@ async def _handle_agent_transcript(msg: dict, sess: "RealtimeSession", oai_ws,
 
 __all__ = [
     "GIVE_UP_REASONS",
+    "_ACK_MARKERS",
+    "_ACK_REPAIRS",
+    "_ACK_REPAIR_REPLY",
     "_ACK_REPLY",
     "_ACK_WORDS",
     "_AFFIRM_REPLY",
@@ -3264,6 +3852,8 @@ __all__ = [
     "_handle_caller_transcript",
     "_hint_proper_nouns",
     "_is_filler_reply",
+    "_marking_time_on_an_open_ask",
+    "_only_marked_time",
     "_is_objective_ask",
     "_is_reintroduction",
     "_norm_clause",

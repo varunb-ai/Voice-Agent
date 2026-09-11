@@ -60,7 +60,16 @@ from core.models import Doctor
 # it would cause are not symmetrical: missing a specialty costs a slightly odd
 # greeting, while stripping a real surname makes the agent ask for the wrong
 # doctor for the whole call. Anything not listed is treated as a name.
-_NAME_SUFFIX = frozenset("""
+# SPLIT IN TWO 2026-09-10, and the split is a collision argument, not tidying.
+# Both halves are stripped from the end of a name; they differ only in how far
+# they may cut, because only one of them can be somebody's surname.
+#
+# SPECIALTY WORDS. No family name collides with one, so these may cut a name
+# down to a single token. That is what `--doctor "Varun urologist"` needs: the
+# surname is derived as the last token, so a live call opened with "any chance
+# this is Dr. urologist's office?" and asked after Dr. urologist for three
+# minutes while the receptionist answered about Dr. Varun.
+_SPECIALTY_SUFFIX = frozenset("""
 pediatric pediatrics paediatric paediatrics cardiology cardiologist
 dermatology dermatologist oncology oncologist neurology neurologist
 orthopedic orthopedics orthopaedic orthopaedics psychiatry psychiatrist
@@ -70,12 +79,30 @@ obgyn pulmonology nephrology anesthesiology anaesthesiology pathology
 surgery surgeon surgical dentistry dentist podiatry podiatrist allergy
 immunology hematology haematology geriatrics neonatology physiatry
 plastic internal medicine family practice primary care clinic centre center
+""".split())
+
+# CREDENTIAL ABBREVIATIONS, WHICH DO COLLIDE. Do, Pa, Od and Ng are real family
+# names, and the callees and doctors on this programme routinely carry them —
+# so "Anh Do" must stay "Anh Do" and never become Dr. Anh, specialty "Do".
+# These keep the two-token floor for that reason alone.
+_CREDENTIAL_SUFFIX = frozenset("""
 md do phd dds dmd facs facp faap mbbs np pa rn dpm od dnp msn
 """.split())
 
-# At least this many tokens must survive, or "Dr. Internal Medicine" — a name
-# that is nothing BUT suffix words — would strip to nothing and the call would
-# ask for a doctor with no name at all.
+_NAME_SUFFIX = _SPECIALTY_SUFFIX | _CREDENTIAL_SUFFIX
+
+# How many tokens must SURVIVE the strip.
+#
+# ONE for a specialty word, and the old value of two was the bug. The floor
+# exists so that "Dr. Internal Medicine" — a name that is nothing BUT suffix
+# words — does not strip to nothing and leave the call asking for a doctor with
+# no name; one surviving token serves that in full. Two also ate the shortest
+# real case there is, "<name> <specialty>", which is exactly how the flag gets
+# typed when someone forgets --specialty.
+#
+# TWO for a credential, because of the collision above: a two-token name whose
+# last word is "Do" is far more likely to be a person than a qualification.
+_MIN_NAME_TOKENS_SPECIALTY = 1
 _MIN_NAME_TOKENS = 2
 
 
@@ -101,9 +128,16 @@ def split_doctor_specialty(name: str) -> tuple[str, str]:
     """
     tokens = (name or "").split()
     taken: list[str] = []
-    while len(tokens) > _MIN_NAME_TOKENS:
+    while tokens:
         bare = re.sub(r"[^a-z]", "", tokens[-1].lower())
         if bare not in _NAME_SUFFIX:
+            break
+        # THE FLOOR BELONGS TO THE TOKEN, not to the loop. A specialty word may
+        # cut to a single-token name; a credential may not, because it could be
+        # the name. See _SPECIALTY_SUFFIX / _CREDENTIAL_SUFFIX.
+        _floor = (_MIN_NAME_TOKENS_SPECIALTY if bare in _SPECIALTY_SUFFIX
+                  else _MIN_NAME_TOKENS)
+        if len(tokens) <= _floor:
             break
         taken.insert(0, tokens.pop())
     # THE SEPARATOR THE SUFFIX LEFT BEHIND. "Ana Reyes, M.D." splits to
@@ -275,9 +309,8 @@ _FORAGE_INSTRUCTIONS = """\
 - EVERY SENTENCE MUST BE IN THE CONVERSATION, NEVER ABOUT IT. The test: delete
   the sentence — if the caller loses no information, it should not be said.
   A sentence that narrates what you are doing, how you are speaking, or how you
-  intend to reply is a sentence about the conversation: "let me think", "one
-  second", "let me check". The ways to make that move are endless, so judge by
-  the test and not by the wording. A HESITATION IS NOT A SENTENCE and the test
+  intend to reply is a sentence about the conversation. The ways to make that
+  move are endless, so judge by the test and not by the wording. A HESITATION IS NOT A SENTENCE and the test
   does not reach one; your tone above sets how much you hesitate.
 - DO NOT PILE UP MOVES. One move is a turn, and two can be. Three or more
   separate moves in a turn is a speech. When several things seem to need
@@ -300,12 +333,11 @@ _FORAGE_INSTRUCTIONS = """\
   exception is while they are away looking something up: a word or two, then
   silence. Never narrate your waiting, listening or thinking.
 - AN ACKNOWLEDGEMENT IS NEVER OWED. Most turns do not need one — start on the
-  thing you are saying. Use one when what they said genuinely landed as news,
-  and NEVER twice running: a reaction in front of every question is a form
-  being worked through, however good each turn is on its own.
-  BUT WHEN YOU USE ONE AND A QUESTION IS OWED, THEY ARE ONE TURN — the reaction
-  hands straight over to the ask in the same breath. Reacting and then stopping
-  for them to prompt you is the workflow cadence with an extra turn in it.
+  thing you are saying. NEVER twice running: a receipt in front of every
+  question is a form being worked through, however good each turn is on its own.
+  A RECEIPT IS NOT A REACTION, and only the receipt is the tic. A receipt is
+  about the fact that they told you; a reaction is about what they told you and
+  what it costs or gains you. Ordinary information earns neither.
 - THE ASK STAYS A REQUEST. You are asking a favour of someone at work, so put
   the question rather than issue it: never "I need X" or "I require X", which
   is how a form talks, and a softener in front of an order is still an order.
@@ -384,13 +416,13 @@ wrong — you may have picked the wrong words out of what they told you.
 - They gave you NOTHING -> stay neutral: thank them for their time and no
   more. Thanking them for checking or for their help describes something that
   did not happen.
-- NEVER NARRATE WHAT BECOMES OF IT. "I'll note that", "that's all set",
-  "I'll wrap up" all claim an outcome you cannot know yet —
-  the tool has not answered. Thank them for what they SAID and stop there.
-- NEVER ANNOUNCE A NEXT STEP YOU ARE NOT ABOUT TO TAKE. "Let me just check one
-  more thing" — if you say it, the next thing you say must BE it. Said while
-  closing, they hear a call cut off mid-sentence. Nothing left to ask ->
-  announce nothing, just thank them.
+- NEVER NARRATE WHAT BECOMES OF IT. Any claim about the outcome is a claim
+  about a tool that has not answered yet. Thank them for what they SAID and
+  stop there.
+- NEVER ANNOUNCE A NEXT STEP YOU ARE NOT ABOUT TO TAKE. If you say one is
+  coming, the next thing you say must BE it. Said while closing, they hear a
+  call cut off mid-sentence. Nothing left to ask -> announce nothing, just
+  thank them.
 - They are trying to get off the phone -> shorter still. "Okay, thanks for
   the help." Do not thank someone who is leaving.
 - ONE short sentence. Never stack thanks + confirmation + well-wishing.
@@ -1142,10 +1174,8 @@ _THE_DOCTOR_IDENTITY = """\
   they offer — say plainly it is Dr. <the name in CALL CONTEXT> you are asking
   about. A record filed against the wrong doctor is worse than no record.
   When they name a different doctor, the repair is ONE short natural line —
-  the way a person double-checks a name they might have misheard:
-      "Sorry — just to make sure I heard you right. Dr. <surname>,
-       <S-P-E-L-L-E-D>? Is that who you mean?"
-  Name, spelling, question. Nothing else: no "thanks for hanging on", no
+  the way a person double-checks a name they might have misheard. Nothing
+  else: no "thanks for hanging on", no
   explanation of why you are checking, no recap of the call so far. This is
   the one place "sorry" is doing honest work — you may have misheard them."""
 
@@ -1675,9 +1705,9 @@ _TONE_PATIENT = """\
   Good news lands as mild relief, bad news as mild disappointment, a vague
   answer as slight uncertainty, being asked to wait as patience. On bad news,
   say what it costs you before you ask anything else — one sentence on what
-  their news leaves you without, never a receipt for it and
-  never a report on your own mood, and never put in the language of
-  registering, signing up or getting on a system. Ordinary courtesy
+  their news leaves you without, or on what you had been hoping for. Never a
+  receipt for it, never anything about your health, and never put in the
+  language of registering, signing up or getting on a system. Ordinary courtesy
   throughout; customer-service brightness never.
 - Gratitude is quiet, not cheerful. NEVER say "sorry" unless you genuinely
   misheard them. And never perk up mid-call.
@@ -1746,7 +1776,8 @@ first, then apply the other rule. Never defer either to a later turn."""
 
 
 _GOAL_PATIENT_DISCOVERY = """\
-Success = these, about the one doctor in CALL CONTEXT, in this order:
+What you do not know yet about the one doctor in CALL CONTEXT, and the order
+you need to learn it in:
   1. that this practice is actually where that doctor is
                                                      -> save_doctor_identity
   and ONLY IF that comes back confirmed:
@@ -1767,7 +1798,7 @@ Dr. <surname>'s office?", "have I reached Dr. <surname>?", "does Dr. <surname>
 work there?" Never ask if she is "based" anywhere — vary everything but this.
 Coming away with nothing is acceptable; coming away with something you were
 not told is not.
-THIS LIST IS THE ORDER YOU WORK IN, NOT A QUEUE TO DRAIN. Something you still
+THESE ARE THE THINGS YOU DO NOT KNOW, NOT A QUEUE TO DRAIN. Something you still
 need is NEVER a reason to add a question to a turn that was about something
 else — but the follow-up their OWN answer calls for is not a second topic, and
 it belongs in the turn that reacts to it."""

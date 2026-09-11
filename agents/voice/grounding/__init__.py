@@ -53,6 +53,7 @@ from agents.voice.grounding.vocabulary import (
     _leaked_the_instructions,
     _stapled_own_detail,
     _narrated_the_reply,
+    workflow_narration,
     _gave_name_and_dob,
     _gave_own_detail,
     _stale_own_detail,
@@ -80,8 +81,11 @@ from agents.voice.grounding.telemetry import (
     _objective_of,
 )
 from agents.voice.grounding.teardown import (
+    _ANSWER_THEM,
     _create_response,
+    _invites_our_business,
     _resolve_deferred_save,
+    _their_open_question,
 )
 from agents.voice.grounding.dispatcher import (
     _ToolOutcome,
@@ -89,6 +93,7 @@ from agents.voice.grounding.dispatcher import (
 )
 
 __all__ = [
+    "_ANSWER_THEM",
     "_CALLER_WILL_ACT",
     "_CALL_SHAPE_EXITS",
     "_CHOICE_SAVE_TOOLS",
@@ -117,15 +122,18 @@ __all__ = [
     "_leaked_the_instructions",
     "_stapled_own_detail",
     "_narrated_the_reply",
+    "workflow_narration",
     "_gave_name_and_dob",
     "_gave_own_detail",
     "_stale_own_detail",
     "_said_not_a_patient",
     "_announced_an_ask",
     "_spoken_farewell",
+    "_their_open_question",
     "cadence_directive",
     "closing_directive",
     "_create_response",
+    "_invites_our_business",
     "_discarded_location",
     "_handle_tool_call",
     "_hint_vocabulary",

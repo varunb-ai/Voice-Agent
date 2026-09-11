@@ -409,6 +409,22 @@ _BARE_AFFIRM_TAIL = re.compile(
     r"\s*[.!?,;:-]*\s*$", re.I)
 
 
+def without_bare_affirmative(text: str) -> str:
+    """The turn with a leading and/or trailing bare "yes" taken off.
+
+    BOTH ENDS. See _BARE_AFFIRM_TAIL: a turn can lean on a bare affirmative at
+    either one, and call-20260907-1546 leaned on two.
+
+    Public because it is the shared definition of "what did they say BESIDES
+    agreeing", and turns._uptake_only needs the same one. Two modules reaching
+    into _BARE_AFFIRM_LEAD/_TAIL separately is two answers to that question the
+    first time either regex is edited — which is what the undeclared-private
+    check in the suite exists to stop.
+    """
+    t = norm_quotes(text or "").strip()
+    return _BARE_AFFIRM_TAIL.sub("", _BARE_AFFIRM_LEAD.sub("", t).strip()).strip()
+
+
 def states_in_its_own_right(text: str, state_value: str,
                             classifier=None) -> bool:
     """Does this turn assert the state WITHOUT leaning on a leading "yes"?
@@ -423,11 +439,7 @@ def states_in_its_own_right(text: str, state_value: str,
     answer — full, list, number 21 — contains none of "accepting", "taking
     new", "new patients", and was refused twice for it.
     """
-    t = norm_quotes(text or "").strip()
-    stripped = _BARE_AFFIRM_LEAD.sub("", t).strip()
-    # BOTH ENDS. See _BARE_AFFIRM_TAIL: a turn can lean on a bare
-    # affirmative at either one, and call-20260907-1546 leaned on two.
-    stripped = _BARE_AFFIRM_TAIL.sub("", stripped).strip()
+    stripped = without_bare_affirmative(text)
     if not stripped:
         return False
     # THE FIELD'S OWN VOCABULARY. Defaulting to classify_choice and leaving it

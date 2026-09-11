@@ -362,14 +362,15 @@ async def _ambience_pump(twilio_ws, sess: "RealtimeSession", done_event) -> None
           f"{mixer.ducker.ambient_db:.0f} dBFS, ducking to "
           f"{mixer.ducker.duck_db:.0f} dBFS", flush=True)
     next_at = time.monotonic()
-    _resyncs = 0
     try:
         while not done_event.is_set():
             now = time.monotonic()
             if now - next_at > _PUMP_RESYNC_S:
-                _resyncs += 1
+                _behind = now - next_at
+                mixer.resyncs += 1
+                mixer.resync_worst_s = max(mixer.resync_worst_s, _behind)
                 log.warning("[Ambience] pump %.2fs behind - resyncing (%d)",
-                            now - next_at, _resyncs)
+                            _behind, mixer.resyncs)
                 next_at = now
             while next_at <= now + _PUMP_LEAD_S:
                 frame = mixer.next_frame()
@@ -392,7 +393,10 @@ async def _ambience_pump(twilio_ws, sess: "RealtimeSession", done_event) -> None
     finally:
         print(f"[Realtime] ambience pump down - {mixer.frames_sent} frames "
               f"({mixer.frames_sent * _amb.FRAME_S:.1f}s), "
-              f"{mixer.voice_frames} carrying voice", flush=True)
+              f"{mixer.voice_frames} carrying voice"
+              + (f", {mixer.resyncs} resync(s), worst "
+                 f"{mixer.resync_worst_s:.2f}s behind" if mixer.resyncs
+                 else ""), flush=True)
 
 
 async def _send_breath(twilio_ws, sess: "RealtimeSession", seconds: float) -> None:

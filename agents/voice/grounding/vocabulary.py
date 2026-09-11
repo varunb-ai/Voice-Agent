@@ -200,7 +200,9 @@ def closing_directive(last_agent: str = "", *,
     # you said and then I'll wrap up." followed by "Alright, take care." The
     # caller had just told them the doctor IS taking new patients -- the whole
     # reason for the call -- and the agent narrated its own bookkeeping at it.
-    # The default below asks only for a goodbye, so a goodbye is all it got.
+    # The default below asked only for a goodbye, so a goodbye is all it
+    # got; it now asks for a close in the caller's register instead, and
+    # this branch still owns the reaction.
     #
     # POSITIVE ONLY, AND NO WORDING. It names what to react TO, never how; the
     # corpus records the model reproducing quoted phrases from directives 67
@@ -214,7 +216,26 @@ def closing_directive(last_agent: str = "", *,
                  " short sentences. Claim no appointment, visit or next step"
                  " they did not offer.")
     else:
-        _base = "(say a brief warm goodbye now, then stop. ONE short sentence."
+        # THE REGISTER, NOT THE TRIGGER. This asked for "a brief warm
+        # goodbye", and a goodbye is the move of whoever is releasing
+        # the other person -- so the model filled it from the desk's
+        # vocabulary and signed off at the receptionist: "take care",
+        # "have a good day". The patient is the one being released.
+        #
+        # SO IT NAMES THE ROLE, WHICH IS THE ACTUAL DISCRIMINATOR, and
+        # not a list of sign-offs to avoid. The corpus measures banned
+        # words and banned sentences at 0 said and quoted openers at
+        # 166, so a category stated in prose is the safe form and a
+        # phrase library is not.
+        #
+        # AND IT DOES NOT ORDER THANKS, deliberately: the clause below
+        # tells a turn that has already thanked them not to again, and
+        # a base demanding thanks would contradict it on exactly the
+        # calls it fires for. Naming the role leaves both composable.
+        _base = ("(they have ended the conversation — close it in your"
+                 " own words as the one who was helped, then stop. ONE"
+                 " short sentence. Seeing them off and wishing them well"
+                 " is the office's part, not yours.")
     if _ALREADY_THANKED.search(_norm_quotes(last_agent or "")):
         _base += (" You have ALREADY thanked them in the turn you just spoke"
                   " — do not thank them again.")
@@ -383,28 +404,47 @@ _TAKING_PART = re.compile(
     r"(?:confirm|check|wait|hang|hold|bear|explain|look|clarif|shar)", re.I)
 
 
-def _housekeeping_turn(text: str) -> bool:
+def _housekeeping_turn(text: str, asks: bool = False) -> bool:
     """A turn spent thanking them for participating, with nothing in it.
 
-    THE QUESTION MARK IS THE WHOLE DISCRIMINATOR, and it is the prompt's own
-    rule rather than a new one: the ban is on the STANDING form — a thanks that
-    IS the turn, or that fronts an announcement — while the same words with the
-    question folded into the same breath are exactly what the prompt asks for.
-    So "Thanks for checking — is there a waiting list?" is fine and
-    "Thanks for confirming that." is a turn the receptionist waited through for
-    nothing.
+    The ban is on the STANDING form — a thanks that IS the turn, or that fronts
+    an announcement — while the same words with the question folded into the
+    same breath are exactly what the prompt asks for. So "Thanks for checking —
+    is there a waiting list?" is fine and "Thanks for confirming that." is a
+    turn the receptionist waited through for nothing.
+
+    THE QUESTION MARK WAS THE WHOLE DISCRIMINATOR AND IT IS NOT ENOUGH, which
+    is this repo's most repeated defect rather than a new one: `_ANNOUNCED_ASK`
+    lost matches to a `if "?" in t: return False` guard clause, and the ack
+    cadence is ack-then-field-question so `"?"` would gut it there too. A
+    request does not need one. Measured over the corpus, 7 of 66 flagged turns
+    were asking in statement form and were told they had asked nothing:
+
+        "Thanks for checking - I'm just wondering if there's a waiting list,
+         and how I'd get on it."
+        "Got it, thanks for confirming - I'm just trying to find out if he's
+         taking new patients right now."
+        "Thanks for confirming - I just want to make sure I've got the right
+         place for Dr. Abel, the pediatrician."
+
+    Every one is the join the prompt asks for, and the directive this fires
+    tells the model it spent the turn on nothing. Teaching it to distrust its
+    own good turns is worse than missing a flag.
+
+    `asks` IS PASSED IN, NOT COMPUTED. Whether a turn asks for an objective
+    field is `_is_objective_ask`, which lives in turns.py — and turns imports
+    grounding, never the other way round. Same injection as `promise_veto` one
+    module over, and the same reason. Default False, so every caller that has
+    no opinion gets exactly the old behaviour.
 
     A FAREWELL IS EXEMPT. Thanking them for explaining the wait list on the way
     out is not housekeeping, it is the close, and flagging it would fire this on
     the happy path — which is how a metric stops being read.
-
-    Measured on the corpus: 45 turns, every one of them content-free or a
-    thanks fronting an announcement, and none of the allowed joins.
     """
     t = _norm_quotes(text or "").strip()
     if not _TAKING_PART.search(t):
         return False
-    if "?" in t:
+    if "?" in t or asks:
         return False
     return not _spoken_farewell(t)
 
@@ -455,11 +495,22 @@ _ONLY_ACK_LEFTOVER = re.compile(
 
 
 def _only_acknowledged(text: str) -> bool:
-    """Was this agent turn purely an acknowledgement, answering nothing?
+    """Was this turn purely an acknowledgement, answering nothing?
+
+    TWO CALLERS NOW, AND THE SUBJECT IS NOT ALWAYS OURS. This was written for
+    AGENT turns and its question was "may this turn be taken as our reply to
+    something they asked?" The stale-detail walk asks the mirror image of the
+    same thing about a CALLER turn — "does this turn change the subject, or is
+    it a continuation of the one before it?" — and the answer is the same
+    predicate: a turn that strips to nothing did neither. The logic is
+    text-only and role-free, so nothing here needed to change; the wording did,
+    because a docstring that says "agent turn" while the function is applied to
+    caller turns is a stale claim of exactly the kind this file is careful
+    about elsewhere.
 
     NOT A JUDGEMENT OF THE TURN — _housekeeping_turn already counts it as a
-    fault. This answers the narrower question the close walk needs: may this
-    turn be taken as our reply to something they asked? A bare thanks may not.
+    fault. For the close walk the narrower question is: may this turn be taken
+    as our reply to something they asked? A bare thanks may not.
 
     A QUESTION IS NEVER THIS, and the guard is load-bearing rather than tidy:
     "Okay?", "Sure?", "Right?" and "Okay, thanks?" all strip to nothing, so
@@ -569,6 +620,106 @@ def _narrated_the_reply(text: str) -> bool:
     if not _NARRATED_REPLY.search(t):
         return False
     return not _spoken_farewell(t)
+
+
+# ── Workflow narration, for MEASUREMENT ONLY ─────────────────────────────────
+#
+# WHY THIS IS NOT `_narrated_the_reply`, AND MUST NOT BE FOLDED INTO IT.
+# That predicate has a second job: turns.py fires `cadence_directive(
+# "reply_narration")` on it. Widening it to measure better would inject an
+# anti-narration directive on turns that do not get one today — a behaviour
+# change wearing a metric's clothes. So the guard keeps its narrow predicate
+# and the measurement gets its own. Nothing branches on this one.
+#
+# WHAT IT MEASURES, precisely: announcing a conversational or bookkeeping act
+# instead of performing it. "Let me just check one more thing." is the defect;
+# "Are you taking new patients?" is the act itself.
+#
+# HOW IT WAS BUILT. Derived from 126 offline generations and the live corpus,
+# then frozen and validated in BOTH directions against labelled text before
+# being used for anything — see _check_workflow_narration in the suite. Every
+# pattern below was observed in real output; none were added speculatively to
+# raise the count, and the run that produced them is recorded as not having
+# established anything about the architecture.
+#
+# THE CLOSE IS EXEMPT, for the reason `_narrated_the_reply` and
+# `_housekeeping_turn` already give: this script's goodbye is "let me sort out
+# my schedule and call back", and a detector that fires on the close fires on
+# every good call. "then I'll let you go" is a courtesy close, not a workflow
+# announcement, and counting it moved a measured comparison by 2.4 points in
+# the wrong direction.
+# TWO FAMILIES, AND THE SECOND WAS MISSING. The first is bookkeeping and
+# next-step announcement (check, note, ask...). The second is the REPLY
+# PROMISE -- "let me answer that for you now" -- which is the class
+# `_narrated_the_reply` was written for, and leaving it out meant the metric
+# missed three live turns THE GUARD ALREADY CATCHES. A measurement that is not
+# a superset of the guard is not a better measurement; the suite now pins the
+# superset property over the whole corpus so this cannot regress quietly.
+#
+# `give you` AND `share` ARE DELIBERATELY ABSENT, though the guard has the
+# first. "Let me give you my date of birth" is the persona PERFORMING, not
+# narrating, and this script hands over details constantly. Counting it would
+# be the aggressive classification this metric is explicitly not for.
+_NARR_ACT = (r"(?:think|check|sort|note|record|confirm|figure|work|clarify|"
+             r"ask|see|make sure|find out|follow|pin down|file|log|"
+             r"follow up|run through|go through|"
+             r"answer|respond|reply|explain|address|listen)")
+
+_WORKFLOW_NARRATION = [
+    ("let_me_act",   rf"\blet me\s+(?:just\s+)?(?:take a\s+)?{_NARR_ACT}\b"),
+    ("im_acting",    rf"\bi'm\s+(?:just\s+)?{_NARR_ACT}ing\b"),
+    ("need_moment",  r"\b(?:i\s+(?:just\s+)?need\s+a\s+(?:moment|second|minute)"
+                     r"|give me a (?:moment|second)"
+                     r"|a (?:moment|second) (?:to|while) i)\b"),
+    # `just` SITS BEFORE THE VERB PHRASE, not after it. This read
+    # "i'm going to" then an optional "just", and the live construction
+    # is "I'm JUST going to note that you confirmed..." -- so the one
+    # utterance this pattern was written from did not match it. Both
+    # positions are accepted now.
+    ("announce_act", rf"\b(?:i'll|i will|i'm (?:just )?going to"
+                     rf"|i'm (?:just )?gonna)\s+"
+                     rf"(?:just\s+)?{_NARR_ACT}\b"),
+    ("one_more",     r"\bone\s+(?:more|other|quick|last)\s+thing\b"),
+    ("transition",   r"\b(?:based on that|move on to|the next thing|"
+                     r"next thing to ask|before anything else)\b"),
+    ("then_ill",     r"\bthen i'll\b"),
+    ("before_i",     r"\bbefore i\s+(?:ask|go|move|do)\b"),
+]
+
+# Turns that share the surface form and are not the defect.
+#
+# ONE ENTRY, AND THE OTHER FIVE WERE DELETED RATHER THAN LEFT LOOKING USEFUL.
+# This started as six, carried over from the scratch predicate the experiment
+# used: "i'll hang on", "i'll wait", "take your time", the greeting, and
+# "i'll leave it there". Dropped one at a time against the labelled clean set,
+# FIVE OF THE SIX CHANGED NO VERDICT -- they were written against a wider act
+# list (it had `look` and `hang` in it) and cannot fire against this one. The
+# suite pins the survivor's effect, so a later widening of _NARR_ACT that makes
+# one of them matter again will show up as a false positive rather than be
+# silently absorbed by a clause nobody checked.
+_NARRATION_EXEMPT = [
+    # THE CLOSE. Same exemption, same reason, as _narrated_the_reply's
+    # farewell clause: a detector that fires on the goodbye fires on every
+    # good call. Measured, not assumed -- counting "then I'll let you go" as
+    # workflow narration moved a comparison 2.4 points the wrong way.
+    r"\blet you go\b|\blet you get on\b|\blet you be\b",
+]
+
+_WORKFLOW_NARRATION_RX = [(n, re.compile(p, re.I)) for n, p in _WORKFLOW_NARRATION]
+_NARRATION_EXEMPT_RX = [re.compile(p, re.I) for p in _NARRATION_EXEMPT]
+
+
+def workflow_narration(text: str) -> list:
+    """Which narration patterns this turn triggers. [] means clean.
+
+    MEASUREMENT ONLY. No caller branches on the result; it is recorded on the
+    raw item and read back from the artifact. Returns the pattern names rather
+    than a bool so a census can say WHICH shape, not just how many.
+    """
+    t = _norm_quotes(text or "").lower().strip()
+    if any(rx.search(t) for rx in _NARRATION_EXEMPT_RX):
+        return []
+    return [n for n, rx in _WORKFLOW_NARRATION_RX if rx.search(t)]
 
 
 # ── The instructions arriving in the audio ───────────────────────────────────
@@ -1206,10 +1357,36 @@ def _agent_stalled(text: str) -> bool:
 # something, not about to go and look — and reading it as a hold would buy 45
 # seconds of dead air on a turn that wants an answer, which is the regression
 # _CALLER_WILL_ACT was written to prevent in the first place.
+# THE PRESENT CONTINUOUS WAS MISSING, AND IT IS HOW PEOPLE NARRATE WHAT THEY
+# ARE DOING RIGHT NOW. Every branch below covers an intention — "let me check",
+# "I'll check", "I'm going to check" — or a preamble — "hold on", "one moment".
+# None covered the plain statement of the act in progress. On
+# call-20260910-2032 the receptionist said
+#
+#     "Yeah, I'm, I'm checking wait, yeah."
+#
+# which is a hold by any reading, and this returned False. `classify_choice`
+# then took the leading "Yeah" and the runtime recorded
+# accepting_new_patients="yes" against a real practice, logged
+# call_outcome="accepting", and hung up on someone who was mid-lookup. A wrong
+# row in a directory is the one failure nobody downstream can spot.
+#
+# Note the asymmetry it leaves behind if only the preamble is covered:
+# "Hold on, I'm checking." matched (on "hold on") while "I'm checking." did
+# not — the guard saw the throat-clearing and missed the sentence.
+#
+# FIVE VERBS, NOT THE NINE ABOVE. `see` is excluded because this domain says
+# "she sees patients at Northgate" constantly and a first-person progressive is
+# one transcription slip away from it; `ask` because "I'm asking you" is the
+# opposite of a hold; `find` and `grab` because the progressive forms are not
+# things people say. Measured: 2 turns in 1,122 distinct caller turns carry any
+# progressive form, and both are genuine holds.
 _HOLD_REQUEST = re.compile(
     r"\b(?:(?:let me|lemme|i'?ll|i will|i need to|i have to|i'?m going to|"
     r"gonna)\s+"
     r"(?:just\s+)?(?:check|look|see|find|ask|grab|pull|confirm|verify|give)"
+    r"|(?:i'?m|i am|we'?re|we are)\s+(?:just\s+)?"
+    r"(?:check|look|pull|confirm|verify)ing"
     r"|while\s+(?:i|we)\s+"
     r"(?:just\s+)?(?:check|look|see|find|ask|grab|pull|confirm|verify)"
     r"|(?:give|gimme)\s+(?:me\s+)?(?:just\s+)?(?:a|one)?\s*"
@@ -1535,6 +1712,7 @@ __all__ = [
     "_leaked_the_instructions",
     "_stapled_own_detail",
     "_narrated_the_reply",
+    "workflow_narration",
     "_gave_name_and_dob",
     "_gave_own_detail",
     "_stale_own_detail",

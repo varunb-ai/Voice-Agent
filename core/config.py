@@ -445,16 +445,38 @@ class Settings(BaseSettings):
     # It is a live control, not an inert one. Below about -70 there is
     # genuinely nothing left to send.
     #
-    # -54 RATHER THAN -58, and the reason is the requirement rather than the
-    # codec: the bed has to read as one continuous room, and a 13 dB duck is
-    # deep enough that the room audibly closes when the agent starts talking.
-    # 9 dB is ordinary broadcast practice and still leaves the voice 28.6 dB
-    # dominant — measured — which is emphatically "very low, does not compete".
-    # STILL A STARTING POINT: none of these five numbers has been on a live
-    # call. If a receptionist reports hearing the bed at all under speech,
-    # this is the number to move, and down.
+    # -50 RATHER THAN -54, AND THE PREDICTION HERE WAS BACKWARDS. This used to
+    # read "if a receptionist reports hearing the bed at all under speech, this
+    # is the number to move, and down". The live report was the opposite: under
+    # speech the room felt as though it had gone away. The table above is why
+    # the fault is not the codec — the bed survives mu-law essentially intact
+    # at every setting, -54 landing at -53.0 dBFS on the wire — so what is left
+    # is masking, and masking is a RATIO.
+    #
+    # MEASURED AGAINST REAL AGENT SPEECH, differencing the mixed output against
+    # the same voice with a zero bed: at -54 the bed sits 29-31 dB below the
+    # voice RMS (the 28.6 dB this comment used to quote, confirmed). A bed
+    # under dialogue is conventionally 15-25 dB down; at ~30 dB it is audible
+    # in the gaps and gone under speech, which is the reported symptom exactly.
+    #
+    # -50 puts it 25-27 dB down. That is a 4 dB lift, above the ~3 dB just-
+    # noticeable step for level, and it keeps a 5 dB duck so the room still
+    # settles when the agent starts — this is not ducking removed. -49 was the
+    # other candidate and was declined: a 4 dB duck starts to read as none.
     realtime_ambience_db: float = -45.0
-    realtime_ambience_duck_db: float = -54.0
+    realtime_ambience_duck_db: float = -50.0
+    # ── Slow room drift, in dB PEAK. 0.0 = off, and off is the default ───────
+    # The bed is a 30s loop of the calmest window of the calmest of eight
+    # candidate recordings -- make_room_tone.py picks it with `_calmest_window`,
+    # "the steadiest samples by per-second level range". Measured on the shipped
+    # asset that leaves 0.10 dB of level range at a 5s window and 0.03 dB at
+    # 10s: inaudible, and heard as a loop rather than a room. 78% of its
+    # envelope energy sits at 0.2-1s (texture), 1% at 10-30s, none slower.
+    #
+    # This adds the missing slow layer as a dB OFFSET on the ducker's output,
+    # so resting and ducked move together and the duck DEPTH is unchanged by
+    # construction. Independent of the voice envelope, so it cannot pump.
+    realtime_ambience_drift_db: float = 0.0
 
     # THE TRANSITION IS THE PART WORTH TUNING, per the note above: the levels
     # are pinned by the codec, the shape is not. Time to cover 90% of the gap,

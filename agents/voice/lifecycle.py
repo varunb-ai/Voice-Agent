@@ -41,8 +41,11 @@ from agents.voice.audio import (
     _wire_bytes_per_ms,
 )
 from agents.voice.grounding import (
+    _ANSWER_THEM,
     _create_response,
+    _invites_our_business,
     _spoken_farewell,
+    _their_open_question,
     closing_directive,
 )
 
@@ -429,9 +432,55 @@ async def _handle_response_done(
     # been bitten by twice. The flag survives to the next
     # response.done, which is the correct place to try again.
     if sess._close_after_response and not sess.done:
+        # ── C3: THEY ASKED US SOMETHING AND WE HAVE NOT ANSWERED IT ─────────
+        # The objective being complete says WE have what we came for. It says
+        # nothing about whether the exchange is finished, and on
+        # call-20260910-2155 the difference was the whole defect: the caller
+        # asked "Can I add you in the queue?" at 21:58:42, the waitlist save
+        # completed the objective, and this branch asked for a goodbye 3
+        # seconds later with the offer unanswered.
+        #
+        # THE CHECK ALREADY EXISTED ONE LAYER OVER and simply never ran here.
+        # _decide_close makes exactly this test at the tool call and defers with
+        # `_close_deferred = "theirs"`; that path did not fire on -2155 because
+        # _their_open_question could not see a question with a trailing "Yeah."
+        # (C1). C1 fixes that case at source — this is the backstop for the
+        # window C1 cannot cover: a question that arrives AFTER the save and
+        # before this response.done, which _decide_close has already been past.
+        #
+        # NO SECOND QUESTION SYSTEM AND NO SECOND DIRECTIVE. It hands off to
+        # the deferral the tool path uses — _close_when_answered, which
+        # _rearm_close_if_answered turns back into a close when they speak, and
+        # which the watchdog closes anyway after _DEFERRED_CLOSE_WAIT_S if no
+        # reply comes. So a caller who goes silent still gets a goodbye and the
+        # line still ends; the only thing that changes is the ORDER.
+        #
+        # _invites_our_business IS KEPT, for the reason it exists: "What can I
+        # help you with?" is answered BY our next ask, not stopped for.
+        _owed_them = _their_open_question(sess)
+        if _owed_them and _invites_our_business(_owed_them):
+            _owed_them = ""
         if sess._response_active:
             print("[Realtime] 🏁 close deferred — a response is "
                   "already in flight", flush=True)
+        elif _owed_them and not sess._close_when_answered:
+            # NOT sess.done, and _close_after_response is cleared so this
+            # branch cannot re-enter on the answer's own response.done.
+            sess._close_after_response = False
+            sess._close_when_answered = True
+            sess._close_deferred_reason = "theirs"
+            sess._agent_quiet_since = None
+            print(f"[Realtime] 🏁 objective complete — NOT closing: they "
+                  f"asked us something and we have not answered it: "
+                  f"{_owed_them[-70:]!r}", flush=True)
+            await oai_ws.send(json.dumps({
+                "type": "conversation.item.create",
+                "item": {"type": "message", "role": "user",
+                         "content": [{"type": "input_text",
+                                      "text": _ANSWER_THEM}]},
+            }))
+            await _create_response(oai_ws, sess, why="answer before closing",
+                                   allow_when_vad_pending=True)
         else:
             sess._close_after_response = False
             sess.done = True
@@ -485,6 +534,7 @@ async def _handle_response_done(
                         }],
                     },
                 }))
+                sess._close_requested = True
                 await _create_response(oai_ws, sess,
                                        why="closing goodbye",
                                        allow_when_done=True)

@@ -413,7 +413,8 @@ def _ungrounded_terms(args: dict, sess: "RealtimeSession") -> str:
 def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
                        arg: str, probe, classifier, states,
                        label: str, since_at_least: int = 0,
-                       floor_reason: str = "") -> str:
+                       floor_reason: str = "",
+                       promise_veto=None) -> str:
     """Grounding for a closed-set field. Empty string means it checks out.
 
     PARAMETRISED OVER THE VOCABULARY, not copied per field. `probe` is the
@@ -454,6 +455,16 @@ def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
     silent audio. When there was no ask to anchor to, the turn must additionally
     be ABOUT new patients — see the check below, which is where reason 1 would
     otherwise creep back in.
+
+    `promise_veto` IS INJECTED, NOT IMPORTED, and the import direction is why.
+    The judgement it makes — is this caller going away to look it up — lives in
+    grounding/vocabulary as `is_hold_request`, and grounding imports evidence,
+    never the other way round. Reaching for it here would invert the chain in
+    `turns.py`'s docstring. It is also the right shape independently: this
+    function is already parametrised over `probe`, `classifier` and `states`
+    rather than knowing any field, and a field's answer to "which state can a
+    promise not supply" belongs beside them. None means no veto, which is what
+    every caller but the new-patient status passes.
     """
     status = str(args.get(arg) or "").strip().lower()
     if status not in states:
@@ -724,6 +735,34 @@ def _ungrounded_choice(args: dict, sess: "RealtimeSession", *,
     for t in asserted:
         heard_state = classifier(t.text)
         if heard_state is None or heard_state.value != status:
+            continue
+        # ── A PROMISE TO FIND OUT IS NOT AN ANSWER ──────────────────────────
+        # call-20260910-1042. The agent asked whether they were taking new
+        # patients; the caller said "Yeah, give me a minute. Let me check
+        # that." — and `let me check` is a literal alternative in the UNSURE
+        # branch of _CHOICE_PATTERNS, so that turn classified as "I don't
+        # know". The status saved, `accepting_new_patients` went collected,
+        # the objective read COMPLETE and the call said goodbye 4.2 seconds
+        # after the caller stopped speaking, while they were away looking it
+        # up. Two costs, and the row is the worse one: `unsure` about a real
+        # practice, from a receptionist who was in the act of finding out.
+        #
+        # THE PATTERN IS NOT THE PLACE TO FIX IT, and this is the trap.
+        # Deleting `let me check` from that alternation makes the guard WEAKER:
+        # the same sentence then falls through to the YES branch on its leading
+        # "Yeah" and records the practice as ACCEPTING new patients. A soft
+        # wrong answer becomes a hard one. The alternation also carries the
+        # identity classifier's deliberate shield — "offering to go and look is
+        # NOT a denial" — which must not move.
+        #
+        # So the state is left classifying as it does and the EVIDENCE is
+        # tested instead: strip the promise and see whether the turn still says
+        # the same thing. Measured over 211 artifacts, 43 distinct caller turns
+        # classify UNSURE and 21 of them fail that test; every one of the 21 is
+        # a hold request, and not one is a caller saying they do not know.
+        # "I don't know, let me check." survives — the promise is stripped and
+        # "I don't know" is still there.
+        if promise_veto is not None and promise_veto(t.text, status):
             continue
         # NEVER ASKED -> THE TURN MUST BE ABOUT NEW PATIENTS.
         #

@@ -32,7 +32,7 @@ fresh clone runs a materially different agent: template 1, ambience off, VAD at
 | `REALTIME_VAD_EAGERNESS` | `medium` | *(absent)* | |
 | `REALTIME_BACKCHANNELS` | `true` | *(absent)* | clips under the caller's speech; the audio layer owns listening noises, not the LLM |
 | `REALTIME_AMBIENCE` | `true` | `false` | on since 2026-09-04 |
-| `REALTIME_AMBIENCE_DB` / `_DUCK_DB` | `-45` / `-54` | same | the duck target IS a live control |
+| `REALTIME_AMBIENCE_DB` / `_DUCK_DB` | `-45` / `-50` | same | the duck target IS a live control; -54 read as the room going away |
 | `REALTIME_NOISE_REDUCTION` | `near_field` | *(absent)* | |
 | `REALTIME_ECHO_GATE` | `pass` | *(absent)* | |
 

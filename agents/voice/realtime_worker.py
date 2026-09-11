@@ -148,10 +148,15 @@ from agents.voice.grounding import (
 # rw.<name>. See agents/voice/turns.py for what the closure covers.
 from agents.voice.turns import (
     _ACK_WORDS as _ACK_WORDS,
+    _ACK_MARKERS as _ACK_MARKERS,
+    _ACK_REPAIRS as _ACK_REPAIRS,
+    _ACK_REPAIR_REPLY as _ACK_REPAIR_REPLY,
     _ACK_REPLY as _ACK_REPLY,
     _AFFIRM_REPLY as _AFFIRM_REPLY,
     _HAS_AFFIRM as _HAS_AFFIRM,
     _is_filler_reply as _is_filler_reply,
+    _only_marked_time as _only_marked_time,
+    _marking_time_on_an_open_ask as _marking_time_on_an_open_ask,
     _pending_expectation as _pending_expectation,
     _caller_answered_since as _caller_answered_since,
     _MAX_VETTING_REASKS as _MAX_VETTING_REASKS,
@@ -552,12 +557,81 @@ def build_audio_config(*, transcribe_model: str, transcribe_hint: str,
 # its vocabulary is a fact about the field, and stating it once here is what
 # stops a caller passing ACCEPTING_ASK while classifying with the referral
 # vocabulary and getting a guard that can never fire.
+# THE ONE STATE A PROMISE CANNOT SUPPLY. "unsure" and "let me check" mean
+# opposite things about whether an answer is coming — the first says the road
+# ends here, the second says it does not — and they are the only pair in this
+# vocabulary a caller can express with the same words. Named here rather than
+# in the guard because it is a fact about THIS field: the identity classifier
+# maps the same phrasing to UNSURE on purpose, as a shield against reading a
+# helpful "I can check" as the practice denying the doctor, and that shield is
+# untouched.
+_PROMISED_NOT_ANSWERED = "unsure"
+
+
+def _promise_not_an_answer(text: str, status: str) -> bool:
+    """Is the claimed status supported by nothing but the offer to go and look?
+
+    STRIP AND RE-CLASSIFY, rather than refusing every hold turn outright. A
+    receptionist routinely answers and then goes to check in one breath — "Yes,
+    we do have a waitlist. Give me a minute on that." — and two such saves in
+    this corpus are correct. Removing the promise and asking the classifier
+    again is what separates them: theirs still reads WAITLIST with the promise
+    gone, and "Yeah, give me a minute. Let me check that." has nothing left.
+
+    TWO TESTS, AND ONLY ONE OF THEM IS SCOPED TO A STATE.
+
+    THE OPENER TEST (any state). call-20260910-1534: the agent asked "are you
+    taking new patients right now?" and the receptionist said
+
+        "Yeah, okay. I will check it and let confirm you."
+
+    which means they have NOT answered. It classified YES on its leading
+    particle, saved, completed the objective and said goodbye while they were
+    on their way to look it up. The first cut of this function was scoped to
+    `unsure` and returned False on sight; and scope was not the only reason it
+    missed. Strip-and-reclassify cannot catch it either — take "I will check"
+    out and "Yeah, okay. ... it and let confirm you." still reads YES, because
+    the affirmative is not in the clause that was removed.
+
+    `states_in_its_own_right` is the test that does catch it, and it already
+    existed: strip the leading affirmative and see whether what remains still
+    says the same thing. Here it does not. _ungrounded_choice applies it only
+    on the never-asked path, deliberately — after an ask, a bare "Yes." IS the
+    normal shape of a real answer and must not be second-guessed. A promise to
+    go and look is the one case where that reasoning does not hold: the yes is
+    uptake of the question, not an answer to it.
+
+    SO IT IS GATED ON is_hold_request, NOT ON THE STATE, and that gate is what
+    protects the 2026-08-24 rule. "Yes." is not a hold request, so it never
+    reaches this test; only a turn that has already said it is going away to
+    find out has to prove it also answered.
+
+    THE PROMISE TEST (unsure only). "Yeah, give me a minute. Let me check that."
+    passes the opener test — strip the "Yeah" and "let me check" still reads
+    UNSURE — so the original Pass B test is still needed under it, and it stays
+    scoped: `let me check` is a literal alternative in the UNSURE branch of
+    _CHOICE_PATTERNS and in no other, so no other state can be manufactured by
+    the promise wording alone.
+    """
+    from agents.voice.objectives import (classify_choice, norm_quotes,
+                                         states_in_its_own_right)
+    if not is_hold_request(text):
+        return False
+    if not states_in_its_own_right(text, status, classify_choice):
+        return True
+    if status != _PROMISED_NOT_ANSWERED:
+        return False
+    _left = classify_choice(_HOLD_REQUEST.sub(" ", norm_quotes(text or "")))
+    return _left is None or _left.value != status
+
+
 def _ungrounded_status(args: dict, sess: "RealtimeSession") -> str:
     """Grounding for the new-patient status."""
     from agents.voice.objectives import CHOICE_STATES, classify_choice
     return _ungrounded_choice(args, sess, arg="status", probe=ACCEPTING_ASK,
                               classifier=classify_choice, states=CHOICE_STATES,
-                              label="status")
+                              label="status",
+                              promise_veto=_promise_not_an_answer)
 
 def _ungrounded_identity(args: dict, sess: "RealtimeSession") -> str:
     """Grounding for whether we reached the right doctor. Its own vocabulary.
@@ -1583,6 +1657,9 @@ async def _oai_to_twilio(
                     sess._stage["t1"] = time.monotonic()
                 sess._response_audio_started = False
                 sess._response_created_at = time.monotonic()
+                # Observability only — nothing reads this to decide anything.
+                sess._response_id = ((msg.get("response") or {}).get("id")
+                                     or "")
 
             # ── Audio → Twilio ─────────────────────────────────────────────
             # gpt-realtime-2 uses response.output_audio.delta (not response.audio.delta)
@@ -1956,6 +2033,10 @@ __all__ = [    "ACCEPTING_ASK",
     "_is_ask_for",
     "_is_bare_hint_word",
     "_is_filler_reply",
+    "_marking_time_on_an_open_ask",
+    "_promise_not_an_answer",
+    "_PROMISED_NOT_ANSWERED",
+    "_only_marked_time",
     "_is_hint_echo",
     "_is_location_ask",
     "_is_objective_ask",

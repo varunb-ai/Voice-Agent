@@ -120,6 +120,25 @@ _ENV_DECAY_S = 0.020
 # inside a task with a 20 ms deadline.
 _DETECT_BLOCK = 16
 
+# Drift periods, seconds. CHOSEN BY MEASUREMENT, not by eye: three sines always
+# recur somewhere, so the criterion is that the strongest recurrence a listener
+# can actually experience is weak. Autocorrelation of the summed envelope over
+# lags of 3-180s (a call runs 60-180s):
+#
+#     (11, 17, 29)        r = 0.839 at  32.9s   <- realigns inside every call
+#     (13, 19.7, 31.3)    r = 0.845 at 156.5s
+#     (9.7, 16.3, 27.1)   r = 0.785 at 164.2s
+#     (11, 18.5, 30.7)    r = 0.740 at  55.6s   <- chosen
+#
+# 11 and 17 nearly realign at 33s, which is why the obvious triple is the worst
+# of the set. All periods are an order of magnitude slower than turn-taking
+# (turns run 1-6s, the attack is 75ms), which is what keeps drift from ever
+# reading as a response to speech.
+_DRIFT_PERIODS_S = (11.0, 18.5, 30.7)
+# Offset phases so t=0 is not a common zero crossing, where all three slopes
+# would add and produce the fastest moment of the whole cycle on frame one.
+_DRIFT_PHASES = (0.0, 1.7, 3.4)
+
 
 def _db_to_lin(db: float) -> float:
     return float(10.0 ** (db / 20.0))
@@ -228,9 +247,26 @@ class Ducker:
 
     def __init__(self, *, ambient_db: float, duck_db: float,
                  attack_ms: float, release_ms: float, hold_ms: float,
-                 sr: int = _SR) -> None:
+                 sr: int = _SR, drift_db: float = 0.0) -> None:
         self.ambient_db = float(ambient_db)
         self.duck_db = float(duck_db)
+        # ── SLOW ROOM DRIFT ──────────────────────────────────────────────
+        # Added to the ramp's OUTPUT, never to its state: `_ramp` keeps
+        # writing the un-drifted dB into `self._db`, so attack, release and
+        # hold travel between exactly the same two targets at exactly the
+        # same rate, and `ambient_db - duck_db` is still the duck depth at
+        # every instant. Turning drift on cannot move an endpoint relative
+        # to the other endpoint.
+        #
+        # THREE SINES, NOT ONE AND NOT NOISE. One period is tremolo. Noise
+        # needs clamping and can park at an extreme. Three incommensurate
+        # periods are bounded by construction (the sum of the amplitudes),
+        # have no single audible period, and are DETERMINISTIC -- which is
+        # the property that makes the offline assertions possible at all.
+        # Periods are slower than any conversational event (turns run 1-6s,
+        # the attack is 75ms), so drift cannot correlate with speech.
+        self.drift_db = float(drift_db)
+        self._drift_t = 0
         self._sr = sr
         # 90% of the gap in the configured time: 1 - e^-2.303 = 0.9.
         self._atk = self._coef(attack_ms, 2.302585)
@@ -295,7 +331,22 @@ class Ducker:
             coef = self._atk if target < self._db else self._rel
             out_db[at:at + blk.size] = self._ramp(target, coef, blk.size)
             at += _DETECT_BLOCK
+        # THE CLOCK ADVANCES WHETHER OR NOT DRIFT IS ON, so enabling it does
+        # not start from a phase the rest of the call never saw.
+        idx = self._drift_t + np.arange(n, dtype=np.float64)
+        self._drift_t += n
+        if self.drift_db:
+            out_db = out_db + self._drift(idx)
         return (10.0 ** (out_db / 20.0)).astype(np.float32)
+
+    def _drift(self, idx: np.ndarray) -> np.ndarray:
+        """Slow dB offset. |drift| <= drift_db by construction."""
+        t = idx / self._sr
+        a = self.drift_db / len(_DRIFT_PERIODS_S)
+        out = np.zeros_like(t)
+        for period, phase in zip(_DRIFT_PERIODS_S, _DRIFT_PHASES):
+            out += np.sin(2.0 * np.pi * t / period + phase)
+        return (a * out).astype(np.float32)
 
     def _ramp(self, target: float, coef: float, n: int) -> np.ndarray:
         """Closed form of the one-pole over a constant-target run.
@@ -331,6 +382,15 @@ class AmbienceMixer:
         self._head = 0
         self.frames_sent = 0
         self.voice_frames = 0
+        # HOW OFTEN THE PUMP GAVE UP ON CATCHING UP, and the worst backlog it
+        # saw. A resync abandons the missed frames, so it is the ONE mechanism
+        # in this module that can put a real hole in the bed — and it lived in
+        # a local, logged once and then discarded. A dropout reported later had
+        # no trace to check, which is what made the whole question expensive.
+        # Counted here rather than on the session because it is a fact about
+        # this mixer's output, like the two above it.
+        self.resyncs = 0
+        self.resync_worst_s = 0.0
         # Every frame this emitted, in order and contiguous — the tape of what
         # the receptionist was actually played, bed included. save() uses it so
         # the recording cannot become a document of a different mix.
@@ -423,6 +483,7 @@ def build(settings_obj) -> Optional[AmbienceMixer]:
         attack_ms=getattr(settings_obj, "realtime_ambience_attack_ms", 75),
         release_ms=getattr(settings_obj, "realtime_ambience_release_ms", 300),
         hold_ms=getattr(settings_obj, "realtime_ambience_hold_ms", 300),
+        drift_db=getattr(settings_obj, "realtime_ambience_drift_db", 0.0),
     )
     log.info("[Ambience] on — %.1fs of tone, %.0f dB resting, %.0f dB ducked",
              tone.size / _SR, duck.ambient_db, duck.duck_db)
